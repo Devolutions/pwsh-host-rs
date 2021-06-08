@@ -1,0 +1,19 @@
+[package]
+name = "pwsh-host"
+version = "0.1.0"
+edition = "2018"
+license = "MIT/Apache-2.0"
+homepage = "https://github.com/awakecoding/pwsh-host-rs"
+repository = "https://github.com/awakecoding/pwsh-host-rs"
+authors = ["Marc-André Moreau <marcandre.moreau@gmail.com>"]
+keywords = ["dotnet", "pwsh", "host", "powershell"]
+description = "Rust PowerShell Hosting Library"
+
+[dependencies]
+cfg-if = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+widestring = "0.3"
+
+[build-dependencies]
+cmake = "0.1"
