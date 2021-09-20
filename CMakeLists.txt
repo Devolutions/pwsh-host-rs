@@ -8,7 +8,11 @@ set(CMAKE_CXX_STANDARD 11)
 include(cmake/yarc.cmake)
 
 find_program(DOTNET_EXECUTABLE dotnet REQUIRED)
-find_program(PWSH_EXECUTABLE pwsh REQUIRED)
+if (WIN32)
+    find_program(PWSH_EXECUTABLE pwsh REQUIRED)
+elseif(UNIX)
+    find_program(PWSH_EXECUTABLE pwsh-preview REQUIRED)
+endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/lib)
@@ -37,33 +41,7 @@ set(DOTNET_ARGS "build"
 	"-c"
 	"Release")
 
-if (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "AMD64")
-	# cmake reports AMD64 on Windows, but we might be building for 32-bit.
-	if (CMAKE_CL_64)
-		set(ARCH "x64")
-	else()
-		set(ARCH "x86")
-	endif()
-elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "x86")
-	set(ARCH "x86")
-elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "i386")
-	set(ARCH "x86")
-elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "i686")
-	set(ARCH "x86")
-elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "arm")
-	set(ARCH "arm")
-else()
-	message(FATAL_ERROR "Unknown processor:" ${CMAKE_SYSTEM_PROCESSOR})
-endif()
-
-if (${ARCH} STREQUAL "x86" AND APPLE)
-	# With CMake 2.8.x, ${CMAKE_SYSTEM_PROCESSOR} evalutes to i386 on OS X,
-	# but clang defaults to 64-bit builds on OS X unless otherwise told.
-	# Set ARCH to x86_64 so clang and CMake agree. This is fixed in CMake 3.
-	set(ARCH "x64")
-endif()
-
-set(BINDINGS_DLL "${CMAKE_SOURCE_DIR}/bindings/bin/${ARCH}/Release/net5.0/Bindings.dll")
+set(BINDINGS_DLL "${CMAKE_SOURCE_DIR}/bindings/bin/Release/net5.0/Bindings.dll")
 
 add_custom_command(COMMAND ${DOTNET_EXECUTABLE}
 	ARGS ${DOTNET_ARGS}

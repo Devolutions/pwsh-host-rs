@@ -37,7 +37,13 @@ fn main() {
 
     println!(
         "cargo:rustc-link-search=native={}",
-        cmake_output.join("build\\lib").display()
+        cmake_output
+            .join(if cfg!(target_os = "windows") {
+                "build\\lib"
+            } else {
+                "build/lib"
+            })
+            .display()
     );
     println!("cargo:rustc-link-lib=static=resources");
     println!("cargo:rerun-if-changed=build.rs");

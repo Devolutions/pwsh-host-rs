@@ -8,14 +8,14 @@ use std::ffi::CString;
 pub type PowerShellHandle = *mut libc::c_void;
 
 #[allow(dead_code)]
-pub type FnPowerShellCreate = unsafe extern "C" fn() -> PowerShellHandle;
+pub type FnPowerShellCreate = unsafe extern "system" fn() -> PowerShellHandle;
 
 #[allow(dead_code)]
 pub type FnPowerShellAddScript =
-    unsafe extern "C" fn(handle: PowerShellHandle, script: *const libc::c_char);
+    unsafe extern "system" fn(handle: PowerShellHandle, script: *const libc::c_char);
 
 #[allow(dead_code)]
-pub type FnPowerShellInvoke = unsafe extern "C" fn(handle: PowerShellHandle);
+pub type FnPowerShellInvoke = unsafe extern "system" fn(handle: PowerShellHandle);
 
 #[allow(dead_code)]
 pub struct IPowerShell {

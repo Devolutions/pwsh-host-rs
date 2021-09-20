@@ -10,6 +10,7 @@ use std::ffi::OsStr;
 #[allow(non_camel_case_types)]
 pub type char_t = u16;
 /// The char type used in nethost and hostfxr. Either u8 on unix systems or u16 on windows.
+#[allow(non_camel_case_types)]
 #[cfg(not(windows))]
 pub type char_t = i8;
 
@@ -82,7 +83,7 @@ impl HostfxrLib {
     }
 }
 
-pub type LoadAssemblyAndGetFunctionPointerFn = unsafe extern "C" fn(
+pub type LoadAssemblyAndGetFunctionPointerFn = unsafe extern "system" fn(
     assembly_path: *const char_t,
     type_name: *const char_t,
     method_name: *const char_t,
@@ -91,7 +92,7 @@ pub type LoadAssemblyAndGetFunctionPointerFn = unsafe extern "C" fn(
     delegate: *mut libc::c_void,
 ) -> i32;
 
-pub type GetFunctionPointerFn = unsafe extern "C" fn(
+pub type GetFunctionPointerFn = unsafe extern "system" fn(
     type_name: *const char_t,
     method_name: *const char_t,
     delegate_type_name: *const char_t,
@@ -107,6 +108,7 @@ pub struct Hostfxr {
 impl Hostfxr {
     #[allow(dead_code)]
     pub fn load_from_path(path: impl AsRef<OsStr>) -> Result<Self, Box<dyn std::error::Error>> {
+       println!("Expected path - {:?}", path.as_ref());
         Ok(Self {
             lib: HostfxrLib::load_lib(path)?,
         })
@@ -233,5 +235,11 @@ impl Hostfxr {
 #[allow(dead_code)]
 pub fn load_hostfxr() -> Result<Hostfxr, Box<dyn std::error::Error>> {
     let pwsh_path = pwsh_host_detect(env::var_os("PATH"))?;
-    Hostfxr::load_from_path(pwsh_path.join("hostfxr.dll"))
+    Hostfxr::load_from_path(pwsh_path.join(if cfg!(target_os = "windows") {
+        "hostfxr.dll"
+    } else if cfg!(target_os = "linux") {
+        "libhostfxr.so"
+    } else {
+        "libhostfxr.dylib"
+    }))
 }
