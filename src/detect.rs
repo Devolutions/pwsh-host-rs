@@ -7,6 +7,10 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     fn host_detect_success() {
+        assert_eq!(
+            pwsh_host_detect(Some(OsString::from("C:\\Program Files\\PowerShell\\7"))),
+            Err(EnvError::Missing)
+        );
         assert!(pwsh_host_detect(Some(OsString::from(
             "C:\\Program Files\\PowerShell\\7-preview"
         )))
@@ -35,15 +39,14 @@ mod tests {
         assert!(
             pwsh_host_detect(Some(OsString::from("C:\\Program Files\\PowerShell\\7.9"))).is_ok()
         );
+        assert!(pwsh_host_detect(Some(OsString::from("C:\\Program Files\\PowerShell\\8"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("C:\\Program Files\\PowerShell\\8.1"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("C:\\Program Files\\PowerShell\\8.2"))).is_ok());
     }
 
     #[test]
     #[cfg(target_os = "windows")]
     fn host_detect_missing() {
-        assert_eq!(
-            pwsh_host_detect(Some(OsString::from("C:\\Program Files\\PowerShell\\7"))),
-            Err(EnvError::Missing)
-        );
         assert_eq!(
             pwsh_host_detect(Some(OsString::from("C:\\Program Files\\PowerShell\\7.0"))),
             Err(EnvError::Missing)
@@ -76,6 +79,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn host_detect_success() {
         assert!(
+            pwsh_host_detect(Some(OsString::from("/opt/microsoft/powershell/7"))).is_ok()
+        );
+        assert!(
             pwsh_host_detect(Some(OsString::from("/opt/microsoft/powershell/7-preview"))).is_ok()
         );
         assert!(pwsh_host_detect(Some(OsString::from("/opt/microsoft/powershell/7.2"))).is_ok());
@@ -86,6 +92,9 @@ mod tests {
         assert!(pwsh_host_detect(Some(OsString::from("/opt/microsoft/powershell/7.7"))).is_ok());
         assert!(pwsh_host_detect(Some(OsString::from("/opt/microsoft/powershell/7.8"))).is_ok());
         assert!(pwsh_host_detect(Some(OsString::from("/opt/microsoft/powershell/7.9"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("/opt/microsoft/powershell/8"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("/opt/microsoft/powershell/8.1"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("/opt/microsoft/powershell/8.2"))).is_ok());
     }
 
     #[test]
@@ -104,10 +113,6 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn host_detect_missing() {
-        assert_eq!(
-            pwsh_host_detect(Some(OsString::from("/opt/microsoft/powershell/7"))),
-            Err(EnvError::Missing)
-        );
         assert_eq!(
             pwsh_host_detect(Some(OsString::from("/opt/microsoft/powershell/7.0"))),
             Err(EnvError::Missing)
@@ -141,19 +146,54 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn host_detect_success() {
-        assert!(pwsh_host_detect(Some(OsString::from(
-            "/usr/local/microsoft/powershell/7-preview/"
-        )))
-        .is_ok());
+        assert!(
+            pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/7"))).is_ok()
+        );
+        assert!(
+            pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/7-preview"))).is_ok()
+        );
+        assert!(pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/7.2"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/7.3"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/7.4"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/7.5"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/7.6"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/7.7"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/7.8"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/7.9"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/8"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/8.1"))).is_ok());
+        assert!(pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/8.2"))).is_ok());
     }
 
     #[test]
     #[cfg(target_os = "macos")]
     fn host_detect_missing() {
         assert_eq!(
-            pwsh_host_detect(Some(OsString::from(
-                "/usr/local/microsoft/powershell/7-preview/"
-            ))),
+            pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/7.0"))),
+            Err(EnvError::Missing)
+        );
+        assert_eq!(
+            pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/7.1"))),
+            Err(EnvError::Missing)
+        );
+        assert_eq!(
+            pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/6"))),
+            Err(EnvError::Missing)
+        );
+        assert_eq!(
+            pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/6.0"))),
+            Err(EnvError::Missing)
+        );
+        assert_eq!(
+            pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/6.1"))),
+            Err(EnvError::Missing)
+        );
+        assert_eq!(
+            pwsh_host_detect(Some(OsString::from("/usr/local/microsoft/powershell/6-preview"))),
+            Err(EnvError::Missing)
+        );
+        assert_eq!(
+            pwsh_host_detect(Some(OsString::from("/path/to/nowhere"))),
             Err(EnvError::Missing)
         );
     }

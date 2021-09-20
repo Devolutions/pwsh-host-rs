@@ -108,7 +108,6 @@ pub struct Hostfxr {
 impl Hostfxr {
     #[allow(dead_code)]
     pub fn load_from_path(path: impl AsRef<OsStr>) -> Result<Self, Box<dyn std::error::Error>> {
-       println!("Expected path - {:?}", path.as_ref());
         Ok(Self {
             lib: HostfxrLib::load_lib(path)?,
         })
