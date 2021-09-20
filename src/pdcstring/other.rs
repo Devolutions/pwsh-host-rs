@@ -3,7 +3,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::str::{self, FromStr};
 
 use super::{NulError, PdCStr, PdCString};
-use regex::internal::Input;
 
 pub type PdCStringInner = CString;
 pub type PdCStrInner = CStr;

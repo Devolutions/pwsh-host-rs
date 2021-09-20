@@ -19,7 +19,7 @@ pub fn pwsh_host_detect(path: Option<OsString>) -> Result<PathBuf, EnvError> {
         None => Err(EnvError::UndefOrUnset),
         Some(path) => match env::split_paths(&path)
             .find(|path| {
-                Regex::new(r"(?i)powershell\D+?[^0-6]+?([.]?[2-9]+?|-preview)")
+                Regex::new(r"(?i)powershell\D+?([^0-7]+(\.+\d?|-preview)|([^0-6]+([.]?[2-9]+|-preview))|[^0-6]$)")
                     .unwrap()
                     .is_match(path.to_str().unwrap())
             })

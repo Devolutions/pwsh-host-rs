@@ -23,7 +23,13 @@ function(yarc_bundle)
 	endforeach()
     set(YARC_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/yarc.ps1")
     set(PWSH_OPTIONS "-ExecutionPolicy;Unrestricted;-NoLogo")
-	add_custom_command(COMMAND pwsh
+
+	if (WIN32)
+		set(PWSH_COMMAND pwsh)
+	elseif(UNIX)
+		set(PWSH_COMMAND pwsh-preview)
+	endif()
+	add_custom_command(COMMAND ${PWSH_COMMAND}
 		ARGS ${PWSH_OPTIONS} ${YARC_PATH} ${YARC_OPTIONS} -InputFile ${YARC_BUNDLE_RESOURCES_REL}
 		OUTPUT ${YARC_BUNDLE_OUTPUT}
 		DEPENDS ${YARC_BUNDLE_RESOURCES})

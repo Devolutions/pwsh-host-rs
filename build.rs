@@ -37,7 +37,7 @@ fn main() {
 
     println!(
         "cargo:rustc-link-search=native={}",
-        cmake_output.join("build\\lib").display()
+        cmake_output.join("build").join("lib").display()
     );
     println!("cargo:rustc-link-lib=static=resources");
     println!("cargo:rerun-if-changed=build.rs");
