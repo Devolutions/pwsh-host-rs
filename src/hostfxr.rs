@@ -3,7 +3,6 @@ use crate::host_detect::pwsh_host_detect;
 use crate::pdcstring::{PdCStr, PdCString};
 use dlopen::wrapper::{Container, WrapperApi};
 use std::borrow::BorrowMut;
-use std::env;
 use std::ffi::OsStr;
 
 #[cfg(windows)]
@@ -233,7 +232,7 @@ impl Hostfxr {
 
 #[allow(dead_code)]
 pub fn load_hostfxr() -> Result<Hostfxr, Box<dyn std::error::Error>> {
-    let pwsh_path = pwsh_host_detect(env::var_os("PATH"))?;
+    let pwsh_path = pwsh_host_detect()?;
     Hostfxr::load_from_path(pwsh_path.join(if cfg!(target_os = "windows") {
         "hostfxr.dll"
     } else if cfg!(target_os = "linux") {

@@ -4,6 +4,9 @@ using System.Management.Automation;
 
 namespace NativeHost
 {
+    // PowerShell Class
+    // https://learn.microsoft.com/en-us/dotnet/api/system.management.automation.powershell
+
     public static class Bindings
     {
         [UnmanagedCallersOnly]
@@ -41,6 +44,14 @@ namespace NativeHost
             PowerShell ps = (PowerShell) gch.Target;
             string script = Marshal.PtrToStringUTF8(ptrScript);
             ps.AddScript(script);
+        }
+
+        [UnmanagedCallersOnly]
+        public static void PowerShell_AddStatement(IntPtr ptrHandle)
+        {
+            GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
+            PowerShell ps = (PowerShell) gch.Target;
+            ps.AddStatement();
         }
 
         [UnmanagedCallersOnly]

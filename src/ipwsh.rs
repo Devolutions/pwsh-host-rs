@@ -1,33 +1,38 @@
+#![allow(dead_code)]
+
 use crate::delegate_loader::{AssemblyDelegateLoader, MethodWithUnknownSignature};
 use crate::error::Error;
 use crate::pdcstr;
 use crate::pdcstring::{PdCStr, PdCString};
+use crate::loader::get_assembly_delegate_loader;
 use std::ffi::CString;
 
-#[allow(dead_code)]
 pub type PowerShellHandle = *mut libc::c_void;
 
-#[allow(dead_code)]
 pub type FnPowerShellCreate = unsafe extern "system" fn() -> PowerShellHandle;
 
-#[allow(dead_code)]
 pub type FnPowerShellAddScript =
     unsafe extern "system" fn(handle: PowerShellHandle, script: *const libc::c_char);
 
-#[allow(dead_code)]
+pub type FnPowerShellAddStatement =
+    unsafe extern "system" fn(handle: PowerShellHandle) -> PowerShellHandle;
+
 pub type FnPowerShellInvoke = unsafe extern "system" fn(handle: PowerShellHandle);
 
-#[allow(dead_code)]
 pub struct IPowerShell {
-    _create: FnPowerShellCreate,
-    _add_script: FnPowerShellAddScript,
-    _invoke: FnPowerShellInvoke,
+    create: FnPowerShellCreate,
+    add_script: FnPowerShellAddScript,
+    add_statement: FnPowerShellAddStatement,
+    invoke: FnPowerShellInvoke,
 }
 
 impl IPowerShell {
-    #[allow(dead_code)]
-    pub fn new(fnloader: &AssemblyDelegateLoader<PdCString>) -> Result<Self, Error> {
-        #[allow(dead_code)]
+    pub fn new() -> Result<Self, Error> {
+        let fn_loader = get_assembly_delegate_loader();
+        Self::new_with_loader(&fn_loader)
+    }
+
+    pub fn new_with_loader(fnloader: &AssemblyDelegateLoader<PdCString>) -> Result<Self, Error> {
         fn get_function_pointer(
             fnloader: &AssemblyDelegateLoader<PdCString>,
             type_name: impl AsRef<PdCStr>,
@@ -35,8 +40,8 @@ impl IPowerShell {
         ) -> Result<MethodWithUnknownSignature, Error> {
             fnloader.get_function_pointer_for_unmanaged_callers_only_method(type_name, method_name)
         }
-        Ok(Self {
-            _create: {
+        let pwsh = Self {
+            create: {
                 let create_fn = get_function_pointer(
                     fnloader,
                     pdcstr!("NativeHost.Bindings, Bindings"),
@@ -44,7 +49,7 @@ impl IPowerShell {
                 )?;
                 unsafe { std::mem::transmute(create_fn) }
             },
-            _add_script: {
+            add_script: {
                 let add_script_fn = get_function_pointer(
                     fnloader,
                     pdcstr!("NativeHost.Bindings, Bindings"),
@@ -52,7 +57,15 @@ impl IPowerShell {
                 )?;
                 unsafe { std::mem::transmute(add_script_fn) }
             },
-            _invoke: {
+            add_statement: {
+                let add_statement_fn = get_function_pointer(
+                    fnloader,
+                    pdcstr!("NativeHost.Bindings, Bindings"),
+                    pdcstr!("PowerShell_AddStatement"),
+                )?;
+                unsafe { std::mem::transmute(add_statement_fn) }
+            },
+            invoke: {
                 let invoke_fn = get_function_pointer(
                     fnloader,
                     pdcstr!("NativeHost.Bindings, Bindings"),
@@ -60,33 +73,23 @@ impl IPowerShell {
                 )?;
                 unsafe { std::mem::transmute(invoke_fn) }
             },
-        })
-    }
-
-    #[allow(dead_code)]
-    pub fn call_sdk(&self) {
-        let handle = self.create();
-        let mut script = CString::new("$TempPath = [System.IO.Path]::GetTempPath();").unwrap();
-        self.addscript(handle, script);
-        script = CString::new("Set-Content -Path $(Join-Path $TempPath pwsh-date.txt) -Value \"Microsoft.PowerShell.SDK: $(Get-Date)\";").unwrap();
-        self.addscript(handle, script);
-        self.invoke(handle);
-        let mut output_file = std::env::temp_dir();
-        output_file.push("pwsh-date.txt");
-        let pwsh_date = std::fs::read_to_string(output_file.as_path()).unwrap();
-        println!("{}", &pwsh_date);
+        };
+        Ok(pwsh)
     }
 
     pub fn create(&self) -> PowerShellHandle {
-        unsafe { (self._create)() }
+        unsafe { (self.create)() }
     }
 
-    pub fn addscript(&self, handle: PowerShellHandle, script: CString) {
-        unsafe { (self._add_script)(handle, script.as_ptr()) }
+    pub fn add_script(&self, handle: PowerShellHandle, script: CString) {
+        unsafe { (self.add_script)(handle, script.as_ptr()) }
     }
 
-    #[allow(dead_code)]
+    pub fn add_statement(&self, handle: PowerShellHandle) {
+        unsafe { (self.add_statement)(handle); }
+    }
+
     pub fn invoke(&self, handle: PowerShellHandle) {
-        unsafe { (self._invoke)(handle) }
+        unsafe { (self.invoke)(handle) }
     }
 }

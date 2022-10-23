@@ -1,11 +1,12 @@
 mod context;
 mod delegate_loader;
-mod detect;
+mod loader;
 mod error;
 mod host_detect;
 mod host_exit_code;
 mod hostfxr;
 mod ipwsh;
+mod tests;
 
 extern crate libc;
 #[macro_use]
