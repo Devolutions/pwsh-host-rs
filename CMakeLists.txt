@@ -8,11 +8,7 @@ set(CMAKE_CXX_STANDARD 11)
 include(cmake/yarc.cmake)
 
 find_program(DOTNET_EXECUTABLE dotnet REQUIRED)
-if (WIN32)
-    find_program(PWSH_EXECUTABLE pwsh REQUIRED)
-elseif(UNIX)
-    find_program(PWSH_EXECUTABLE pwsh-preview REQUIRED)
-endif()
+find_program(PWSH_EXECUTABLE pwsh REQUIRED)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/lib)

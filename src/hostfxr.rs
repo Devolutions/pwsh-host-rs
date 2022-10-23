@@ -79,6 +79,7 @@ pub struct HostfxrLib {
 impl HostfxrLib {
     #[allow(dead_code)]
     fn load_lib(path: impl AsRef<OsStr>) -> Result<Container<Self>, Box<dyn std::error::Error>> {
+        println!("load_lib: {}", path.as_ref().to_str().unwrap());
         Ok(unsafe { Container::load(path)? })
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "pwsh-host"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2018"
 license = "MIT/Apache-2.0"
 homepage = "https://github.com/awakecoding/pwsh-host-rs"
@@ -12,12 +12,12 @@ description = "Rust PowerShell Hosting Library"
 [dependencies]
 cfg-if = "0.1"
 libc = "0.2"
-regex = "1.5"
 thiserror = "1.0"
 dlopen = "0.1"
 dlopen_derive = "0.1"
 num_enum = "0.5"
 quick-error = "2.0"
+which = { version = "3.0", default-features = false, features = [] }
 
 [target.'cfg(windows)'.dependencies]
 widestring = "0.4"
