@@ -14,9 +14,6 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/lib)
 
-set(THREADS_PREFER_PTHREAD_FLAG ON)
-find_package(Threads REQUIRED)
-
 if(WIN32)
 	set(C_FLAGS "")
 	set(C_FLAGS "${C_FLAGS} -D_UNICODE")
@@ -37,7 +34,7 @@ set(DOTNET_ARGS "build"
 	"-c"
 	"Release")
 
-set(BINDINGS_DLL "${CMAKE_SOURCE_DIR}/bindings/bin/Release/net5.0/Bindings.dll")
+set(BINDINGS_DLL "${CMAKE_SOURCE_DIR}/bindings/bin/Release/net6.0/Bindings.dll")
 
 add_custom_command(COMMAND ${DOTNET_EXECUTABLE}
 	ARGS ${DOTNET_ARGS}
@@ -49,16 +46,6 @@ yarc_bundle(NAME bindings
 	RESOURCES ${BINDINGS_DLL}
 	OUTPUT resources.c)
 
-add_definitions("-DPWSH_HOST_EXPORTS")
-
-include_directories(include)
-
 add_library(resources STATIC resources.c)
 
-target_link_libraries(resources ${CMAKE_DL_LIBS} Threads::Threads)
-
-export(PACKAGE pwsh-host)
-
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include"
-	DESTINATION include
-	FILES_MATCHING PATTERN "*.h")
+install(TARGETS resources)
