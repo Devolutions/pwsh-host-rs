@@ -5,7 +5,7 @@ mod error;
 mod host_detect;
 mod host_exit_code;
 mod hostfxr;
-mod ipwsh;
+mod bindings;
 mod tests;
 
 extern crate libc;
