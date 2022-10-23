@@ -1,5 +1,4 @@
 use std::fs;
-use std::ffi::OsString;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -32,9 +31,6 @@ pub fn find_pwsh_dir() -> Option<PathBuf> {
 }
 
 #[allow(dead_code)]
-pub fn pwsh_host_detect(path: Option<OsString>) -> Result<PathBuf, EnvError> {
-    match path {
-        None => Err(EnvError::UndefOrUnset),
-        Some(_path) => { find_pwsh_dir().ok_or(EnvError::Missing) },
-    }
+pub fn pwsh_host_detect() -> Result<PathBuf, EnvError> {
+    find_pwsh_dir().ok_or(EnvError::Missing)
 }
