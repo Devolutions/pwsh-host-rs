@@ -41,18 +41,13 @@ mod tests {
         assert!(load_assembly_from_native_memory.is_ok());
         let load_assembly_from_native_memory = load_assembly_from_native_memory.unwrap();
 
-        extern "C" {
-            static bindings_size: libc::c_uint;
-            static bindings_data: [libc::c_uchar; 1usize];
-        }
+        let bindings_dll = include_bytes!("../dotnet/bin/Release/net6.0/Bindings.dll");
 
         let load_assembly_from_native_memory: extern "system" fn(
             bytes: *const libc::c_uchar,
             size: libc::c_uint,
         ) -> i32 = unsafe { std::mem::transmute(load_assembly_from_native_memory) };
-        let result = unsafe {
-            (load_assembly_from_native_memory)(bindings_data.as_ptr(), bindings_size.clone())
-        };
+        let result = (load_assembly_from_native_memory)(bindings_dll.as_ptr(), bindings_dll.len() as u32);
         HostExitCode::from(result).into_result().unwrap();
 
         let pwsh = IPowerShell::new(&fn_loader);

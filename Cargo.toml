@@ -25,7 +25,3 @@ u16cstr = "0.2"
 
 [target.'cfg(not(windows))'.dependencies]
 cstr = "0.2"
-
-[build-dependencies]
-cmake = "0.1"
-cc = "1.0"
