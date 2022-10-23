@@ -1,5 +1,4 @@
-use regex::Regex;
-use std::env;
+use std::fs;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -13,20 +12,29 @@ pub enum EnvError {
     Missing,
 }
 
+pub fn find_pwsh_exe() -> Option<PathBuf> {
+    if let Ok(pwsh_exe) = which::which("pwsh") {
+        if let Ok(pwsh_link) = fs::read_link(&pwsh_exe) {
+            return Some(pwsh_link);
+        } else {
+            return Some(pwsh_exe);
+        }
+    }
+    None
+}
+
+pub fn find_pwsh_dir() -> Option<PathBuf> {
+    if let Some(mut pwsh_exe) = find_pwsh_exe() {
+        pwsh_exe.pop();
+        return Some(pwsh_exe);
+    }
+    None
+}
+
 #[allow(dead_code)]
 pub fn pwsh_host_detect(path: Option<OsString>) -> Result<PathBuf, EnvError> {
     match path {
         None => Err(EnvError::UndefOrUnset),
-        Some(path) => match env::split_paths(&path)
-            .find(|path| {
-                Regex::new(r"(?i)powershell\D+?([^0-7]+(\.+\d?|-preview)|([^0-6]+([.]?[2-9]+|-preview))|[^0-6]$)")
-                    .unwrap()
-                    .is_match(path.to_str().unwrap())
-            })
-            .or(None)
-        {
-            None => Err(EnvError::Missing),
-            Some(path) => Ok(path),
-        },
+        Some(_path) => { find_pwsh_dir().ok_or(EnvError::Missing) },
     }
 }

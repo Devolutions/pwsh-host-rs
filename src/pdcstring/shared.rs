@@ -1,9 +1,9 @@
 use super::{NulError, PdCStrInner, PdCStringInner, PdUChar};
 use std::{
-    borrow::{Borrow, BorrowMut},
+    borrow::{Borrow},
     convert::TryFrom,
     fmt::{self, Debug, Display, Formatter},
-    ops::{Deref, DerefMut},
+    ops::{Deref},
     str::FromStr,
 };
 
@@ -56,12 +56,6 @@ impl Deref for PdCString {
     type Target = PdCStr;
     fn deref(&self) -> &Self::Target {
         self.borrow()
-    }
-}
-
-impl DerefMut for PdCString {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.borrow_mut()
     }
 }
 

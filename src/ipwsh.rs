@@ -70,9 +70,11 @@ impl IPowerShell {
         self.addscript(handle, script);
         script = CString::new("Set-Content -Path $(Join-Path $TempPath pwsh-date.txt) -Value \"Microsoft.PowerShell.SDK: $(Get-Date)\";").unwrap();
         self.addscript(handle, script);
-        script = CString::new("Invoke-Item $(Join-Path $TempPath pwsh-date.txt);").unwrap();
-        self.addscript(handle, script);
         self.invoke(handle);
+        let mut output_file = std::env::temp_dir();
+        output_file.push("pwsh-date.txt");
+        let pwsh_date = std::fs::read_to_string(output_file.as_path()).unwrap();
+        println!("{}", &pwsh_date);
     }
 
     pub fn create(&self) -> PowerShellHandle {
