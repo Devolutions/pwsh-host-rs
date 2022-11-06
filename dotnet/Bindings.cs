@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Runtime.InteropServices;
+using System.Collections.ObjectModel;
 using System.Management.Automation;
 
 namespace NativeHost
@@ -39,6 +40,24 @@ namespace NativeHost
         }
 
         [UnmanagedCallersOnly]
+        public static void PowerShell_AddParameter_Int(IntPtr ptrHandle, IntPtr ptrName, int value)
+        {
+            GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
+            PowerShell ps = (PowerShell) gch.Target;
+            string name = Marshal.PtrToStringUTF8(ptrName);
+            ps.AddParameter(name, value);
+        }
+
+        [UnmanagedCallersOnly]
+        public static void PowerShell_AddParameter_Long(IntPtr ptrHandle, IntPtr ptrName, long value)
+        {
+            GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
+            PowerShell ps = (PowerShell) gch.Target;
+            string name = Marshal.PtrToStringUTF8(ptrName);
+            ps.AddParameter(name, value);
+        }
+
+        [UnmanagedCallersOnly]
         public static void PowerShell_AddCommand(IntPtr ptrHandle, IntPtr ptrCommand)
         {
             GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
@@ -70,6 +89,18 @@ namespace NativeHost
             GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
             PowerShell ps = (PowerShell) gch.Target;
             ps.Invoke();
+        }
+
+        [UnmanagedCallersOnly]
+        public static IntPtr PowerShell_ExportVariable(IntPtr ptrHandle, IntPtr ptrName)
+        {
+            GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
+            PowerShell ps = (PowerShell) gch.Target;
+            string name = Marshal.PtrToStringUTF8(ptrName);
+            ps.AddScript(string.Format("[System.Management.Automation.PSSerializer]::Serialize(${0})", name));
+            ps.AddStatement();
+            Collection<PSObject> results = ps.Invoke();
+            return Marshal.StringToCoTaskMemUTF8(results[0].ToString());
         }
     }
 }

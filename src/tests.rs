@@ -26,10 +26,12 @@ mod pwsh {
 
 		// Remove-Item -Path '/tmp/pwsh-cmds.txt' -ErrorAction SilentlyContinue
 		pwsh.add_script(format!("Remove-Item -Path '{}' -ErrorAction SilentlyContinue", &output_file_str).as_str());
+		pwsh.add_statement();
 		pwsh.invoke();
 
 		// $UtilityCommands | Set-Content -Path '/tmp/pwsh-cmds.txt' -Force
 		pwsh.add_script(format!("$UtilityCommands | Set-Content -Path '{}' -Force", &output_file_str).as_str());
+		pwsh.add_statement();
 		pwsh.invoke();
 
 		let output_data = std::fs::read_to_string(output_file.as_path()).unwrap();
@@ -45,5 +47,15 @@ mod pwsh {
 		assert_eq!(pwsh_cmds.get(1), Some(&"Group-Object"));
 		assert_eq!(pwsh_cmds.get(2), Some(&"Measure-Object"));
 
+		// Get-Date -UnixTimeSeconds 1577836800 | Set-Variable -Name Date
+		pwsh.add_command("Get-Date");
+		pwsh.add_parameter_long("-UnixTimeSeconds", 1577836800);
+		pwsh.add_command("Set-Variable");
+		pwsh.add_parameter_string("-Name", "Date");
+		pwsh.add_statement();
+		pwsh.invoke();
+
+		let date_xml = pwsh.export_variable("Date");
+		println!("Date:\n{}", &date_xml);
     }
 }
