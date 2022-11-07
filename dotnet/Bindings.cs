@@ -92,7 +92,15 @@ namespace NativeHost
         }
 
         [UnmanagedCallersOnly]
-        public static IntPtr PowerShell_ExportVariable(IntPtr ptrHandle, IntPtr ptrName)
+        public static void PowerShell_Clear(IntPtr ptrHandle)
+        {
+            GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
+            PowerShell ps = (PowerShell) gch.Target;
+            ps.Commands.Clear();
+        }
+
+        [UnmanagedCallersOnly]
+        public static IntPtr PowerShell_ExportToXml(IntPtr ptrHandle, IntPtr ptrName)
         {
             GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
             PowerShell ps = (PowerShell) gch.Target;
@@ -100,7 +108,46 @@ namespace NativeHost
             ps.AddScript(string.Format("[System.Management.Automation.PSSerializer]::Serialize(${0})", name));
             ps.AddStatement();
             Collection<PSObject> results = ps.Invoke();
-            return Marshal.StringToCoTaskMemUTF8(results[0].ToString());
+            string result = results[0].ToString().Trim();
+            ps.Commands.Clear();
+            return Marshal.StringToCoTaskMemUTF8(result);
+        }
+
+        [UnmanagedCallersOnly]
+        public static IntPtr PowerShell_ExportToJson(IntPtr ptrHandle, IntPtr ptrName)
+        {
+            GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
+            PowerShell ps = (PowerShell) gch.Target;
+            string name = Marshal.PtrToStringUTF8(ptrName);
+            ps.AddScript(string.Format("${0} | ConvertTo-Json", name));
+            ps.AddStatement();
+            Collection<PSObject> results = ps.Invoke();
+            string result = results[0].ToString().Trim();
+            ps.Commands.Clear();
+            return Marshal.StringToCoTaskMemUTF8(result);
+        }
+
+        [UnmanagedCallersOnly]
+        public static IntPtr PowerShell_ExportToString(IntPtr ptrHandle, IntPtr ptrName)
+        {
+            GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
+            PowerShell ps = (PowerShell) gch.Target;
+            string name = Marshal.PtrToStringUTF8(ptrName);
+            ps.AddScript(string.Format("${0} | Out-String", name));
+            ps.AddStatement();
+            Collection<PSObject> results = ps.Invoke();
+            string result = results[0].ToString().Trim();
+            ps.Commands.Clear();
+            return Marshal.StringToCoTaskMemUTF8(result);
+        }
+
+        // Marshal Class
+        // https://learn.microsoft.com/en-us/dotnet/api/system.runtime.interopservices.marshal
+
+        [UnmanagedCallersOnly]
+        public static void Marshal_FreeCoTaskMem(IntPtr ptr)
+        {
+            Marshal.FreeCoTaskMem(ptr);
         }
     }
 }

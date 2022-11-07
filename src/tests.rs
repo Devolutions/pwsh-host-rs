@@ -5,11 +5,6 @@ mod pwsh {
     #[test]
     fn load_pwsh_sdk_invoke_api() {
         let pwsh = PowerShell::new().unwrap();
-		
-		let mut output_file = std::env::temp_dir();
-        output_file.push("pwsh-cmds.txt");
-		let output_file_str = output_file.to_str().unwrap();
-		println!("Output File:\n{}", &output_file_str);
 
 		// Get-Command -CommandType Cmdlet -Name *-Object -Module Microsoft.PowerShell.Utility |
 		// Select-Object -ExpandProperty Name | Set-Variable -Name UtilityCommands
@@ -22,22 +17,12 @@ mod pwsh {
 		pwsh.add_command("Set-Variable");
 		pwsh.add_parameter_string("-Name", "UtilityCommands");
 		pwsh.add_statement();
-		pwsh.invoke();
+		pwsh.invoke(true);
 
-		// Remove-Item -Path '/tmp/pwsh-cmds.txt' -ErrorAction SilentlyContinue
-		pwsh.add_script(format!("Remove-Item -Path '{}' -ErrorAction SilentlyContinue", &output_file_str).as_str());
-		pwsh.add_statement();
-		pwsh.invoke();
+		let cmds_txt = pwsh.export_to_string("UtilityCommands");
+		let pwsh_cmds: Vec<&str> = cmds_txt.lines().collect();
 
-		// $UtilityCommands | Set-Content -Path '/tmp/pwsh-cmds.txt' -Force
-		pwsh.add_script(format!("$UtilityCommands | Set-Content -Path '{}' -Force", &output_file_str).as_str());
-		pwsh.add_statement();
-		pwsh.invoke();
-
-		let output_data = std::fs::read_to_string(output_file.as_path()).unwrap();
-
-		let pwsh_cmds: Vec<&str> = output_data.lines().collect();
-
+		println!("\nCommands (text):");
 		for pwsh_cmd in &pwsh_cmds {
 			println!("{}", &pwsh_cmd);
 		}
@@ -53,9 +38,23 @@ mod pwsh {
 		pwsh.add_command("Set-Variable");
 		pwsh.add_parameter_string("-Name", "Date");
 		pwsh.add_statement();
-		pwsh.invoke();
+		pwsh.invoke(true);
 
-		let date_xml = pwsh.export_variable("Date");
-		println!("Date:\n{}", &date_xml);
+		let date_json = pwsh.export_to_json("Date");
+		println!("\nDate (JSON):\n{}", &date_json);
+		assert_eq!(&date_json, "\"2019-12-31T19:00:00-05:00\"");
+
+		// Get-Verb -Verb Test | Set-Variable -Name Verb
+		pwsh.add_script("Get-Verb -Verb Test");
+		pwsh.add_command("Set-Variable");
+		pwsh.add_parameter_string("-Name", "Verb");
+		pwsh.add_statement();
+		pwsh.invoke(true);
+
+		let verb_xml = pwsh.export_to_xml("Verb");
+		println!("\nVerb (XML):\n{}", &verb_xml);
+		assert!(verb_xml.starts_with("<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">"));
+		assert!(verb_xml.find("<T>System.Management.Automation.VerbInfo</T>").is_some());
+		assert!(verb_xml.find("<ToString>System.Management.Automation.VerbInfo</ToString>").is_some());
     }
 }
