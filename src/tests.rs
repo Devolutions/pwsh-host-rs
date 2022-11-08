@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod pwsh {
     use crate::bindings::{PowerShell};
-	use crate::cli_xml::{parse_cli_xml};
+	use crate::cli_xml::{parse_cli_xml, CliObject, CliValue};
 
     #[test]
     fn load_pwsh_sdk_invoke_api() {
@@ -91,6 +91,11 @@ r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/0
 </Objs>"#;
 
 		println!("{}", vm_xml);
-		parse_cli_xml(vm_xml);
+
+		let objs: Vec<CliObject> = parse_cli_xml(vm_xml);
+
+		for obj in objs {
+			println!("{:?}", obj);
+		}
 	}
 }
