@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod pwsh {
     use crate::bindings::{PowerShell};
+	use crate::cli_xml::{parse_cli_xml};
 
     #[test]
     fn load_pwsh_sdk_invoke_api() {
@@ -58,82 +59,38 @@ mod pwsh {
 		assert!(verb_xml.find("<ToString>System.Management.Automation.VerbInfo</ToString>").is_some());
     }
 
-	use quick_xml::events::Event;
-	use quick_xml::reader::Reader;
-
 	#[test]
-	fn parse_cli_xml() {
+	fn test_cli_xml() {
 		// Get-VM IT-HELP-DVLS | Select-Object -Property VMId, VMName, State, Uptime, Status, Version
 		let vm_xml =
 r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
 	<Obj RefId="0">
 		<TN RefId="0">
-		<T>Selected.Microsoft.HyperV.PowerShell.VirtualMachine</T>
-		<T>System.Management.Automation.PSCustomObject</T>
-		<T>System.Object</T>
+			<T>Selected.Microsoft.HyperV.PowerShell.VirtualMachine</T>
+			<T>System.Management.Automation.PSCustomObject</T>
+			<T>System.Object</T>
 		</TN>
 		<MS>
-		<G N="VMId">fbac8867-40ca-4032-a8e0-901c7f004cd7</G>
-		<S N="VMName">IT-HELP-DVLS</S>
-		<Obj N="State" RefId="1">
-			<TN RefId="1">
-			<T>Microsoft.HyperV.PowerShell.VMState</T>
-			<T>System.Enum</T>
-			<T>System.ValueType</T>
-			<T>System.Object</T>
-			</TN>
-			<ToString>Off</ToString>
-			<I32>3</I32>
-		</Obj>
-		<TS N="Uptime">PT0S</TS>
-		<S N="Status">Operating normally</S>
-		<S N="Version">10.0</S>
+			<G N="VMId">fbac8867-40ca-4032-a8e0-901c7f004cd7</G>
+			<S N="VMName">IT-HELP-DVLS</S>
+			<Obj N="State" RefId="1">
+				<TN RefId="1">
+					<T>Microsoft.HyperV.PowerShell.VMState</T>
+					<T>System.Enum</T>
+					<T>System.ValueType</T>
+					<T>System.Object</T>
+				</TN>
+				<ToString>Off</ToString>
+				<I32>3</I32>
+			</Obj>
+			<TS N="Uptime">PT0S</TS>
+			<S N="Status">Operating normally</S>
+			<S N="Version">10.0</S>
 		</MS>
 	</Obj>
 </Objs>"#;
 
 		println!("{}", vm_xml);
-
-		let mut reader = Reader::from_str(vm_xml);
-		reader.trim_text(true);
-
-		loop {
-			let event = reader.read_event();
-			match event {
-				Ok(Event::Start(event)) => {
-					match event.name().as_ref() {
-						b"Obj" => {
-							let refid_attr = event.try_get_attribute("RefId").unwrap().unwrap();
-							let refid_value = refid_attr.decode_and_unescape_value(&reader).unwrap();
-							println!("Obj RefId={}", refid_value);
-						},
-						b"T" => {
-							let txt = reader.read_text(event.name()).unwrap();
-							println!("T: {}", txt);
-						},
-						b"S" => {
-							let txt = reader.read_text(event.name()).unwrap();
-							println!("S: {}", txt);
-
-							let n_attr = event.try_get_attribute("N").unwrap().unwrap();
-							let n_value = n_attr.decode_and_unescape_value(&reader).unwrap();
-							println!("N={}", n_value);
-						},
-						b"ToString" => {
-							let txt = reader.read_text(event.name()).unwrap();
-							println!("ToString: {}", txt);
-						},
-						b"I32" => {
-							let txt = reader.read_text(event.name()).unwrap();
-							println!("I32: {}", txt);
-						},
-						_ => { }
-					}
-				},
-				Ok(Event::Eof) => break,
-				Err(event) => panic!("Error at position {}: {:?}", reader.buffer_position(), event),
-				_ => (),
-			}
-		}
+		parse_cli_xml(vm_xml);
 	}
 }

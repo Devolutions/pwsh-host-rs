@@ -5,6 +5,7 @@ mod error;
 mod host_detect;
 mod host_exit_code;
 mod hostfxr;
+mod cli_xml;
 mod bindings;
 mod tests;
 
