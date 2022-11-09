@@ -4,6 +4,7 @@ use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use quick_xml::events;
 use uuid::Uuid;
+use std::time::Duration;
 use std::fmt;
 
 // [MS-PSRP]: PowerShell Remoting Protocol
@@ -112,6 +113,30 @@ impl CliGuid {
 impl fmt::Display for CliGuid {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(&self.value, f)
+    }
+}
+
+// Duration type (<TS>)
+// Example: <TS>PT9.0269026S</TS>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/434cd15d-8fb3-462c-a004-bcd0d3a60201
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliDuration {
+    pub value: Duration,
+    pub name: Option<String>,
+}
+
+impl CliDuration {
+    pub fn new(name: Option<&str>, value: Duration) -> CliDuration {
+        CliDuration {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliDuration> {
+        let value = Duration::from_secs(0); // TODO: ISO 8601 parsing
+        Some(Self::new(name, value))
     }
 }
 
@@ -243,6 +268,7 @@ pub enum CliValue {
     CliObject(CliObject),
     CliString(CliString),
 	CliGuid(CliGuid),
+    CliDuration(CliDuration),
     CliInt8(CliInt8),
     CliInt16(CliInt16),
     CliInt32(CliInt32),
@@ -255,6 +281,7 @@ impl CliValue {
             CliValue::CliObject(prop) => { prop.name.as_deref() },
             CliValue::CliString(prop) => { prop.name.as_deref() },
             CliValue::CliGuid(prop) => { prop.name.as_deref() },
+            CliValue::CliDuration(prop) => { prop.name.as_deref() },
             CliValue::CliInt8(prop) => { prop.name.as_deref() },
             CliValue::CliInt16(prop) => { prop.name.as_deref() },
             CliValue::CliInt32(prop) => { prop.name.as_deref() },
@@ -294,6 +321,20 @@ impl CliValue {
     pub fn as_guid(&self) -> Option<Uuid> {
         match &*self {
             CliValue::CliGuid(prop) => Some(prop.value.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn is_duration(&self) -> bool {
+        match *self {
+            CliValue::CliDuration(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_duration(&self) -> Option<Duration> {
+        match &*self {
+            CliValue::CliDuration(prop) => Some(prop.value.clone()),
             _ => None,
         }
     }
@@ -364,8 +405,8 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         }
                     },
                     b"TN" => {
-                        if let Some(ref_id) = try_get_ref_id_attr(&reader, &event) {
-                            println!("TN RefId={}", ref_id);
+                        if let Some(_ref_id) = try_get_ref_id_attr(&reader, &event) {
+                            //println!("TN RefId={}", ref_id);
                         }
                     },
                     b"T" => {
@@ -373,8 +414,8 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         obj.type_names.push(txt.to_string());
                     },
                     b"TNRef" => {
-                        if let Some(ref_id) = try_get_ref_id_attr(&reader, &event) {
-                            println!("TNRef RefId={}", ref_id);
+                        if let Some(_ref_id) = try_get_ref_id_attr(&reader, &event) {
+                            //println!("TNRef RefId={}", ref_id);
                         }
                     },
                     b"MS" => {
@@ -396,15 +437,36 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         let txt = reader.read_text(event.name()).unwrap();
                         println!("ToString: {}", txt);
                     },
+                    b"SB" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliInt8::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliInt8(val));
+                    },
+                    b"I16" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliInt16::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliInt16(val));
+                    },
                     b"I32" => {
                         let txt = reader.read_text(event.name()).unwrap();
                         let prop_name = try_get_name_attr(&reader, &event);
                         let val = CliInt32::new_from_str(prop_name.as_deref(), &txt).unwrap();
                         obj.values.push(CliValue::CliInt32(val));
                     },
+                    b"I64" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliInt64::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliInt64(val));
+                    },
                     b"TS" => {
                         let txt = reader.read_text(event.name()).unwrap();
-                        println!("TS: {}", txt);
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliDuration::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        println!("Duration {:?}", &val);
+                        obj.values.push(CliValue::CliDuration(val));
                     },
                     b"Nil" => {
                         let _val = CliValue::Null; // null value

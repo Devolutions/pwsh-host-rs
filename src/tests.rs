@@ -91,8 +91,6 @@ r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/0
 	</Obj>
 </Objs>"#;
 
-		println!("{}", vm_xml);
-
 		let objs: Vec<CliObject> = parse_cli_xml(vm_xml);
 
 		let vm_obj = objs.get(0).unwrap();
