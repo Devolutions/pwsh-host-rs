@@ -2,6 +2,7 @@ mod context;
 mod delegate_loader;
 mod loader;
 mod error;
+mod time;
 mod host_detect;
 mod host_exit_code;
 mod hostfxr;

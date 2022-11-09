@@ -5,6 +5,7 @@ use quick_xml::reader::Reader;
 use quick_xml::events;
 use uuid::Uuid;
 use std::time::Duration;
+use crate::time::parse_iso8601_duration;
 use std::fmt;
 
 // [MS-PSRP]: PowerShell Remoting Protocol
@@ -28,15 +29,17 @@ pub struct CliObject {
     pub values: Vec<CliValue>,
 	pub ref_id: Option<String>,
     pub type_names: Vec<String>,
+    pub string_repr: Option<String>
 }
 
 impl CliObject {
-    pub fn new(name: Option<&str>, value: Vec<CliValue>, ref_id: Option<&str>, type_names: Vec<String>) -> CliObject {
+    pub fn new(name: Option<&str>, value: Vec<CliValue>, ref_id: Option<&str>, type_names: Vec<String>, string_repr: Option<&str>) -> CliObject {
         CliObject {
             name: name.map(|s| s.to_string()),
             values: value,
             ref_id: ref_id.map(|s| s.to_string()),
             type_names: type_names,
+            string_repr: string_repr.map(|s| s.to_string()),
         }
     }
 }
@@ -83,6 +86,37 @@ impl CliString {
 impl fmt::Display for CliString {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Display::fmt(self.value.as_str(), f)
+    }
+}
+
+// Boolean type (<B>)
+// Example: <B>true</B>
+// https://www.w3.org/TR/xmlschema-2/#boolean
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/8b4b1067-4b58-46d5-b1c9-b881b6e7a0aa
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliBool {
+    pub value: bool,
+    pub name: Option<String>,
+}
+
+impl CliBool {
+    pub fn new(name: Option<&str>, value: bool) -> CliBool {
+        CliBool {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliBool> {
+        let value = value.parse::<bool>().ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
+impl fmt::Display for CliBool {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&self.value, f)
     }
 }
 
@@ -135,7 +169,7 @@ impl CliDuration {
     }
 
     pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliDuration> {
-        let value = Duration::from_secs(0); // TODO: ISO 8601 parsing
+        let value = parse_iso8601_duration(value)?;
         Some(Self::new(name, value))
     }
 }
@@ -267,6 +301,7 @@ pub enum CliValue {
     Null,
     CliObject(CliObject),
     CliString(CliString),
+    CliBool(CliBool),
 	CliGuid(CliGuid),
     CliDuration(CliDuration),
     CliInt8(CliInt8),
@@ -280,6 +315,7 @@ impl CliValue {
         match &*self {
             CliValue::CliObject(prop) => { prop.name.as_deref() },
             CliValue::CliString(prop) => { prop.name.as_deref() },
+            CliValue::CliBool(prop) => { prop.name.as_deref() },
             CliValue::CliGuid(prop) => { prop.name.as_deref() },
             CliValue::CliDuration(prop) => { prop.name.as_deref() },
             CliValue::CliInt8(prop) => { prop.name.as_deref() },
@@ -307,6 +343,20 @@ impl CliValue {
     pub fn as_str(&self) -> Option<&str> {
         match &*self {
             CliValue::CliString(prop) => Some(&prop.value),
+            _ => None,
+        }
+    }
+
+    pub fn is_bool(&self) -> bool {
+        match *self {
+            CliValue::CliBool(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match &*self {
+            CliValue::CliBool(prop) => Some(prop.value),
             _ => None,
         }
     }
@@ -418,14 +468,19 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                             //println!("TNRef RefId={}", ref_id);
                         }
                     },
-                    b"MS" => {
-
+                    b"Props" => {
+                        // Adapted Properties
+                        // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/173c30d7-b0a6-4aad-9b00-9891c441b0f3
                     },
-                    b"G" => {
+                    b"MS" => {
+                        // Extended Properties
+                        // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/4cca6d92-4a8e-4406-91cb-0235a98f7d6f
+                    },
+                    b"B" => {
                         let txt = reader.read_text(event.name()).unwrap();
                         let prop_name = try_get_name_attr(&reader, &event);
-                        let val = CliGuid::new_from_str(prop_name.as_deref(), &txt).unwrap();
-                        obj.values.push(CliValue::CliGuid(val));
+                        let val = CliBool::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliBool(val));
                     },
                     b"S" => {
                         let txt = reader.read_text(event.name()).unwrap();
@@ -433,9 +488,15 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         let val = CliString::new(prop_name.as_deref(), &txt);
                         obj.values.push(CliValue::CliString(val));
                     },
+                    b"G" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliGuid::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliGuid(val));
+                    },
                     b"ToString" => {
                         let txt = reader.read_text(event.name()).unwrap();
-                        println!("ToString: {}", txt);
+                        obj.string_repr = Some(txt.to_string());
                     },
                     b"SB" => {
                         let txt = reader.read_text(event.name()).unwrap();
@@ -465,13 +526,16 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         let txt = reader.read_text(event.name()).unwrap();
                         let prop_name = try_get_name_attr(&reader, &event);
                         let val = CliDuration::new_from_str(prop_name.as_deref(), &txt).unwrap();
-                        println!("Duration {:?}", &val);
                         obj.values.push(CliValue::CliDuration(val));
                     },
                     b"Nil" => {
                         let _val = CliValue::Null; // null value
                     },
-                    _ => { }
+                    _ => {
+                        let event_name = event.name();
+                        let tag_name = String::from_utf8_lossy(event_name.as_ref());
+                        println!("unsupported: {}", &tag_name);
+                    }
                 }
             },
             Ok(Event::End(event)) => {
