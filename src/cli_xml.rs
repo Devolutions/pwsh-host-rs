@@ -6,7 +6,7 @@ use quick_xml::events;
 use uuid::Uuid;
 use std::time::Duration;
 use crate::time::parse_iso8601_duration;
-use std::fmt;
+//use std::fmt;
 
 // [MS-PSRP]: PowerShell Remoting Protocol
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp
@@ -83,12 +83,6 @@ impl CliString {
     }
 }
 
-impl fmt::Display for CliString {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(self.value.as_str(), f)
-    }
-}
-
 // Boolean type (<B>)
 // Example: <B>true</B>
 // https://www.w3.org/TR/xmlschema-2/#boolean
@@ -114,12 +108,6 @@ impl CliBool {
     }
 }
 
-impl fmt::Display for CliBool {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.value, f)
-    }
-}
-
 // GUID type (<G>)
 // Example: <G>792e5b37-4505-47ef-b7d2-8711bb7affa8</G>
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/c30c37fa-692d-49c7-bb86-b3179a97e106
@@ -141,12 +129,6 @@ impl CliGuid {
     pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliGuid> {
 		let value = Uuid::parse_str(value).ok()?;
         Some(Self::new(name, value))
-    }
-}
-
-impl fmt::Display for CliGuid {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.value, f)
     }
 }
 
@@ -198,12 +180,6 @@ impl CliInt8 {
     }
 }
 
-impl fmt::Display for CliInt8 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.value, f)
-    }
-}
-
 // Signed Short type (<I16>)
 // Example: <I16>-16767</I16>
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/e0ed596d-0aea-40bb-a254-285b71188214
@@ -225,12 +201,6 @@ impl CliInt16 {
     pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliInt16> {
         let value = value.parse::<i16>().ok()?;
         Some(Self::new(name, value))
-    }
-}
-
-impl fmt::Display for CliInt16 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.value, f)
     }
 }
 
@@ -258,12 +228,6 @@ impl CliInt32 {
     }
 }
 
-impl fmt::Display for CliInt32 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.value, f)
-    }
-}
-
 // Signed Long type (<I64>)
 // Example: <I64>-9223372036854775808</I64>
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/de124e86-3f8c-426a-ab75-47fdb4597c62
@@ -288,9 +252,51 @@ impl CliInt64 {
     }
 }
 
-impl fmt::Display for CliInt64 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.value, f)
+// Float type (<Sg>)
+// Example: <Sg>12.34</Sg>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/d8a5a9ab-5f52-4175-96a3-c29afb7b82b8
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CliFloat {
+    pub value: f32,
+    pub name: Option<String>,
+}
+
+impl CliFloat {
+    pub fn new(name: Option<&str>, value: f32) -> CliFloat {
+        CliFloat {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliFloat> {
+        let value = value.parse::<f32>().ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
+// Double type (<Db>)
+// Example: <Db>12.34</Db>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/02fa08c5-139c-4e98-a13e-45784b4eabde
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CliDouble {
+    pub value: f64,
+    pub name: Option<String>,
+}
+
+impl CliDouble {
+    pub fn new(name: Option<&str>, value: f64) -> CliDouble {
+        CliDouble {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliDouble> {
+        let value = value.parse::<f64>().ok()?;
+        Some(Self::new(name, value))
     }
 }
 
@@ -308,6 +314,8 @@ pub enum CliValue {
     CliInt16(CliInt16),
     CliInt32(CliInt32),
     CliInt64(CliInt64),
+    CliFloat(CliFloat),
+    CliDouble(CliDouble),
 }
 
 impl CliValue {
@@ -322,6 +330,8 @@ impl CliValue {
             CliValue::CliInt16(prop) => { prop.name.as_deref() },
             CliValue::CliInt32(prop) => { prop.name.as_deref() },
             CliValue::CliInt64(prop) => { prop.name.as_deref() },
+            CliValue::CliFloat(prop) => { prop.name.as_deref() },
+            CliValue::CliDouble(prop) => { prop.name.as_deref() },
             _ => None,
         }
     }
@@ -330,6 +340,13 @@ impl CliValue {
         match *self {
             CliValue::CliObject(_) => true,
             _ => false,
+        }
+    }
+
+    pub fn as_object(&self) -> Option<&CliObject> {
+        match &*self {
+            CliValue::CliObject(prop) => Some(&prop),
+            _ => None,
         }
     }
 
@@ -396,10 +413,25 @@ impl CliValue {
         }
     }
 
+    pub fn as_int8(&self) -> Option<i8> {
+        match &*self {
+            CliValue::CliInt8(prop) => Some(prop.value),
+            _ => None,
+        }
+    }
+
     pub fn is_int16(&self) -> bool {
         match *self {
             CliValue::CliInt16(_) => true,
             _ => false,
+        }
+    }
+
+    pub fn as_int16(&self) -> Option<i16> {
+        match &*self {
+            CliValue::CliInt8(prop) => Some(prop.value as i16),
+            CliValue::CliInt16(prop) => Some(prop.value),
+            _ => None,
         }
     }
 
@@ -410,10 +442,58 @@ impl CliValue {
         }
     }
 
+    pub fn as_int32(&self) -> Option<i32> {
+        match &*self {
+            CliValue::CliInt8(prop) => Some(prop.value as i32),
+            CliValue::CliInt16(prop) => Some(prop.value as i32),
+            CliValue::CliInt32(prop) => Some(prop.value),
+            _ => None,
+        }
+    }
+
     pub fn is_int64(&self) -> bool {
         match *self {
             CliValue::CliInt64(_) => true,
             _ => false,
+        }
+    }
+
+    pub fn as_int64(&self) -> Option<i64> {
+        match &*self {
+            CliValue::CliInt8(prop) => Some(prop.value as i64),
+            CliValue::CliInt16(prop) => Some(prop.value as i64),
+            CliValue::CliInt32(prop) => Some(prop.value as i64),
+            CliValue::CliInt64(prop) => Some(prop.value),
+            _ => None,
+        }
+    }
+
+    pub fn is_float(&self) -> bool {
+        match *self {
+            CliValue::CliFloat(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_float(&self) -> Option<f32> {
+        match &*self {
+            CliValue::CliFloat(prop) => Some(prop.value),
+            _ => None,
+        }
+    }
+
+    pub fn is_double(&self) -> bool {
+        match *self {
+            CliValue::CliDouble(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_double(&self) -> Option<f64> {
+        match &*self {
+            CliValue::CliFloat(prop) => Some(prop.value as f64),
+            CliValue::CliDouble(prop) => Some(prop.value),
+            _ => None,
         }
     }
 }
@@ -527,6 +607,12 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         let prop_name = try_get_name_attr(&reader, &event);
                         let val = CliDuration::new_from_str(prop_name.as_deref(), &txt).unwrap();
                         obj.values.push(CliValue::CliDuration(val));
+                    },
+                    b"Db" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliDouble::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliDouble(val));
                     },
                     b"Nil" => {
                         let _val = CliValue::Null; // null value
