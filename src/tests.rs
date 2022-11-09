@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod pwsh {
-    use crate::bindings::{PowerShell};
+    use crate::bindings::PowerShell;
     use crate::cli_xml::{parse_cli_xml, CliObject};
     use uuid::Uuid;
 
@@ -55,16 +55,21 @@ mod pwsh {
 
         let verb_xml = pwsh.export_to_xml("Verb");
         println!("\nVerb (XML):\n{}", &verb_xml);
-        assert!(verb_xml.starts_with("<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">"));
-        assert!(verb_xml.find("<T>System.Management.Automation.VerbInfo</T>").is_some());
-        assert!(verb_xml.find("<ToString>System.Management.Automation.VerbInfo</ToString>").is_some());
+        assert!(verb_xml.starts_with(
+            "<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">"
+        ));
+        assert!(verb_xml
+            .find("<T>System.Management.Automation.VerbInfo</T>")
+            .is_some());
+        assert!(verb_xml
+            .find("<ToString>System.Management.Automation.VerbInfo</ToString>")
+            .is_some());
     }
 
     #[test]
     fn test_cli_xml() {
         // Get-VM IT-HELP-DVLS | Select-Object -Property VMId, VMName, State, Uptime, Status, Version
-        let vm_xml =
-r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
+        let vm_xml = r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
     <Obj RefId="0">
         <TN RefId="0">
             <T>Selected.Microsoft.HyperV.PowerShell.VirtualMachine</T>
@@ -98,15 +103,19 @@ r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/0
         let vmid_prop = vm_obj.values.get(0).unwrap();
         assert!(vmid_prop.is_guid());
         assert_eq!(vmid_prop.get_name(), Some("VMId"));
-        assert_eq!(vmid_prop.as_guid(), Uuid::parse_str("fbac8867-40ca-4032-a8e0-901c7f004cd7").ok().as_ref());
+        assert_eq!(
+            vmid_prop.as_guid(),
+            Uuid::parse_str("fbac8867-40ca-4032-a8e0-901c7f004cd7")
+                .ok()
+                .as_ref()
+        );
 
         let vmname_prop = vm_obj.values.get(1).unwrap();
         assert!(vmname_prop.is_string());
         assert_eq!(vmname_prop.get_name(), Some("VMName"));
         assert_eq!(vmname_prop.as_str(), Some("IT-HELP-DVLS"));
 
-        let cmd_xml =
-r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
+        let cmd_xml = r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
   <Obj RefId="0">
     <TN RefId="0">
       <T>System.Diagnostics.Process</T>
