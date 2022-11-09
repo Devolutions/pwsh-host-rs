@@ -98,7 +98,7 @@ r#"<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/0
         let vmid_prop = vm_obj.values.get(0).unwrap();
         assert!(vmid_prop.is_guid());
         assert_eq!(vmid_prop.get_name(), Some("VMId"));
-        assert_eq!(vmid_prop.as_guid(), Uuid::parse_str("fbac8867-40ca-4032-a8e0-901c7f004cd7").ok());
+        assert_eq!(vmid_prop.as_guid(), Uuid::parse_str("fbac8867-40ca-4032-a8e0-901c7f004cd7").ok().as_ref());
 
         let vmname_prop = vm_obj.values.get(1).unwrap();
         assert!(vmname_prop.is_string());

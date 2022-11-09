@@ -6,7 +6,7 @@ use quick_xml::events;
 use uuid::Uuid;
 use std::time::Duration;
 use crate::time::parse_iso8601_duration;
-//use std::fmt;
+use crate::time::DateTime;
 
 // [MS-PSRP]: PowerShell Remoting Protocol
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp
@@ -83,6 +83,32 @@ impl CliString {
     }
 }
 
+// Character type (<C>)
+// Example: <C>97</C>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/ff6f9767-a0a5-4cca-b091-4f15afc6e6d8
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliChar {
+    pub value: char,
+    pub name: Option<String>,
+}
+
+impl CliChar {
+    pub fn new(name: Option<&str>, value: char) -> CliChar {
+        CliChar {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliChar> {
+        let value = value.parse::<u16>().ok()?;
+        let mut chars = std::char::decode_utf16(vec![value]).collect::<Vec<_>>();
+        let value: char = chars.pop().unwrap().ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
 // Boolean type (<B>)
 // Example: <B>true</B>
 // https://www.w3.org/TR/xmlschema-2/#boolean
@@ -132,8 +158,34 @@ impl CliGuid {
     }
 }
 
+// Date/Time type (<DT>)
+// Example: <DT>2008-04-11T10:42:32.2731993-07:00</DT>
+// https://www.w3.org/TR/xmlschema-2/#dateTime
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/a3b75b8d-ad7e-4649-bb82-cfa70f54fb8c
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliDateTime {
+    pub value: DateTime,
+    pub name: Option<String>,
+}
+
+impl CliDateTime {
+    pub fn new(name: Option<&str>, value: DateTime) -> CliDateTime {
+        CliDateTime {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliDateTime> {
+        let value = DateTime::parse(value)?;
+        Some(Self::new(name, value))
+    }
+}
+
 // Duration type (<TS>)
 // Example: <TS>PT9.0269026S</TS>
+// https://www.w3.org/TR/xmlschema-2/#duration
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/434cd15d-8fb3-462c-a004-bcd0d3a60201
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -307,8 +359,10 @@ pub enum CliValue {
     Null,
     CliObject(CliObject),
     CliString(CliString),
+    CliChar(CliChar),
     CliBool(CliBool),
 	CliGuid(CliGuid),
+    CliDateTime(CliDateTime),
     CliDuration(CliDuration),
     CliInt8(CliInt8),
     CliInt16(CliInt16),
@@ -323,8 +377,10 @@ impl CliValue {
         match &*self {
             CliValue::CliObject(prop) => { prop.name.as_deref() },
             CliValue::CliString(prop) => { prop.name.as_deref() },
+            CliValue::CliChar(prop) => { prop.name.as_deref() },
             CliValue::CliBool(prop) => { prop.name.as_deref() },
             CliValue::CliGuid(prop) => { prop.name.as_deref() },
+            CliValue::CliDateTime(prop) => { prop.name.as_deref() },
             CliValue::CliDuration(prop) => { prop.name.as_deref() },
             CliValue::CliInt8(prop) => { prop.name.as_deref() },
             CliValue::CliInt16(prop) => { prop.name.as_deref() },
@@ -385,9 +441,23 @@ impl CliValue {
         }
     }
 
-    pub fn as_guid(&self) -> Option<Uuid> {
+    pub fn as_guid(&self) -> Option<&Uuid> {
         match &*self {
-            CliValue::CliGuid(prop) => Some(prop.value.clone()),
+            CliValue::CliGuid(prop) => Some(&prop.value),
+            _ => None,
+        }
+    }
+
+    pub fn is_datetime(&self) -> bool {
+        match *self {
+            CliValue::CliDateTime(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_datetime(&self) -> Option<&DateTime> {
+        match &*self {
+            CliValue::CliDateTime(prop) => Some(&prop.value),
             _ => None,
         }
     }
@@ -399,9 +469,9 @@ impl CliValue {
         }
     }
 
-    pub fn as_duration(&self) -> Option<Duration> {
+    pub fn as_duration(&self) -> Option<&Duration> {
         match &*self {
-            CliValue::CliDuration(prop) => Some(prop.value.clone()),
+            CliValue::CliDuration(prop) => Some(&prop.value),
             _ => None,
         }
     }
@@ -521,10 +591,6 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
         let event = reader.read_event();
         match event {
             Ok(Event::Start(event)) => {
-                //let event_name = event.name();
-                //let tag_name = String::from_utf8_lossy(event_name.as_ref());
-                //println!("Enter: {}", &tag_name);
-
                 match event.name().as_ref() {
                     b"Objs" => {
 
@@ -568,6 +634,12 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         let val = CliString::new(prop_name.as_deref(), &txt);
                         obj.values.push(CliValue::CliString(val));
                     },
+                    b"C" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliChar::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliChar(val));
+                    },
                     b"G" => {
                         let txt = reader.read_text(event.name()).unwrap();
                         let prop_name = try_get_name_attr(&reader, &event);
@@ -602,11 +674,23 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         let val = CliInt64::new_from_str(prop_name.as_deref(), &txt).unwrap();
                         obj.values.push(CliValue::CliInt64(val));
                     },
+                    b"DT" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliDateTime::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliDateTime(val));
+                    },
                     b"TS" => {
                         let txt = reader.read_text(event.name()).unwrap();
                         let prop_name = try_get_name_attr(&reader, &event);
                         let val = CliDuration::new_from_str(prop_name.as_deref(), &txt).unwrap();
                         obj.values.push(CliValue::CliDuration(val));
+                    },
+                    b"Sg" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliFloat::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliFloat(val));
                     },
                     b"Db" => {
                         let txt = reader.read_text(event.name()).unwrap();
@@ -615,7 +699,7 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         obj.values.push(CliValue::CliDouble(val));
                     },
                     b"Nil" => {
-                        let _val = CliValue::Null; // null value
+                        obj.values.push(CliValue::Null);
                     },
                     _ => {
                         let event_name = event.name();
