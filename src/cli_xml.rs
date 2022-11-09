@@ -140,30 +140,6 @@ impl CliBool {
     }
 }
 
-// GUID type (<G>)
-// Example: <G>792e5b37-4505-47ef-b7d2-8711bb7affa8</G>
-// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/c30c37fa-692d-49c7-bb86-b3179a97e106
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CliGuid {
-    pub value: Uuid,
-    pub name: Option<String>,
-}
-
-impl CliGuid {
-    pub fn new(name: Option<&str>, value: Uuid) -> CliGuid {
-        CliGuid {
-            name: name.map(|s| s.to_string()),
-            value: value,
-        }
-    }
-
-    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliGuid> {
-        let value = Uuid::parse_str(value).ok()?;
-        Some(Self::new(name, value))
-    }
-}
-
 // Date/Time type (<DT>)
 // Example: <DT>2008-04-11T10:42:32.2731993-07:00</DT>
 // https://www.w3.org/TR/xmlschema-2/#dateTime
@@ -358,6 +334,54 @@ impl CliDouble {
     }
 }
 
+// Array of Bytes type (<AB>)
+// Example: <BA>AQIDBA==</BA>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/489ed886-34d2-4306-a2f5-73843c219b14
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliBuffer {
+    pub value: Vec<u8>,
+    pub name: Option<String>,
+}
+
+impl CliBuffer {
+    pub fn new(name: Option<&str>, value: Vec<u8>) -> CliBuffer {
+        CliBuffer {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliBuffer> {
+        let value = base64::decode(value).ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
+// GUID type (<G>)
+// Example: <G>792e5b37-4505-47ef-b7d2-8711bb7affa8</G>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/c30c37fa-692d-49c7-bb86-b3179a97e106
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliGuid {
+    pub value: Uuid,
+    pub name: Option<String>,
+}
+
+impl CliGuid {
+    pub fn new(name: Option<&str>, value: Uuid) -> CliGuid {
+        CliGuid {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliGuid> {
+        let value = Uuid::parse_str(value).ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
 // Generic CLI XML Value type
 
 #[derive(Debug, Clone)]
@@ -367,7 +391,6 @@ pub enum CliValue {
     CliString(CliString),
     CliChar(CliChar),
     CliBool(CliBool),
-    CliGuid(CliGuid),
     CliDateTime(CliDateTime),
     CliDuration(CliDuration),
     CliInt8(CliInt8),
@@ -376,6 +399,8 @@ pub enum CliValue {
     CliInt64(CliInt64),
     CliFloat(CliFloat),
     CliDouble(CliDouble),
+    CliBuffer(CliBuffer),
+    CliGuid(CliGuid),
 }
 
 impl CliValue {
@@ -385,7 +410,6 @@ impl CliValue {
             CliValue::CliString(prop) => prop.name.as_deref(),
             CliValue::CliChar(prop) => prop.name.as_deref(),
             CliValue::CliBool(prop) => prop.name.as_deref(),
-            CliValue::CliGuid(prop) => prop.name.as_deref(),
             CliValue::CliDateTime(prop) => prop.name.as_deref(),
             CliValue::CliDuration(prop) => prop.name.as_deref(),
             CliValue::CliInt8(prop) => prop.name.as_deref(),
@@ -394,7 +418,16 @@ impl CliValue {
             CliValue::CliInt64(prop) => prop.name.as_deref(),
             CliValue::CliFloat(prop) => prop.name.as_deref(),
             CliValue::CliDouble(prop) => prop.name.as_deref(),
+            CliValue::CliBuffer(prop) => prop.name.as_deref(),
+            CliValue::CliGuid(prop) => prop.name.as_deref(),
             _ => None,
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        match *self {
+            CliValue::Null => true,
+            _ => false,
         }
     }
 
@@ -572,6 +605,20 @@ impl CliValue {
             _ => None,
         }
     }
+
+    pub fn is_buffer(&self) -> bool {
+        match *self {
+            CliValue::CliBuffer(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_bytes(&self) -> Option<&Vec<u8>> {
+        match &*self {
+            CliValue::CliBuffer(prop) => Some(&prop.value),
+            _ => None,
+        }
+    }
 }
 
 fn try_get_ref_id_attr<B>(reader: &Reader<B>, event: &events::BytesStart) -> Option<String> {
@@ -618,6 +665,10 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                             //println!("TNRef RefId={}", ref_id);
                         }
                     }
+                    b"ToString" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        obj.string_repr = Some(txt.to_string());
+                    }
                     b"Props" => {
                         // Adapted Properties
                         // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/173c30d7-b0a6-4aad-9b00-9891c441b0f3
@@ -643,16 +694,6 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         let prop_name = try_get_name_attr(&reader, &event);
                         let val = CliChar::new_from_str(prop_name.as_deref(), &txt).unwrap();
                         obj.values.push(CliValue::CliChar(val));
-                    }
-                    b"G" => {
-                        let txt = reader.read_text(event.name()).unwrap();
-                        let prop_name = try_get_name_attr(&reader, &event);
-                        let val = CliGuid::new_from_str(prop_name.as_deref(), &txt).unwrap();
-                        obj.values.push(CliValue::CliGuid(val));
-                    }
-                    b"ToString" => {
-                        let txt = reader.read_text(event.name()).unwrap();
-                        obj.string_repr = Some(txt.to_string());
                     }
                     b"SB" => {
                         let txt = reader.read_text(event.name()).unwrap();
@@ -701,6 +742,18 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         let prop_name = try_get_name_attr(&reader, &event);
                         let val = CliDouble::new_from_str(prop_name.as_deref(), &txt).unwrap();
                         obj.values.push(CliValue::CliDouble(val));
+                    }
+                    b"AB" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliBuffer::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliBuffer(val));
+                    }
+                    b"G" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliGuid::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliGuid(val));
                     }
                     b"Nil" => {
                         obj.values.push(CliValue::Null);
