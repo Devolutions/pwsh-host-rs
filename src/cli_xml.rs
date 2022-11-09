@@ -7,6 +7,7 @@ use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use std::time::Duration;
 use uuid::Uuid;
+use url::Url;
 
 // [MS-PSRP]: PowerShell Remoting Protocol
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp
@@ -382,6 +383,36 @@ impl CliGuid {
     }
 }
 
+// URI type (<URI>)
+// Example: <URI>http://www.microsoft.com/</URI>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/4ac73ac2-5cf7-4669-b4de-c8ba19a13186
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliUri {
+    pub value: Url,
+    pub name: Option<String>,
+}
+
+impl CliUri {
+    pub fn new(name: Option<&str>, value: Url) -> CliUri {
+        CliUri {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliUri> {
+        let value = Url::parse(value).ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
+impl Default for CliUri {
+    fn default() -> Self {
+        CliUri::new(None, Url::parse("http://default").unwrap())
+    }
+}
+
 // Generic CLI XML Value type
 
 #[derive(Debug, Clone)]
@@ -401,6 +432,7 @@ pub enum CliValue {
     CliDouble(CliDouble),
     CliBuffer(CliBuffer),
     CliGuid(CliGuid),
+    CliUri(CliUri),
 }
 
 impl CliValue {
@@ -420,6 +452,7 @@ impl CliValue {
             CliValue::CliDouble(prop) => prop.name.as_deref(),
             CliValue::CliBuffer(prop) => prop.name.as_deref(),
             CliValue::CliGuid(prop) => prop.name.as_deref(),
+            CliValue::CliUri(prop) => prop.name.as_deref(),
             _ => None,
         }
     }
@@ -469,20 +502,6 @@ impl CliValue {
     pub fn as_bool(&self) -> Option<bool> {
         match &*self {
             CliValue::CliBool(prop) => Some(prop.value),
-            _ => None,
-        }
-    }
-
-    pub fn is_guid(&self) -> bool {
-        match *self {
-            CliValue::CliGuid(_) => true,
-            _ => false,
-        }
-    }
-
-    pub fn as_guid(&self) -> Option<&Uuid> {
-        match &*self {
-            CliValue::CliGuid(prop) => Some(&prop.value),
             _ => None,
         }
     }
@@ -616,6 +635,34 @@ impl CliValue {
     pub fn as_bytes(&self) -> Option<&Vec<u8>> {
         match &*self {
             CliValue::CliBuffer(prop) => Some(&prop.value),
+            _ => None,
+        }
+    }
+
+    pub fn is_guid(&self) -> bool {
+        match *self {
+            CliValue::CliGuid(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_guid(&self) -> Option<&Uuid> {
+        match &*self {
+            CliValue::CliGuid(prop) => Some(&prop.value),
+            _ => None,
+        }
+    }
+
+    pub fn is_uri(&self) -> bool {
+        match *self {
+            CliValue::CliUri(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_uri(&self) -> Option<&Url> {
+        match &*self {
+            CliValue::CliUri(prop) => Some(&prop.value),
             _ => None,
         }
     }
@@ -754,6 +801,12 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         let prop_name = try_get_name_attr(&reader, &event);
                         let val = CliGuid::new_from_str(prop_name.as_deref(), &txt).unwrap();
                         obj.values.push(CliValue::CliGuid(val));
+                    }
+                    b"URI" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliUri::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliUri(val));
                     }
                     b"Nil" => {
                         obj.values.push(CliValue::Null);

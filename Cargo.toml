@@ -23,6 +23,7 @@ time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 iso8601-duration = "0.1"
 base64 = "0.13"
 uuid = "1.2"
+url = "2.3"
 
 [target.'cfg(windows)'.dependencies]
 widestring = "0.4"
