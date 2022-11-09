@@ -43,7 +43,7 @@ impl CliObject {
 // Type Names (<TN>, <T>, <TNRef>)
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/2784bd9c-267d-4297-b603-722c727f85f1
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CliTypeName {
     pub name: Option<String>,
     pub values: Vec<String>,
@@ -64,7 +64,7 @@ impl CliTypeName {
 // Example: <S>This is a string</S>
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/052b8c32-735b-49c0-8c24-bb32a5c871ce
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CliString {
     pub value: String,
     pub name: Option<String>,
@@ -85,41 +85,11 @@ impl fmt::Display for CliString {
     }
 }
 
-// Signed Int type (<I32>)
-// Example: <I32>-2147483648</I32>
-// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/9eef96ba-1876-427b-9450-75a1b28f5668
-
-#[derive(Debug, Clone, Default)]
-pub struct CliInt32 {
-    pub value: i32,
-    pub name: Option<String>,
-}
-
-impl CliInt32 {
-    pub fn new(name: Option<&str>, value: i32) -> CliInt32 {
-        CliInt32 {
-            name: name.map(|s| s.to_string()),
-            value: value,
-        }
-    }
-
-    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliInt32> {
-        let value = value.parse::<i32>().ok()?;
-        Some(Self::new(name, value))
-    }
-}
-
-impl fmt::Display for CliInt32 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.value, f)
-    }
-}
-
 // GUID type (<G>)
 // Example: <G>792e5b37-4505-47ef-b7d2-8711bb7affa8</G>
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/c30c37fa-692d-49c7-bb86-b3179a97e106
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CliGuid {
     pub value: Uuid,
     pub name: Option<String>,
@@ -145,6 +115,126 @@ impl fmt::Display for CliGuid {
     }
 }
 
+// Signed Byte type (<SB>)
+// Example: <SB>-127</SB>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/8046c418-1531-4c43-9b9d-fb9bceace0db
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliInt8 {
+    pub value: i8,
+    pub name: Option<String>,
+}
+
+impl CliInt8 {
+    pub fn new(name: Option<&str>, value: i8) -> CliInt8 {
+        CliInt8 {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliInt8> {
+        let value = value.parse::<i8>().ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
+impl fmt::Display for CliInt8 {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&self.value, f)
+    }
+}
+
+// Signed Short type (<I16>)
+// Example: <I16>-16767</I16>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/e0ed596d-0aea-40bb-a254-285b71188214
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliInt16 {
+    pub value: i16,
+    pub name: Option<String>,
+}
+
+impl CliInt16 {
+    pub fn new(name: Option<&str>, value: i16) -> CliInt16 {
+        CliInt16 {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliInt16> {
+        let value = value.parse::<i16>().ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
+impl fmt::Display for CliInt16 {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&self.value, f)
+    }
+}
+
+// Signed Int type (<I32>)
+// Example: <I32>-2147483648</I32>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/9eef96ba-1876-427b-9450-75a1b28f5668
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliInt32 {
+    pub value: i32,
+    pub name: Option<String>,
+}
+
+impl CliInt32 {
+    pub fn new(name: Option<&str>, value: i32) -> CliInt32 {
+        CliInt32 {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliInt32> {
+        let value = value.parse::<i32>().ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
+impl fmt::Display for CliInt32 {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&self.value, f)
+    }
+}
+
+// Signed Long type (<I64>)
+// Example: <I64>-9223372036854775808</I64>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/de124e86-3f8c-426a-ab75-47fdb4597c62
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliInt64 {
+    pub value: i64,
+    pub name: Option<String>,
+}
+
+impl CliInt64 {
+    pub fn new(name: Option<&str>, value: i64) -> CliInt64 {
+        CliInt64 {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliInt64> {
+        let value = value.parse::<i64>().ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
+impl fmt::Display for CliInt64 {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&self.value, f)
+    }
+}
+
 // Generic CLI XML Value type
 
 #[derive(Debug, Clone)]
@@ -153,7 +243,88 @@ pub enum CliValue {
     CliObject(CliObject),
     CliString(CliString),
 	CliGuid(CliGuid),
+    CliInt8(CliInt8),
+    CliInt16(CliInt16),
     CliInt32(CliInt32),
+    CliInt64(CliInt64),
+}
+
+impl CliValue {
+    pub fn get_name(&self) -> Option<&str> {
+        match &*self {
+            CliValue::CliObject(prop) => { prop.name.as_deref() },
+            CliValue::CliString(prop) => { prop.name.as_deref() },
+            CliValue::CliGuid(prop) => { prop.name.as_deref() },
+            CliValue::CliInt8(prop) => { prop.name.as_deref() },
+            CliValue::CliInt16(prop) => { prop.name.as_deref() },
+            CliValue::CliInt32(prop) => { prop.name.as_deref() },
+            CliValue::CliInt64(prop) => { prop.name.as_deref() },
+            _ => None,
+        }
+    }
+
+    pub fn is_object(&self) -> bool {
+        match *self {
+            CliValue::CliObject(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_string(&self) -> bool {
+        match *self {
+            CliValue::CliString(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match &*self {
+            CliValue::CliString(prop) => Some(&prop.value),
+            _ => None,
+        }
+    }
+
+    pub fn is_guid(&self) -> bool {
+        match *self {
+            CliValue::CliGuid(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_guid(&self) -> Option<Uuid> {
+        match &*self {
+            CliValue::CliGuid(prop) => Some(prop.value.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn is_int8(&self) -> bool {
+        match *self {
+            CliValue::CliInt8(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_int16(&self) -> bool {
+        match *self {
+            CliValue::CliInt16(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_int32(&self) -> bool {
+        match *self {
+            CliValue::CliInt32(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_int64(&self) -> bool {
+        match *self {
+            CliValue::CliInt64(_) => true,
+            _ => false,
+        }
+    }
 }
 
 fn try_get_ref_id_attr<B>(reader: &Reader<B>, event: &events::BytesStart) -> Option<String> {
