@@ -6,8 +6,8 @@ use quick_xml::events;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use std::time::Duration;
-use uuid::Uuid;
 use url::Url;
+use uuid::Uuid;
 
 // [MS-PSRP]: PowerShell Remoting Protocol
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp
@@ -191,6 +191,30 @@ impl CliDuration {
     }
 }
 
+// Unsigned Byte type (<By>)
+// Example: <By>254</By>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/6e25153d-77b6-4e21-b5fa-6f986895171a
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliUInt8 {
+    pub value: u8,
+    pub name: Option<String>,
+}
+
+impl CliUInt8 {
+    pub fn new(name: Option<&str>, value: u8) -> CliUInt8 {
+        CliUInt8 {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliUInt8> {
+        let value = value.parse::<u8>().ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
 // Signed Byte type (<SB>)
 // Example: <SB>-127</SB>
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/8046c418-1531-4c43-9b9d-fb9bceace0db
@@ -211,6 +235,30 @@ impl CliInt8 {
 
     pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliInt8> {
         let value = value.parse::<i8>().ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
+// Unsigned Short type (<U16>)
+// Example: <U16>65535</U16>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/33751ca7-90d0-4b5e-a04f-2d8798cfb419
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliUInt16 {
+    pub value: u16,
+    pub name: Option<String>,
+}
+
+impl CliUInt16 {
+    pub fn new(name: Option<&str>, value: u16) -> CliUInt16 {
+        CliUInt16 {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliUInt16> {
+        let value = value.parse::<u16>().ok()?;
         Some(Self::new(name, value))
     }
 }
@@ -239,6 +287,30 @@ impl CliInt16 {
     }
 }
 
+// Unsigned Int type (<U32>)
+// Example: <U32>4294967295</U32>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/7b904471-3519-4a6a-900b-8053ad975c08
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliUInt32 {
+    pub value: u32,
+    pub name: Option<String>,
+}
+
+impl CliUInt32 {
+    pub fn new(name: Option<&str>, value: u32) -> CliUInt32 {
+        CliUInt32 {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliUInt32> {
+        let value = value.parse::<u32>().ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
 // Signed Int type (<I32>)
 // Example: <I32>-2147483648</I32>
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/9eef96ba-1876-427b-9450-75a1b28f5668
@@ -259,6 +331,30 @@ impl CliInt32 {
 
     pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliInt32> {
         let value = value.parse::<i32>().ok()?;
+        Some(Self::new(name, value))
+    }
+}
+
+// Unsigned Long type (<U64>)
+// Example: <U64>18446744073709551615</U64>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/d92cd5d2-59c6-4a61-b517-9fc48823cb4d
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliUInt64 {
+    pub value: u64,
+    pub name: Option<String>,
+}
+
+impl CliUInt64 {
+    pub fn new(name: Option<&str>, value: u64) -> CliUInt64 {
+        CliUInt64 {
+            name: name.map(|s| s.to_string()),
+            value: value,
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliUInt64> {
+        let value = value.parse::<u64>().ok()?;
         Some(Self::new(name, value))
     }
 }
@@ -424,9 +520,13 @@ pub enum CliValue {
     CliBool(CliBool),
     CliDateTime(CliDateTime),
     CliDuration(CliDuration),
+    CliUInt8(CliUInt8),
     CliInt8(CliInt8),
+    CliUInt16(CliUInt16),
     CliInt16(CliInt16),
+    CliUInt32(CliUInt32),
     CliInt32(CliInt32),
+    CliUInt64(CliUInt64),
     CliInt64(CliInt64),
     CliFloat(CliFloat),
     CliDouble(CliDouble),
@@ -444,9 +544,13 @@ impl CliValue {
             CliValue::CliBool(prop) => prop.name.as_deref(),
             CliValue::CliDateTime(prop) => prop.name.as_deref(),
             CliValue::CliDuration(prop) => prop.name.as_deref(),
+            CliValue::CliUInt8(prop) => prop.name.as_deref(),
             CliValue::CliInt8(prop) => prop.name.as_deref(),
+            CliValue::CliUInt16(prop) => prop.name.as_deref(),
             CliValue::CliInt16(prop) => prop.name.as_deref(),
+            CliValue::CliUInt32(prop) => prop.name.as_deref(),
             CliValue::CliInt32(prop) => prop.name.as_deref(),
+            CliValue::CliUInt64(prop) => prop.name.as_deref(),
             CliValue::CliInt64(prop) => prop.name.as_deref(),
             CliValue::CliFloat(prop) => prop.name.as_deref(),
             CliValue::CliDouble(prop) => prop.name.as_deref(),
@@ -534,6 +638,20 @@ impl CliValue {
         }
     }
 
+    pub fn is_uint8(&self) -> bool {
+        match *self {
+            CliValue::CliUInt8(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_uint8(&self) -> Option<u8> {
+        match &*self {
+            CliValue::CliUInt8(prop) => Some(prop.value),
+            _ => None,
+        }
+    }
+
     pub fn is_int8(&self) -> bool {
         match *self {
             CliValue::CliInt8(_) => true,
@@ -544,6 +662,21 @@ impl CliValue {
     pub fn as_int8(&self) -> Option<i8> {
         match &*self {
             CliValue::CliInt8(prop) => Some(prop.value),
+            _ => None,
+        }
+    }
+
+    pub fn is_uint16(&self) -> bool {
+        match *self {
+            CliValue::CliUInt16(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_uint16(&self) -> Option<u16> {
+        match &*self {
+            CliValue::CliUInt8(prop) => Some(prop.value as u16),
+            CliValue::CliUInt16(prop) => Some(prop.value),
             _ => None,
         }
     }
@@ -563,6 +696,22 @@ impl CliValue {
         }
     }
 
+    pub fn is_uint32(&self) -> bool {
+        match *self {
+            CliValue::CliUInt32(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_uint32(&self) -> Option<u32> {
+        match &*self {
+            CliValue::CliUInt8(prop) => Some(prop.value as u32),
+            CliValue::CliUInt16(prop) => Some(prop.value as u32),
+            CliValue::CliUInt32(prop) => Some(prop.value),
+            _ => None,
+        }
+    }
+
     pub fn is_int32(&self) -> bool {
         match *self {
             CliValue::CliInt32(_) => true,
@@ -575,6 +724,23 @@ impl CliValue {
             CliValue::CliInt8(prop) => Some(prop.value as i32),
             CliValue::CliInt16(prop) => Some(prop.value as i32),
             CliValue::CliInt32(prop) => Some(prop.value),
+            _ => None,
+        }
+    }
+
+    pub fn is_uint64(&self) -> bool {
+        match *self {
+            CliValue::CliUInt64(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_uint64(&self) -> Option<u64> {
+        match &*self {
+            CliValue::CliUInt8(prop) => Some(prop.value as u64),
+            CliValue::CliUInt16(prop) => Some(prop.value as u64),
+            CliValue::CliUInt32(prop) => Some(prop.value as u64),
+            CliValue::CliUInt64(prop) => Some(prop.value),
             _ => None,
         }
     }
@@ -724,6 +890,8 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         // Extended Properties
                         // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/4cca6d92-4a8e-4406-91cb-0235a98f7d6f
                     }
+                    b"LST" => {}
+                    b"IE" => {}
                     b"B" => {
                         let txt = reader.read_text(event.name()).unwrap();
                         let prop_name = try_get_name_attr(&reader, &event);
@@ -742,11 +910,23 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         let val = CliChar::new_from_str(prop_name.as_deref(), &txt).unwrap();
                         obj.values.push(CliValue::CliChar(val));
                     }
+                    b"By" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliUInt8::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliUInt8(val));
+                    }
                     b"SB" => {
                         let txt = reader.read_text(event.name()).unwrap();
                         let prop_name = try_get_name_attr(&reader, &event);
                         let val = CliInt8::new_from_str(prop_name.as_deref(), &txt).unwrap();
                         obj.values.push(CliValue::CliInt8(val));
+                    }
+                    b"U16" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliUInt16::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliUInt16(val));
                     }
                     b"I16" => {
                         let txt = reader.read_text(event.name()).unwrap();
@@ -754,11 +934,23 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         let val = CliInt16::new_from_str(prop_name.as_deref(), &txt).unwrap();
                         obj.values.push(CliValue::CliInt16(val));
                     }
+                    b"U32" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliUInt32::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliUInt32(val));
+                    }
                     b"I32" => {
                         let txt = reader.read_text(event.name()).unwrap();
                         let prop_name = try_get_name_attr(&reader, &event);
                         let val = CliInt32::new_from_str(prop_name.as_deref(), &txt).unwrap();
                         obj.values.push(CliValue::CliInt32(val));
+                    }
+                    b"U64" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliUInt64::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliUInt64(val));
                     }
                     b"I64" => {
                         let txt = reader.read_text(event.name()).unwrap();
