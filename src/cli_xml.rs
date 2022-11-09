@@ -509,6 +509,75 @@ impl Default for CliUri {
     }
 }
 
+// Version type (<Version>)
+// Example: <Version>6.2.1.3</Version>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/390db910-e035-4f97-80fd-181a008ff6f8
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliVersion {
+    pub value: String,
+    pub name: Option<String>,
+}
+
+impl CliVersion {
+    pub fn new(name: Option<&str>, value: &str) -> CliVersion {
+        CliVersion {
+            name: name.map(|s| s.to_string()),
+            value: value.to_string(),
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliVersion> {
+        Some(Self::new(name, value))
+    }
+}
+
+// XML Document type (<XD>)
+// Example: <XD>&lt;name attribute="value"&gt;Content&lt;/name&gt;</XD>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/df5908ab-bb4d-45e4-8adc-7258e5a9f537
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliXmlDocument {
+    pub value: String,
+    pub name: Option<String>,
+}
+
+impl CliXmlDocument {
+    pub fn new(name: Option<&str>, value: &str) -> CliXmlDocument {
+        CliXmlDocument {
+            name: name.map(|s| s.to_string()),
+            value: value.to_string(),
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliXmlDocument> {
+        Some(Self::new(name, value))
+    }
+}
+
+// Script Block type (<SBK>)
+// Example: <SBK>get-command -type cmdlet</SBK>
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp/306af1be-6be5-4074-acc9-e29bd32f3206
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CliScriptBlock {
+    pub value: String,
+    pub name: Option<String>,
+}
+
+impl CliScriptBlock {
+    pub fn new(name: Option<&str>, value: &str) -> CliScriptBlock {
+        CliScriptBlock {
+            name: name.map(|s| s.to_string()),
+            value: value.to_string(),
+        }
+    }
+
+    pub fn new_from_str(name: Option<&str>, value: &str) -> Option<CliScriptBlock> {
+        Some(Self::new(name, value))
+    }
+}
+
 // Generic CLI XML Value type
 
 #[derive(Debug, Clone)]
@@ -533,6 +602,9 @@ pub enum CliValue {
     CliBuffer(CliBuffer),
     CliGuid(CliGuid),
     CliUri(CliUri),
+    CliVersion(CliVersion),
+    CliXmlDocument(CliXmlDocument),
+    CliScriptBlock(CliScriptBlock),
 }
 
 impl CliValue {
@@ -557,6 +629,9 @@ impl CliValue {
             CliValue::CliBuffer(prop) => prop.name.as_deref(),
             CliValue::CliGuid(prop) => prop.name.as_deref(),
             CliValue::CliUri(prop) => prop.name.as_deref(),
+            CliValue::CliVersion(prop) => prop.name.as_deref(),
+            CliValue::CliXmlDocument(prop) => prop.name.as_deref(),
+            CliValue::CliScriptBlock(prop) => prop.name.as_deref(),
             _ => None,
         }
     }
@@ -832,6 +907,48 @@ impl CliValue {
             _ => None,
         }
     }
+
+    pub fn is_version(&self) -> bool {
+        match *self {
+            CliValue::CliVersion(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_version(&self) -> Option<&str> {
+        match &*self {
+            CliValue::CliVersion(prop) => Some(&prop.value),
+            _ => None,
+        }
+    }
+
+    pub fn is_xml_document(&self) -> bool {
+        match *self {
+            CliValue::CliXmlDocument(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_xml_document(&self) -> Option<&str> {
+        match &*self {
+            CliValue::CliXmlDocument(prop) => Some(&prop.value),
+            _ => None,
+        }
+    }
+
+    pub fn is_script_block(&self) -> bool {
+        match *self {
+            CliValue::CliScriptBlock(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn as_script_block(&self) -> Option<&str> {
+        match &*self {
+            CliValue::CliScriptBlock(prop) => Some(&prop.value),
+            _ => None,
+        }
+    }
 }
 
 fn try_get_ref_id_attr<B>(reader: &Reader<B>, event: &events::BytesStart) -> Option<String> {
@@ -999,6 +1116,24 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                         let prop_name = try_get_name_attr(&reader, &event);
                         let val = CliUri::new_from_str(prop_name.as_deref(), &txt).unwrap();
                         obj.values.push(CliValue::CliUri(val));
+                    }
+                    b"Version" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliVersion::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliVersion(val));
+                    }
+                    b"XD" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliXmlDocument::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliXmlDocument(val));
+                    }
+                    b"SBK" => {
+                        let txt = reader.read_text(event.name()).unwrap();
+                        let prop_name = try_get_name_attr(&reader, &event);
+                        let val = CliScriptBlock::new_from_str(prop_name.as_deref(), &txt).unwrap();
+                        obj.values.push(CliValue::CliScriptBlock(val));
                     }
                     b"Nil" => {
                         obj.values.push(CliValue::Null);
