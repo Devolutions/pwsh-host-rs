@@ -1151,6 +1151,7 @@ pub fn parse_cli_xml(cli_xml: &str) -> Vec<CliObject> {
                     b"DT" => {
                         let txt = reader.read_text(event.name()).unwrap();
                         let prop_name = try_get_name_attr(&reader, &event);
+                        println!("DT '{}'", txt);
                         let val = CliDateTime::new_from_str(prop_name.as_deref(), &txt).unwrap();
                         obj.values.push(CliValue::CliDateTime(val));
                     }
