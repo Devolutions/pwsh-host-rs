@@ -12,7 +12,7 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $cratesRoot = Join-Path $repoRoot 'crates'
-$releaseWorkflow = Join-Path $repoRoot '.github/workflows/release.yml'
+$readmePath = Join-Path $repoRoot 'README.md'
 
 if (-not (Test-Path -Path $cratesRoot -PathType Container)) {
     throw "Crates directory not found: $cratesRoot"
@@ -28,13 +28,18 @@ if (-not $cargoFiles) {
 
 $encoding = New-Object System.Text.UTF8Encoding($false)
 $updated = @()
-$workflowUpdated = $false
+$readmeUpdated = $false
 
 foreach ($cargoFile in $cargoFiles) {
     $content = [System.IO.File]::ReadAllText($cargoFile)
 
-    $pattern = '(?ms)^(\[package\]\s*.*?^version\s*=\s*")(?<current>[^"\r\n]+)(")'
-    $match = [System.Text.RegularExpressions.Regex]::Match($content, $pattern)
+    $pattern = '(?ms)^(?<prefix>\[package\]\s*.*?^version\s*=\s*")(?<current>[^"\r\n]+)(?<suffix>")'
+    $regex = [System.Text.RegularExpressions.Regex]::new(
+        $pattern,
+        [System.Text.RegularExpressions.RegexOptions]::Multiline -bor [System.Text.RegularExpressions.RegexOptions]::Singleline,
+        [System.TimeSpan]::FromSeconds(5)
+    )
+    $match = $regex.Match($content)
     if (-not $match.Success) {
         throw "Could not find package version field in $cargoFile"
     }
@@ -44,12 +49,13 @@ foreach ($cargoFile in $cargoFiles) {
         continue
     }
 
-    $newContent = [System.Text.RegularExpressions.Regex]::Replace(
+    $newContent = $regex.Replace(
         $content,
-        $pattern,
-        ($match.Groups[1].Value + $Version + $match.Groups[3].Value),
-        [System.Text.RegularExpressions.RegexOptions]::Multiline -bor [System.Text.RegularExpressions.RegexOptions]::Singleline,
-        [System.TimeSpan]::FromSeconds(5)
+        [System.Text.RegularExpressions.MatchEvaluator] {
+            param($cargoMatch)
+            $cargoMatch.Groups['prefix'].Value + $Version + $cargoMatch.Groups['suffix'].Value
+        },
+        1
     )
 
     if (-not $DryRun) {
@@ -59,29 +65,51 @@ foreach ($cargoFile in $cargoFiles) {
     $updated += $cargoFile
 }
 
-if (Test-Path -Path $releaseWorkflow -PathType Leaf) {
-    $workflowContent = [System.IO.File]::ReadAllText($releaseWorkflow)
-    $workflowPattern = '(?m)(?<prefix>for example\s+v)(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)'
-    $workflowMatch = [System.Text.RegularExpressions.Regex]::Match($workflowContent, $workflowPattern)
-
-    if ($workflowMatch.Success -and $workflowMatch.Groups['current'].Value -ne $Version) {
-        $replacement = $workflowMatch.Groups['prefix'].Value + $Version
-        $newWorkflowContent = $workflowContent.Substring(0, $workflowMatch.Index) +
-            $replacement +
-            $workflowContent.Substring($workflowMatch.Index + $workflowMatch.Length)
-
-        if (-not $DryRun) {
-            [System.IO.File]::WriteAllText($releaseWorkflow, $newWorkflowContent, $encoding)
-        }
-
-        $workflowUpdated = $true
+if ($updated.Count -gt 0 -and -not $DryRun) {
+    Push-Location -Path $repoRoot
+    try {
+        cargo update -w
+    }
+    finally {
+        Pop-Location
     }
 }
 
-if ($updated.Count -eq 0 -and -not $workflowUpdated) {
+if (Test-Path -Path $readmePath -PathType Leaf) {
+    $readmeContent = [System.IO.File]::ReadAllText($readmePath)
+    $newReadmeContent = $readmeContent
+    $readmePatterns = @(
+        '(?m)(?<prefix>Install a specific tag \(example `v)(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?<suffix>`\):)',
+        '(?m)(?<prefix>bash -s -- v)(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)',
+        '(?m)(?<prefix>-Version v)(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)'
+    )
+
+    foreach ($pattern in $readmePatterns) {
+        $newReadmeContent = [System.Text.RegularExpressions.Regex]::Replace(
+            $newReadmeContent,
+            $pattern,
+            [System.Text.RegularExpressions.MatchEvaluator] {
+                param($readmeMatch)
+                $readmeMatch.Groups['prefix'].Value + $Version + $readmeMatch.Groups['suffix'].Value
+            },
+            [System.Text.RegularExpressions.RegexOptions]::Multiline,
+            [System.TimeSpan]::FromSeconds(5)
+        )
+    }
+
+    if ($newReadmeContent -ne $readmeContent) {
+        if (-not $DryRun) {
+            [System.IO.File]::WriteAllText($readmePath, $newReadmeContent, $encoding)
+        }
+
+        $readmeUpdated = $true
+    }
+}
+
+if ($updated.Count -eq 0 -and -not $readmeUpdated) {
     Write-Host "All crate package versions are already $Version"
-    if (Test-Path -Path $releaseWorkflow -PathType Leaf) {
-        Write-Host "No release workflow example tag needed updating"
+    if (Test-Path -Path $readmePath -PathType Leaf) {
+        Write-Host "No README release example tag needed updating"
     }
     exit 0
 }
@@ -89,8 +117,11 @@ if ($updated.Count -eq 0 -and -not $workflowUpdated) {
 if ($updated.Count -gt 0) {
     Write-Host "Updated crate versions to ${Version}:"
     $updated | ForEach-Object { Write-Host " - $_" }
+    if (-not $DryRun) {
+        Write-Host "Refreshed Cargo.lock"
+    }
 }
 
-if ($workflowUpdated) {
-    Write-Host "Updated release workflow example tag in: $releaseWorkflow"
+if ($readmeUpdated) {
+    Write-Host "Updated README release example tag in: $readmePath"
 }

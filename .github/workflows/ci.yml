@@ -44,8 +44,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           MULTI_PWSH_CACHE_KEEP: '1'
         run: |
+          multi-pwsh install stable
+          multi-pwsh install preview
+          multi-pwsh install lts
           multi-pwsh install 7.4
-          multi-pwsh install 7.5
 
       - name: Install .NET SDK
         uses: actions/setup-dotnet@v4
@@ -125,8 +127,19 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           MULTI_PWSH_CACHE_KEEP: '1'
         run: |
+          multi-pwsh install stable
+          multi-pwsh install preview
+          multi-pwsh install lts
           multi-pwsh install 7.4
           multi-pwsh install 7.5
+          $stableVersion = & pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          $previewLabel = & pwsh-preview -NoLogo -NoProfile -Command '$label = [string]$PSVersionTable.PSVersion.PreReleaseLabel; if ([string]::IsNullOrWhiteSpace($label)) { throw "Expected pwsh-preview to resolve to a prerelease build." }; $label'
+          $ltsVersion = & pwsh-lts -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          & multi-pwsh alias set pwsh-preview preview
+          & multi-pwsh alias set pwsh-lts lts
+          Write-Host "pwsh -> $stableVersion"
+          Write-Host "pwsh-preview -> $previewLabel"
+          Write-Host "pwsh-lts -> $ltsVersion"
           pwsh-7.4 -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
           pwsh-7.5 -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
 

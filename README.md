@@ -16,14 +16,14 @@ curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/m
 irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.ps1 | iex
 ```
 
-Install a specific tag (example `v0.6.0`):
+Install a specific tag (example `v0.9.0`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.sh | bash -s -- v0.6.0
+curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.sh | bash -s -- v0.9.0
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.ps1))) -Version v0.6.0
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.ps1))) -Version v0.9.0
 ```
 
 Uninstall bootstrap scripts:
@@ -40,17 +40,25 @@ irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/t
 
 ```powershell
 multi-pwsh install stable
+multi-pwsh install preview
+multi-pwsh install lts
 multi-pwsh install 7.4
-multi-pwsh install 7.5
 ```
 
 Verify aliases:
 
 ```powershell
-pwsh-7 --version
+pwsh --version
+pwsh-preview --version
+pwsh-lts --version
 pwsh-7.4 --version
-pwsh-7.5 --version
 ```
+
+## More docs
+
+- [Native host mode and virtual environments](docs/host-and-venv.md)
+- [Testing guide](docs/testing.md)
+- [Release process](RELEASE.md)
 
 ## Scoped installs
 
@@ -108,34 +116,55 @@ The Windows-only integration flags above currently return an error on macOS/Linu
 
 ## Manage installed lines
 
+### Channel installs and updates
+
 ```powershell
-multi-pwsh install 7.4.x
+multi-pwsh install stable
+multi-pwsh install preview
+multi-pwsh install lts
 multi-pwsh update stable
 multi-pwsh update preview
 multi-pwsh update lts
-multi-pwsh update 7.4
-multi-pwsh update 7.5
 multi-pwsh list
 multi-pwsh list --available
 multi-pwsh list --available --include-prerelease
+```
+
+### Exact versions and lines
+
+```powershell
+multi-pwsh install 7.4.x
 multi-pwsh install 7.6 --include-prerelease
 multi-pwsh install 7.6-preview6
 multi-pwsh install 7.6-rc1
 multi-pwsh install 7.6.0-rc.1
+multi-pwsh update 7.4
+multi-pwsh update 7.5
 multi-pwsh update 7.6 --include-prerelease
+multi-pwsh uninstall 7.4.13
+```
+
+### Alias policy and host mode
+
+```powershell
 multi-pwsh alias set pwsh stable
 multi-pwsh alias set pwsh lts
 multi-pwsh alias set pwsh-preview preview
 multi-pwsh alias set pwsh-lts lts
 multi-pwsh alias set 7.4 7.4.11
 multi-pwsh alias unset 7.4
+multi-pwsh host 7.4 -venv msgraph -NoLogo -NoProfile -Command "$env:PSModulePath"
+multi-pwsh doctor --repair-aliases
+```
+
+### Venv management
+
+```powershell
 multi-pwsh venv create msgraph
 multi-pwsh venv export msgraph msgraph.zip
 multi-pwsh venv import msgraph-copy msgraph.zip
 multi-pwsh venv delete msgraph
 multi-pwsh venv list
-multi-pwsh host 7.4 -venv msgraph -NoLogo -NoProfile -Command "$env:PSModulePath"
-multi-pwsh doctor --repair-aliases
 ```
 
 `multi-pwsh` usage reference:
@@ -159,43 +188,7 @@ multi-pwsh doctor --repair-aliases
 
 The Windows integration flags in the `install` and `update` forms are limited to archive-friendly behaviors; on macOS/Linux, use `--scope`, `--root`, `--arch`, `--include-prerelease`, and `--add-path` controls. Legacy scope aliases such as `current-user` and `all-users` are still accepted for compatibility.
 
-### Venv cmdlet matrix tests (Pester)
-
-Use the local Pester harness to validate venv-sensitive cmdlet behavior across installed version aliases (`pwsh-x.y.z`).
-
-Run all installed version aliases:
-
-```powershell
-pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-VenvTestMatrix.ps1
-```
-
-Run one alias only:
-
-```powershell
-pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-VenvTestMatrix.ps1 -Aliases pwsh-7.4.13
-```
-
-Include online install tests (`Install-PSResource` / `Install-Module`):
-
-```powershell
-pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-VenvTestMatrix.ps1 -EnableOnlineTests
-```
-
-Online mode details:
-
-- The tests do not modify PSGallery trust policy.
-- `Install-PSResource` uses `-TrustRepository -Quiet` and `Install-Module` uses `-Force -AcceptLicense -Confirm:$false` to run non-interactively.
-- The install checks use `Yayaml` to keep downloads and execution lightweight.
-
-Notes:
-
-- The runner creates a temporary venv per alias and deletes it by default.
-- Use `-KeepVenv` to keep those venvs for troubleshooting.
-- The runner stops on the first failed alias by default.
-- Use `-ContinueOnFailure` to keep running remaining aliases after a failure.
-- Pester must be available in the host PowerShell session.
-
-Selector behavior:
+## Selector behavior
 
 - `stable` installs the latest GA/non-preview release for your platform and configures `pwsh` to follow the latest installed stable release.
 - `preview` installs the latest prerelease for your platform and configures `pwsh-preview` to follow the latest installed preview release.
@@ -206,121 +199,27 @@ Selector behavior:
 - `7.4.11` installs that exact version.
 
 `multi-pwsh install 7.4.x` installs every available patch release in that line for your current platform and creates per-version aliases such as `pwsh-7.4.11`.
+
 The `pwsh-7.4` alias tracks latest by default; pin it with `multi-pwsh alias set 7.4 7.4.11` and unpin with `multi-pwsh alias unset 7.4`.
+
 If a pinned target version is not installed, the pin remains in metadata and the alias stays unresolved until you install that version or unpin.
+
 The bare `pwsh` alias is a managed policy alias. Configure it with `multi-pwsh alias set pwsh stable`, `multi-pwsh alias set pwsh lts`, `multi-pwsh alias set pwsh preview`, or an exact version. `pwsh-preview` tracks preview by default, and `pwsh-lts` tracks LTS by default. Policy aliases resolve only to installed versions; install or update the desired channel before pointing an alias at it.
 
-Native host mode:
+The current LTS line is encoded in the tool; at the moment that is `7.6`.
 
-- `multi-pwsh host <selector> ...` runs PowerShell through native hosting (`pwsh-host` crate) instead of launching a `pwsh` subprocess.
-- `<selector>` supports `7`, `7.4`, `7.4.13`, or alias-form selectors such as `pwsh-7.4`.
-- `-VirtualEnvironment <name>` and `-venv <name>` are consumed by `multi-pwsh` before handing control to PowerShell and set `PSModulePath` to the selected venv module root for that launch.
-- `PSMODULE_VENV_PATH` can also be used as an explicit path-based venv selector for hosted launches. If it is already set in the environment, `multi-pwsh host` treats it as an intentional venv opt-in.
-- Alias lifecycle now maintains native host shims as hard links to `multi-pwsh` automatically during install/update/doctor alias repair.
-- On Windows, alias command paths are `pwsh-*.exe` host shims in `MULTI_PWSH_BIN_DIR` (default: `~/.pwsh/bin`).
-- On Linux/macOS, alias command paths (`pwsh-*`) are hard links to `multi-pwsh`.
-- `multi-pwsh doctor --repair-aliases` performs a shim health check and re-links broken hard links automatically.
-- You can still manually copy/rename `multi-pwsh.exe` under `MULTI_PWSH_BIN_DIR` (default: `~/.pwsh/bin`) to an alias-like name (for example `pwsh-7.4.exe`); it automatically enters host mode and resolves the target installation from that alias name.
-- `-NamedPipeCommand <pipeName>` is supported in host mode (Windows only), matching `pwsh-host` behavior.
+## Native host mode and virtual environments
 
-### Virtual environments
+- `multi-pwsh host <selector> ...` runs PowerShell through native hosting instead of launching a `pwsh` subprocess.
+- Use `-venv <name>` or `-VirtualEnvironment <name>` to select a managed module root for hosted launches.
+- Use `multi-pwsh doctor --repair-aliases` to repair host shims and named aliases.
 
-`multi-pwsh` virtual environments provide isolated PowerShell module roots. They are conceptually similar to Python virtual environments, but in this first version the isolation is implemented by selecting a venv-specific `PSModulePath` entry for hosted launches.
+See [docs/host-and-venv.md](docs/host-and-venv.md) for host shims, venv layout, import/export, managed paths, and current limitations.
 
-By default, venvs live under `~/.pwsh/venv/<name>`. If `MULTI_PWSH_VENV_DIR` is set, they live under that directory instead.
+## Testing
 
-Available commands:
+- Scoped install smoke tests: `pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-ScopedInstallSmokeTest.ps1`
+- Venv matrix tests: `pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-VenvTestMatrix.ps1`
 
-- `multi-pwsh venv create <name>` creates a named venv.
-- `multi-pwsh venv delete <name>` removes a named venv.
-- `multi-pwsh venv export <name> <archive.zip>` exports a named venv to a zip archive.
-- `multi-pwsh venv import <name> <archive.zip>` imports a named venv from a zip archive.
-- `multi-pwsh venv list` shows the configured venv root and all known venvs.
-
-#### Create and use a venv
-
-Create a venv and launch a hosted PowerShell session that uses it:
-
-```powershell
-multi-pwsh venv create msgraph
-multi-pwsh host 7.4 -venv msgraph -NoLogo -NoProfile
-```
-
-You can verify which module root is being used:
-
-```powershell
-multi-pwsh host 7.4 -venv msgraph -NoLogo -NoProfile -Command "$env:PSModulePath"
-```
-
-Both `-venv <name>` and `-VirtualEnvironment <name>` are supported.
-
-You can also opt into a venv by path with `PSMODULE_VENV_PATH`:
-
-```powershell
-$env:PSMODULE_VENV_PATH = Join-Path $HOME ".pwsh/venv/msgraph"
-multi-pwsh host 7.4 -NoLogo -NoProfile
-```
-
-`-venv <name>` and `-VirtualEnvironment <name>` accept a venv name and resolve it to a base path before launch. `PSMODULE_VENV_PATH` is the lower-level path form of the same idea and is useful when a parent PowerShell session already knows which venv path should flow to child hosted sessions.
-
-If both a venv flag and `PSMODULE_VENV_PATH` are present, the flag wins for that launch because `multi-pwsh` resolves the named venv and sets the effective path explicitly. If neither is present, no venv-specific startup-hook behavior is enabled.
-
-#### Populate a venv with modules
-
-Venvs are base directories, and the hosted PowerShell module root is `<venv-root>/Modules`. Modules should live under `<venv-root>/Modules/<ModuleName>`.
-
-For the current implementation, the safest way to place modules into a venv is to save them into that `Modules` directory:
-
-```powershell
-$venvRoot = Join-Path $HOME ".pwsh/venv/msgraph"
-$venvModules = Join-Path $venvRoot "Modules"
-Save-Module -Name Microsoft.Graph.Authentication -Repository PSGallery -Path $venvModules -Force
-Save-Module -Name Microsoft.Graph.Users -Repository PSGallery -Path $venvModules -Force
-```
-
-Then use the venv when launching PowerShell:
-
-```powershell
-multi-pwsh host 7.4 -venv msgraph -NoLogo -NoProfile -Command "Get-Module -ListAvailable Microsoft.Graph.Authentication"
-```
-
-#### Export and import a venv
-
-You can package a venv as a zip archive and recreate it elsewhere:
-
-```powershell
-multi-pwsh venv export msgraph msgraph.zip
-multi-pwsh venv import msgraph-copy msgraph.zip
-multi-pwsh host 7.4 -venv msgraph-copy -NoLogo -NoProfile
-```
-
-Import is intentionally conservative: importing into an existing destination venv is rejected instead of merging archive contents.
-
-#### Current behavior and limitations
-
-- Venv selection changes module discovery and import precedence for hosted launches.
-- `Install-Module` and `Install-PSResource` use the venv's `Modules` directory during hosted launches.
-- PowerShell may still include some built-in or default module paths in the effective `PSModulePath`; the venv is intended to be the selected module root, not a perfect process-level sandbox.
-- The venv feature currently applies to `multi-pwsh host ...` and implicit host shims such as `pwsh-7.4.exe`, not to arbitrary external `pwsh` processes.
-
-Managed paths can be controlled with environment variables:
-
-- `MULTI_PWSH_HOME`: override the multi-pwsh home directory (default: `~/.pwsh`). Extracted PowerShell versions are stored under `MULTI_PWSH_HOME/multi`, virtual environments are stored under `MULTI_PWSH_HOME/venv` unless `MULTI_PWSH_VENV_DIR` is set, and alias metadata is stored in `MULTI_PWSH_HOME/aliases.json`.
-- `MULTI_PWSH_BIN_DIR`: override the shim and launcher directory (default: `MULTI_PWSH_HOME/bin`).
-- `MULTI_PWSH_CACHE_DIR`: override archive cache directory (default: `MULTI_PWSH_HOME/cache`).
-- `MULTI_PWSH_VENV_DIR`: override the virtual-environment root directory (default: `MULTI_PWSH_HOME/venv`).
-- `MULTI_PWSH_CACHE_KEEP`: keep downloaded archives after extraction when set to a truthy value (`1`, `true`, `yes`, or `on`).
-
-CI cache example:
-
-```powershell
-$env:MULTI_PWSH_HOME = "$(Join-Path $HOME '.pwsh')"
-$env:MULTI_PWSH_BIN_DIR = "$(Join-Path $env:MULTI_PWSH_HOME 'bin')"
-$env:MULTI_PWSH_CACHE_DIR = "$(Join-Path $env:MULTI_PWSH_HOME 'cache')"
-$env:MULTI_PWSH_VENV_DIR = "$(Join-Path $env:MULTI_PWSH_HOME 'venv')"
-$env:MULTI_PWSH_CACHE_KEEP = "1"
-multi-pwsh install 7.4.x
-```
-
-When installed via bootstrap scripts, `MULTI_PWSH_BIN_DIR` (default: `~/.pwsh/bin`) is added to PATH automatically if needed.
+See [docs/testing.md](docs/testing.md) for online test mode, alias-targeted runs, and troubleshooting flags.
 

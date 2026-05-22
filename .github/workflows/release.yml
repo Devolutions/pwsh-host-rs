@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to build/publish
+        description: Release tag to create/update when publishing
         required: true
         type: string
 
@@ -12,9 +12,67 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      checkout_ref: ${{ steps.validate.outputs.checkout_ref }}
+      release_tag: ${{ steps.validate.outputs.release_tag }}
+      release_target: ${{ steps.validate.outputs.release_target }}
+      release_version: ${{ steps.validate.outputs.release_version }}
+
+    steps:
+      - name: Checkout selected ref
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          ref: ${{ github.ref }}
+
+      - name: Validate tag format and crate versions
+        id: validate
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag }}
+          CHECKOUT_REF: ${{ github.ref }}
+        run: |
+          tag="${RELEASE_TAG}"
+
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must match vX.Y.Z or vX.Y.Z-suffix. Got: ${tag}" >&2
+            exit 1
+          fi
+
+          release_version="${tag#v}"
+          multi_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/multi-pwsh/Cargo.toml | head -n 1)"
+          host_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pwsh-host/Cargo.toml | head -n 1)"
+
+          if [[ -z "${multi_version}" || -z "${host_version}" ]]; then
+            echo "Failed to read crate versions from Cargo.toml files." >&2
+            exit 1
+          fi
+
+          if [[ "${multi_version}" != "${host_version}" ]]; then
+            echo "Crate versions do not match: multi-pwsh=${multi_version}, pwsh-host=${host_version}" >&2
+            exit 1
+          fi
+
+          if [[ "${multi_version}" != "${release_version}" ]]; then
+            echo "Release tag ${tag} does not match crate version ${multi_version}" >&2
+            exit 1
+          fi
+
+          release_target="$(git rev-parse HEAD)"
+
+          echo "checkout_ref=${CHECKOUT_REF}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "release_target=${release_target}" >> "$GITHUB_OUTPUT"
+          echo "release_version=${release_version}" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    needs: validate
     strategy:
       fail-fast: false
       matrix:
@@ -59,7 +117,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ needs.validate.outputs.checkout_ref }}
 
       - name: Install .NET SDK
         uses: actions/setup-dotnet@v4
@@ -144,12 +202,15 @@ jobs:
   publish:
     name: Publish GitHub release
     runs-on: ubuntu-latest
-    needs: build
-    if: startsWith(github.event.inputs.tag, 'v')
+    needs:
+      - validate
+      - build
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.checkout_ref }}
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -183,8 +244,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.event.inputs.tag }}
-          RELEASE_TARGET: ${{ github.sha }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+          RELEASE_TARGET: ${{ needs.validate.outputs.release_target }}
         run: |
           $zipFiles = Get-ChildItem -Path dist -Recurse -File |
             Where-Object { $_.Name -like 'multi-pwsh-*.zip' } |

@@ -138,7 +138,7 @@ fn decode_checksum_text(bytes: &[u8]) -> Result<String> {
 }
 
 fn decode_utf16_text(bytes: &[u8], little_endian: bool) -> Result<String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(MultiPwshError::Archive(
             "invalid checksum file encoding: odd-length utf-16 payload".to_string(),
         ));
@@ -294,7 +294,7 @@ fn parse_checksum_line<'a>(
     parse_gnu_checksum_line(trimmed, line_number, target_asset_name)
 }
 
-fn parse_bsd_checksum_line<'a>(line: &'a str, line_number: usize) -> Result<Option<(String, &'a str)>> {
+fn parse_bsd_checksum_line(line: &str, line_number: usize) -> Result<Option<(String, &str)>> {
     let Some((left, right)) = line.split_once('=') else {
         return Ok(None);
     };

@@ -698,9 +698,7 @@ fn infer_layout_from_host_shim(os: HostOs, executable_path: &Path) -> Option<Ins
     } else {
         InstallLayout::from_root(os, home).ok()?
     };
-    if detect_implicit_host_selector(&layout.bin_dir(), executable_path).is_none() {
-        return None;
-    }
+    detect_implicit_host_selector(&layout.bin_dir(), executable_path)?;
 
     Some(layout)
 }

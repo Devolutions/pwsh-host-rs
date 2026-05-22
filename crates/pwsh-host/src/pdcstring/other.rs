@@ -82,7 +82,6 @@ impl PdCStr {
     pub fn to_os_str(&self) -> &OsStr {
         OsStr::from_bytes(self.0.to_bytes())
     }
-    // TODO: use abstract error type
     pub fn from_slice_with_nul(slice: &[u8]) -> Result<&Self, ffi::FromBytesWithNulError> {
         CStr::from_bytes_with_nul(slice).map(PdCStr::from_inner)
     }
