@@ -85,9 +85,8 @@ impl PdCStr {
 
 // methods not used by this crate
 impl PdCStr {
-    // TODO: use abstract error type
     pub fn from_slice_with_nul(slice: &[u16]) -> Result<&Self, widestring::MissingNulError<u16>> {
-        U16CStr::from_slice_with_nul(slice).map(|s| PdCStr::from_inner(s))
+        U16CStr::from_slice_with_nul(slice).map(PdCStr::from_inner)
     }
 
     pub fn to_slice(&self) -> &[u16] {

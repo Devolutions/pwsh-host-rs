@@ -1,4 +1,2 @@
 reorder_imports = true
-imports_granularity = "Module"
 max_width = 120
-group_imports = "StdExternalCrate"
