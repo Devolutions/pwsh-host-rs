@@ -39,6 +39,7 @@ irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/t
 ## Install and verify aliases
 
 ```powershell
+multi-pwsh install stable
 multi-pwsh install 7.4
 multi-pwsh install 7.5
 ```
@@ -72,6 +73,9 @@ Platform behavior:
 Examples:
 
 ```powershell
+multi-pwsh install stable
+multi-pwsh install preview
+multi-pwsh install lts
 multi-pwsh install 7.4
 multi-pwsh install 7.5 --scope machine --enable-psremoting --add-explorer-context-menu
 multi-pwsh install 7.5 --scope machine
@@ -106,6 +110,9 @@ The Windows-only integration flags above currently return an error on macOS/Linu
 
 ```powershell
 multi-pwsh install 7.4.x
+multi-pwsh update stable
+multi-pwsh update preview
+multi-pwsh update lts
 multi-pwsh update 7.4
 multi-pwsh update 7.5
 multi-pwsh list
@@ -116,6 +123,10 @@ multi-pwsh install 7.6-preview6
 multi-pwsh install 7.6-rc1
 multi-pwsh install 7.6.0-rc.1
 multi-pwsh update 7.6 --include-prerelease
+multi-pwsh alias set pwsh stable
+multi-pwsh alias set pwsh lts
+multi-pwsh alias set pwsh-preview preview
+multi-pwsh alias set pwsh-lts lts
 multi-pwsh alias set 7.4 7.4.11
 multi-pwsh alias unset 7.4
 multi-pwsh venv create msgraph
@@ -130,8 +141,8 @@ multi-pwsh doctor --repair-aliases
 `multi-pwsh` usage reference:
 
 ```text
-multi-pwsh install <version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]
-multi-pwsh update <major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]
+multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]
+multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]
 multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]
 multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease]
 multi-pwsh venv create <name>
@@ -140,7 +151,8 @@ multi-pwsh venv export <name> <archive.zip>
 multi-pwsh venv import <name> <archive.zip>
 multi-pwsh venv list
 multi-pwsh alias set <major.minor> <version|latest>
-multi-pwsh alias unset <major.minor>
+multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>
+multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>
 multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]
 multi-pwsh doctor --repair-aliases
 ```
@@ -185,6 +197,9 @@ Notes:
 
 Selector behavior:
 
+- `stable` installs the latest GA/non-preview release for your platform and configures `pwsh` to follow the latest installed stable release.
+- `preview` installs the latest prerelease for your platform and configures `pwsh-preview` to follow the latest installed preview release.
+- `lts` installs the latest patch from the current LTS line for your platform and configures `pwsh-lts` to follow the latest installed LTS release.
 - `7` installs the latest available 7.x release for your platform.
 - `7.4` installs the latest available 7.4.x release for your platform.
 - `7.4.x` installs all available releases in that line for your platform.
@@ -193,6 +208,7 @@ Selector behavior:
 `multi-pwsh install 7.4.x` installs every available patch release in that line for your current platform and creates per-version aliases such as `pwsh-7.4.11`.
 The `pwsh-7.4` alias tracks latest by default; pin it with `multi-pwsh alias set 7.4 7.4.11` and unpin with `multi-pwsh alias unset 7.4`.
 If a pinned target version is not installed, the pin remains in metadata and the alias stays unresolved until you install that version or unpin.
+The bare `pwsh` alias is a managed policy alias. Configure it with `multi-pwsh alias set pwsh stable`, `multi-pwsh alias set pwsh lts`, `multi-pwsh alias set pwsh preview`, or an exact version. `pwsh-preview` tracks preview by default, and `pwsh-lts` tracks LTS by default. Policy aliases resolve only to installed versions; install or update the desired channel before pointing an alias at it.
 
 Native host mode:
 

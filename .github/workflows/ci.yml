@@ -99,7 +99,9 @@ jobs:
         run: |
           $multiPwshHome = if ($env:MULTI_PWSH_HOME) { $env:MULTI_PWSH_HOME } else { Join-Path $HOME '.pwsh' }
           $multiPwshBin = if ($env:MULTI_PWSH_BIN_DIR) { $env:MULTI_PWSH_BIN_DIR } else { Join-Path $multiPwshHome 'bin' }
+          $userAliasBin = Join-Path $env:LOCALAPPDATA 'PowerShell\bin'
           $multiPwshBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $userAliasBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Add multi-pwsh bin to PATH (Unix)
         if: matrix.os != 'windows-latest'

@@ -14,6 +14,9 @@ use crate::platform::HostOs;
 use crate::versions::MajorMinor;
 
 const LAYOUT_HINT_FILE: &str = "multi-pwsh-layout.json";
+pub const PWSH_ALIAS: &str = "pwsh";
+pub const PWSH_PREVIEW_ALIAS: &str = "pwsh-preview";
+pub const PWSH_LTS_ALIAS: &str = "pwsh-lts";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AliasSelector {
@@ -49,6 +52,52 @@ pub fn create_or_update_patch_alias(
     target: &Path,
 ) -> Result<PathBuf> {
     create_or_update_alias_with_selector(layout, os, AliasSelector::Exact(version.clone()), version, target)
+}
+
+pub fn create_or_update_named_alias(
+    layout: &InstallLayout,
+    os: HostOs,
+    alias_command: &str,
+    version: &Version,
+    target: &Path,
+) -> Result<PathBuf> {
+    if !is_special_alias_command(alias_command) {
+        return Err(MultiPwshError::InvalidArguments(format!(
+            "unsupported named alias '{}'",
+            alias_command
+        )));
+    }
+
+    create_or_update_named_alias_unchecked(layout, os, alias_command, version, target)
+}
+
+fn create_or_update_named_alias_unchecked(
+    layout: &InstallLayout,
+    os: HostOs,
+    alias_command: &str,
+    version: &Version,
+    target: &Path,
+) -> Result<PathBuf> {
+    fs::create_dir_all(layout.bin_dir())?;
+    write_layout_hint(layout)?;
+    let _ = target;
+
+    let alias_path = layout.bin_dir().join(alias_file_name_from_command(alias_command, os));
+
+    match os {
+        HostOs::Windows => {
+            create_or_update_windows_host_shim(layout, alias_command)?;
+        }
+        HostOs::Linux | HostOs::Macos => {
+            create_or_update_posix_host_shim(layout, alias_command)?;
+        }
+    }
+
+    let mut metadata = read_alias_metadata(layout)?;
+    metadata.insert(alias_command.to_string(), version.to_string());
+    write_alias_metadata(layout, metadata)?;
+
+    Ok(alias_path)
 }
 
 fn create_or_update_alias_with_selector(
@@ -175,6 +224,14 @@ pub fn parse_alias_command_selector(alias_command: &str) -> Option<AliasSelector
     None
 }
 
+pub fn is_special_alias_command(alias_command: &str) -> bool {
+    matches!(alias_command, PWSH_ALIAS | PWSH_PREVIEW_ALIAS | PWSH_LTS_ALIAS)
+}
+
+pub fn is_supported_alias_command(alias_command: &str) -> bool {
+    is_special_alias_command(alias_command) || parse_alias_command_selector(alias_command).is_some()
+}
+
 pub fn read_alias_metadata(layout: &InstallLayout) -> Result<HashMap<String, String>> {
     Ok(read_alias_document(layout)?.aliases)
 }
@@ -212,6 +269,48 @@ pub fn set_minor_pin(layout: &InstallLayout, line: MajorMinor, version: Option<V
     }
 
     write_alias_document(layout, &document)
+}
+
+pub fn read_special_alias_policies(layout: &InstallLayout) -> Result<HashMap<String, String>> {
+    Ok(read_alias_document(layout)?.special_policies)
+}
+
+pub fn read_special_alias_policy(layout: &InstallLayout, alias_command: &str) -> Result<Option<String>> {
+    Ok(read_alias_document(layout)?
+        .special_policies
+        .get(alias_command)
+        .cloned())
+}
+
+pub fn set_special_alias_policy(layout: &InstallLayout, alias_command: &str, policy: Option<&str>) -> Result<()> {
+    if !is_special_alias_command(alias_command) {
+        return Err(MultiPwshError::InvalidArguments(format!(
+            "unsupported named alias '{}'",
+            alias_command
+        )));
+    }
+
+    let mut document = read_alias_document(layout)?;
+    match policy {
+        Some(policy) => {
+            document
+                .special_policies
+                .insert(alias_command.to_string(), policy.to_string());
+        }
+        None => {
+            document.special_policies.remove(alias_command);
+        }
+    }
+
+    write_alias_document(layout, &document)
+}
+
+pub fn ensure_special_alias_policy(layout: &InstallLayout, alias_command: &str, policy: &str) -> Result<()> {
+    if read_special_alias_policy(layout, alias_command)?.is_some() {
+        return Ok(());
+    }
+
+    set_special_alias_policy(layout, alias_command, Some(policy))
 }
 
 fn line_pin_key(line: MajorMinor) -> String {
@@ -411,6 +510,8 @@ struct AliasMetadata {
     aliases: HashMap<String, String>,
     #[serde(default)]
     pins: HashMap<String, String>,
+    #[serde(default)]
+    special_policies: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -470,6 +571,31 @@ mod tests {
     fn rejects_invalid_alias_selector() {
         assert!(parse_alias_command_selector("pwsh").is_none());
         assert!(parse_alias_command_selector("not-pwsh-7.5").is_none());
+    }
+
+    #[test]
+    fn recognizes_special_alias_commands() {
+        assert!(is_supported_alias_command("pwsh"));
+        assert!(is_supported_alias_command("pwsh-preview"));
+        assert!(is_supported_alias_command("pwsh-lts"));
+        assert!(is_supported_alias_command("pwsh-7.5"));
+        assert!(!is_supported_alias_command("pwsh-stable"));
+    }
+
+    #[test]
+    fn special_alias_policy_round_trips() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = InstallLayout::from_root(HostOs::Linux, temp_dir.path().join("home")).unwrap();
+        fs::create_dir_all(layout.home()).unwrap();
+
+        set_special_alias_policy(&layout, PWSH_ALIAS, Some("stable")).unwrap();
+        assert_eq!(
+            read_special_alias_policy(&layout, PWSH_ALIAS).unwrap().as_deref(),
+            Some("stable")
+        );
+
+        set_special_alias_policy(&layout, PWSH_ALIAS, None).unwrap();
+        assert!(read_special_alias_policy(&layout, PWSH_ALIAS).unwrap().is_none());
     }
 
     #[test]

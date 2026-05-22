@@ -4,7 +4,7 @@ use ureq::Agent;
 
 use crate::error::{MultiPwshError, Result};
 use crate::platform::{HostArch, HostOs};
-use crate::versions::{MajorMinor, VersionSelector};
+use crate::versions::{is_current_lts_version, MajorMinor, VersionSelector};
 
 const CHECKSUM_ASSET_NAME: &str = "hashes.sha256";
 
@@ -55,6 +55,9 @@ impl ReleaseClient {
         include_prerelease: bool,
     ) -> Result<ResolvedRelease> {
         match selector {
+            VersionSelector::Stable => self.resolve_latest_stable(os, arch),
+            VersionSelector::Preview => self.resolve_latest_preview(os, arch),
+            VersionSelector::Lts => self.resolve_latest_lts(os, arch),
             VersionSelector::Major(major) => self.resolve_latest_in_major(major, os, arch, include_prerelease),
             VersionSelector::Exact(version) => self.resolve_exact(version, os, arch),
             VersionSelector::MajorMinor(line) => self.resolve_latest_in_line(line, os, arch, include_prerelease),
@@ -120,6 +123,33 @@ impl ReleaseClient {
             .ok_or_else(|| MultiPwshError::ReleaseNotFound(format!("no release found for major {}", major)))?;
 
         resolve_release_asset(release, os, arch)
+    }
+
+    pub fn resolve_latest_stable(&self, os: HostOs, arch: HostArch) -> Result<ResolvedRelease> {
+        let releases = self.fetch_releases()?;
+        let candidates = sorted_candidates(releases, |github_release, parsed| {
+            !github_release.prerelease && parsed.version.pre.is_empty()
+        });
+
+        resolve_first_candidate_asset(candidates, os, arch, "no stable release found")
+    }
+
+    pub fn resolve_latest_preview(&self, os: HostOs, arch: HostArch) -> Result<ResolvedRelease> {
+        let releases = self.fetch_releases()?;
+        let candidates = sorted_candidates(releases, |github_release, parsed| {
+            github_release.prerelease && !parsed.version.pre.is_empty()
+        });
+
+        resolve_first_candidate_asset(candidates, os, arch, "no preview release found")
+    }
+
+    pub fn resolve_latest_lts(&self, os: HostOs, arch: HostArch) -> Result<ResolvedRelease> {
+        let releases = self.fetch_releases()?;
+        let candidates = sorted_candidates(releases, |github_release, parsed| {
+            !github_release.prerelease && parsed.version.pre.is_empty() && is_current_lts_version(&parsed.version)
+        });
+
+        resolve_first_candidate_asset(candidates, os, arch, "no current LTS release found")
     }
 
     pub fn resolve_latest_in_line(
@@ -208,6 +238,44 @@ impl ReleaseClient {
 
         Ok(all_releases)
     }
+}
+
+fn sorted_candidates(
+    releases: Vec<GithubRelease>,
+    predicate: impl Fn(&GithubRelease, &ParsedRelease) -> bool,
+) -> Vec<ParsedRelease> {
+    let mut candidates: Vec<ParsedRelease> = releases
+        .into_iter()
+        .filter_map(|github_release| {
+            let parsed = ParsedRelease::from_github_release(github_release)?;
+            if predicate(&parsed.source, &parsed) {
+                Some(parsed)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    candidates.sort_by(|a, b| b.version.cmp(&a.version));
+    candidates
+}
+
+fn resolve_first_candidate_asset(
+    candidates: Vec<ParsedRelease>,
+    os: HostOs,
+    arch: HostArch,
+    not_found_message: &str,
+) -> Result<ResolvedRelease> {
+    let mut last_asset_error = None;
+
+    for candidate in candidates {
+        match resolve_release_asset(candidate, os, arch) {
+            Ok(release) => return Ok(release),
+            Err(error) => last_asset_error = Some(error),
+        }
+    }
+
+    Err(last_asset_error.unwrap_or_else(|| MultiPwshError::ReleaseNotFound(not_found_message.to_string())))
 }
 
 fn resolve_release_asset(release: ParsedRelease, os: HostOs, arch: HostArch) -> Result<ResolvedRelease> {
@@ -309,7 +377,7 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
     true
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct GithubRelease {
     tag_name: String,
     prerelease: bool,
@@ -324,6 +392,7 @@ struct GithubAsset {
 
 #[derive(Debug)]
 struct ParsedRelease {
+    source: GithubRelease,
     tag_name: String,
     version: Version,
     assets: Vec<GithubAsset>,
@@ -335,9 +404,10 @@ impl ParsedRelease {
         let version = Version::parse(version_text).ok()?;
 
         Some(ParsedRelease {
-            tag_name: release.tag_name,
+            tag_name: release.tag_name.clone(),
             version,
-            assets: release.assets,
+            assets: release.assets.clone(),
+            source: release,
         })
     }
 }
@@ -365,6 +435,11 @@ mod tests {
     #[test]
     fn resolve_release_asset_includes_checksum_asset() {
         let release = ParsedRelease {
+            source: GithubRelease {
+                tag_name: "v7.4.13".to_string(),
+                prerelease: false,
+                assets: Vec::new(),
+            },
             tag_name: "v7.4.13".to_string(),
             version: Version::parse("7.4.13").unwrap(),
             assets: vec![
@@ -392,6 +467,11 @@ mod tests {
     #[test]
     fn resolve_release_asset_allows_missing_checksum_asset() {
         let release = ParsedRelease {
+            source: GithubRelease {
+                tag_name: "v7.4.13".to_string(),
+                prerelease: false,
+                assets: Vec::new(),
+            },
             tag_name: "v7.4.13".to_string(),
             version: Version::parse("7.4.13").unwrap(),
             assets: vec![GithubAsset {
@@ -404,5 +484,48 @@ mod tests {
 
         assert!(resolved.checksum_asset_name.is_none());
         assert!(resolved.checksum_asset_url.is_none());
+    }
+
+    fn github_release(tag_name: &str, prerelease: bool) -> GithubRelease {
+        GithubRelease {
+            tag_name: tag_name.to_string(),
+            prerelease,
+            assets: vec![GithubAsset {
+                name: format!("PowerShell-{}-win-x64.zip", tag_name.trim_start_matches('v')),
+                browser_download_url: format!("https://example.invalid/{}.zip", tag_name),
+            }],
+        }
+    }
+
+    #[test]
+    fn sorted_candidates_can_filter_stable_releases() {
+        let candidates = sorted_candidates(
+            vec![
+                github_release("v7.7.0-preview.1", true),
+                github_release("v7.6.2", false),
+                github_release("v7.5.7", false),
+            ],
+            |github_release, parsed| !github_release.prerelease && parsed.version.pre.is_empty(),
+        );
+
+        assert_eq!(candidates[0].version, Version::parse("7.6.2").unwrap());
+        assert_eq!(candidates[1].version, Version::parse("7.5.7").unwrap());
+    }
+
+    #[test]
+    fn sorted_candidates_can_filter_current_lts_releases() {
+        let candidates = sorted_candidates(
+            vec![
+                github_release("v7.7.0-preview.1", true),
+                github_release("v7.6.2", false),
+                github_release("v7.4.16", false),
+            ],
+            |github_release, parsed| {
+                !github_release.prerelease && parsed.version.pre.is_empty() && is_current_lts_version(&parsed.version)
+            },
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].version, Version::parse("7.6.2").unwrap());
     }
 }
