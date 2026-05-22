@@ -17,8 +17,10 @@ use std::process;
 use semver::Version;
 
 use aliases::{
-    create_or_update_alias, create_or_update_major_alias, create_or_update_patch_alias, parse_alias_command_selector,
-    read_layout_hint, read_minor_pin, read_minor_pins, remove_alias, set_minor_pin, AliasSelector,
+    create_or_update_alias, create_or_update_major_alias, create_or_update_named_alias, create_or_update_patch_alias,
+    ensure_special_alias_policy, is_special_alias_command, is_supported_alias_command, parse_alias_command_selector,
+    read_layout_hint, read_minor_pin, read_minor_pins, remove_alias, set_minor_pin, set_special_alias_policy,
+    AliasSelector, PWSH_ALIAS, PWSH_LTS_ALIAS, PWSH_PREVIEW_ALIAS,
 };
 use error::{MultiPwshError, Result};
 use install::{ensure_installed, ChecksumSource};
@@ -31,8 +33,8 @@ use package::{
 use platform::{HostArch, HostOs};
 use release::ReleaseClient;
 use versions::{
-    parse_exact_version, parse_install_selector, parse_major_minor_selector, parse_major_selector, MajorMinor,
-    VersionSelector,
+    is_current_lts_version, parse_exact_version, parse_install_selector, parse_major_minor_selector,
+    parse_major_selector, MajorMinor, VersionSelector,
 };
 
 const POWERSHELL_UPDATECHECK_ENV_VAR: &str = "POWERSHELL_UPDATECHECK";
@@ -42,7 +44,7 @@ const VIRTUAL_ENVIRONMENT_SHORT_FLAG: &str = "-venv";
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  multi-pwsh install <version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh update <major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease]\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias unset <major.minor>\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh doctor --repair-aliases"
+        "Usage:\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease]\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh doctor --repair-aliases"
     );
 }
 
@@ -141,12 +143,17 @@ fn configure_virtual_environment_host_env(os: HostOs, venv_dir: &Path) -> Result
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum HostSelector {
+    NamedAlias(String),
     Major(u64),
     MajorMinor(MajorMinor),
     Exact(Version),
 }
 
 fn parse_host_selector(value: &str) -> Result<HostSelector> {
+    if is_special_alias_command(value) {
+        return Ok(HostSelector::NamedAlias(value.to_string()));
+    }
+
     if let Some(selector) = parse_alias_command_selector(value) {
         return Ok(match selector {
             AliasSelector::Major(major) => HostSelector::Major(major),
@@ -175,6 +182,16 @@ fn parse_host_selector(value: &str) -> Result<HostSelector> {
 
 fn resolve_host_version(layout: &InstallLayout, selector: &HostSelector) -> Result<Version> {
     match selector {
+        HostSelector::NamedAlias(alias_name) => {
+            let aliases = aliases::read_alias_metadata(layout)?;
+            let version_text = aliases.get(alias_name).ok_or_else(|| {
+                MultiPwshError::InvalidArguments(format!(
+                    "alias '{}' is unresolved; configure it with: multi-pwsh alias set {} <stable|preview|lts|version>",
+                    alias_name, alias_name
+                ))
+            })?;
+            Ok(Version::parse(version_text)?)
+        }
         HostSelector::Exact(version) => Ok(version.clone()),
         HostSelector::Major(major) => latest_installed_in_major(layout, *major)?.ok_or_else(|| {
             MultiPwshError::InvalidArguments(format!(
@@ -641,7 +658,9 @@ fn detect_implicit_host_selector(bin_dir: &Path, executable_path: &Path) -> Opti
         return None;
     }
 
-    parse_alias_command_selector(&selector)?;
+    if !is_supported_alias_command(&selector) {
+        return None;
+    }
 
     let parent = executable_path.parent()?;
     if !paths_refer_to_same_location(parent, bin_dir) {
@@ -653,7 +672,7 @@ fn detect_implicit_host_selector(bin_dir: &Path, executable_path: &Path) -> Opti
 
 fn infer_layout_from_host_shim(os: HostOs, executable_path: &Path) -> Option<InstallLayout> {
     let selector = executable_selector_name(executable_path)?;
-    if selector.eq_ignore_ascii_case("multi-pwsh") || parse_alias_command_selector(&selector).is_none() {
+    if selector.eq_ignore_ascii_case("multi-pwsh") || !is_supported_alias_command(&selector) {
         return None;
     }
 
@@ -693,7 +712,7 @@ fn run_implicit_host_mode_if_needed() -> Result<Option<i32>> {
         Some(selector_name) => selector_name,
         None => return Ok(None),
     };
-    if selector_name.eq_ignore_ascii_case("multi-pwsh") || parse_alias_command_selector(&selector_name).is_none() {
+    if selector_name.eq_ignore_ascii_case("multi-pwsh") || !is_supported_alias_command(&selector_name) {
         return Ok(None);
     }
 
@@ -718,6 +737,148 @@ fn latest_installed_in_line(layout: &InstallLayout, line: MajorMinor) -> Result<
     Ok(versions
         .into_iter()
         .find(|version| version.major == line.major && version.minor == line.minor))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SpecialAliasPolicy {
+    Stable,
+    Preview,
+    Lts,
+    Exact(Version),
+}
+
+impl SpecialAliasPolicy {
+    fn as_metadata_value(&self) -> String {
+        match self {
+            SpecialAliasPolicy::Stable => "stable".to_string(),
+            SpecialAliasPolicy::Preview => "preview".to_string(),
+            SpecialAliasPolicy::Lts => "lts".to_string(),
+            SpecialAliasPolicy::Exact(version) => version.to_string(),
+        }
+    }
+}
+
+fn parse_special_alias_policy(value: &str) -> Result<SpecialAliasPolicy> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "stable" => return Ok(SpecialAliasPolicy::Stable),
+        "preview" => return Ok(SpecialAliasPolicy::Preview),
+        "lts" => return Ok(SpecialAliasPolicy::Lts),
+        _ => {}
+    }
+
+    Ok(SpecialAliasPolicy::Exact(parse_exact_version(value)?))
+}
+
+fn validate_special_alias_policy(alias_name: &str, policy: &SpecialAliasPolicy) -> Result<()> {
+    match (alias_name, policy) {
+        (PWSH_PREVIEW_ALIAS, SpecialAliasPolicy::Preview) => Ok(()),
+        (PWSH_PREVIEW_ALIAS, SpecialAliasPolicy::Exact(version)) if !version.pre.is_empty() => Ok(()),
+        (PWSH_PREVIEW_ALIAS, _) => Err(MultiPwshError::InvalidArguments(
+            "pwsh-preview can only track preview or an exact prerelease version".to_string(),
+        )),
+        (PWSH_LTS_ALIAS, SpecialAliasPolicy::Lts) => Ok(()),
+        (PWSH_LTS_ALIAS, SpecialAliasPolicy::Exact(version)) if is_current_lts_version(version) => Ok(()),
+        (PWSH_LTS_ALIAS, _) => Err(MultiPwshError::InvalidArguments(
+            "pwsh-lts can only track lts or an exact current LTS version".to_string(),
+        )),
+        (PWSH_ALIAS, _) => Ok(()),
+        _ => Err(MultiPwshError::InvalidArguments(format!(
+            "unsupported named alias '{}'",
+            alias_name
+        ))),
+    }
+}
+
+fn resolve_special_alias_policy_from_installed(
+    installed_versions: &[Version],
+    policy: &SpecialAliasPolicy,
+) -> Option<Version> {
+    match policy {
+        SpecialAliasPolicy::Stable => installed_versions
+            .iter()
+            .find(|version| version.pre.is_empty())
+            .cloned(),
+        SpecialAliasPolicy::Preview => installed_versions
+            .iter()
+            .find(|version| !version.pre.is_empty())
+            .cloned(),
+        SpecialAliasPolicy::Lts => installed_versions
+            .iter()
+            .find(|version| version.pre.is_empty() && is_current_lts_version(version))
+            .cloned(),
+        SpecialAliasPolicy::Exact(version) => installed_versions
+            .iter()
+            .find(|candidate| *candidate == version)
+            .cloned(),
+    }
+}
+
+fn refresh_special_aliases(layout: &InstallLayout, os: HostOs) -> Result<()> {
+    let policies = aliases::read_special_alias_policies(layout)?;
+    if policies.is_empty() {
+        return Ok(());
+    }
+
+    let mut items: Vec<_> = policies.into_iter().collect();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    let installed_versions = layout.installed_versions()?;
+
+    for (alias_name, policy_text) in items {
+        if !is_special_alias_command(&alias_name) {
+            eprintln!("Skipping alias policy {}: unsupported named alias", alias_name);
+            continue;
+        }
+
+        let policy = match parse_special_alias_policy(&policy_text) {
+            Ok(policy) => policy,
+            Err(error) => {
+                eprintln!("Skipping alias policy {}: {}", alias_name, error);
+                continue;
+            }
+        };
+
+        let Some(version) = resolve_special_alias_policy_from_installed(&installed_versions, &policy) else {
+            remove_alias(layout, os, &alias_name)?;
+            println!(
+                "Alias {} remains configured for {} but unresolved (no installed matching version)",
+                alias_name, policy_text
+            );
+            continue;
+        };
+
+        let target = layout.version_executable(&version);
+        if !target.exists() {
+            remove_alias(layout, os, &alias_name)?;
+            println!(
+                "Alias {} remains configured for {} but unresolved (target executable is missing)",
+                alias_name, policy_text
+            );
+            continue;
+        }
+
+        let alias_path = create_or_update_named_alias(layout, os, &alias_name, &version, &target)?;
+        println!("Updated alias: {} -> {}", alias_name, version);
+        println!("Alias path: {}", alias_path.display());
+    }
+
+    Ok(())
+}
+
+fn ensure_default_special_policy(layout: &InstallLayout, selector: &VersionSelector) -> Result<()> {
+    match selector {
+        VersionSelector::Stable => {
+            ensure_special_alias_policy(layout, PWSH_ALIAS, &SpecialAliasPolicy::Stable.as_metadata_value())
+        }
+        VersionSelector::Preview => ensure_special_alias_policy(
+            layout,
+            PWSH_PREVIEW_ALIAS,
+            &SpecialAliasPolicy::Preview.as_metadata_value(),
+        ),
+        VersionSelector::Lts => {
+            ensure_special_alias_policy(layout, PWSH_LTS_ALIAS, &SpecialAliasPolicy::Lts.as_metadata_value())
+        }
+        _ => Ok(()),
+    }
 }
 
 fn sync_minor_alias(layout: &InstallLayout, os: HostOs, line: MajorMinor) -> Result<Option<PathBuf>> {
@@ -749,6 +910,15 @@ fn parse_alias_set_target(target: &str) -> Result<Option<Version>> {
 
     let version = parse_exact_version(target)?;
     Ok(Some(version))
+}
+
+fn parse_update_selector(value: &str) -> Result<VersionSelector> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "stable" => Ok(VersionSelector::Stable),
+        "preview" => Ok(VersionSelector::Preview),
+        "lts" => Ok(VersionSelector::Lts),
+        _ => parse_major_minor_selector(value).map(VersionSelector::MajorMinor),
+    }
 }
 
 fn run_venv(args: &[String]) -> Result<()> {
@@ -882,7 +1052,7 @@ fn run_venv(args: &[String]) -> Result<()> {
 fn run_alias(args: &[String]) -> Result<()> {
     if args.is_empty() {
         return Err(MultiPwshError::InvalidArguments(
-            "alias requires: set <major.minor> <version|latest> or unset <major.minor>".to_string(),
+            "alias requires: set <major.minor> <version|latest>, set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>, unset <major.minor>, or unset <pwsh|pwsh-preview|pwsh-lts>".to_string(),
         ));
     }
 
@@ -894,8 +1064,18 @@ fn run_alias(args: &[String]) -> Result<()> {
         "set" => {
             if args.len() != 3 {
                 return Err(MultiPwshError::InvalidArguments(
-                    "alias set requires: <major.minor> <version|latest>".to_string(),
+                    "alias set requires: <major.minor> <version|latest> or <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>".to_string(),
                 ));
+            }
+
+            if is_special_alias_command(&args[1]) {
+                let policy = parse_special_alias_policy(&args[2])?;
+                validate_special_alias_policy(&args[1], &policy)?;
+                let policy_text = policy.as_metadata_value();
+                set_special_alias_policy(&layout, &args[1], Some(&policy_text))?;
+                refresh_special_aliases(&layout, os)?;
+                println!("Configured alias {} to follow {}", args[1], policy_text);
+                return Ok(());
             }
 
             let line = parse_major_minor_selector(&args[1])?;
@@ -939,8 +1119,17 @@ fn run_alias(args: &[String]) -> Result<()> {
         "unset" => {
             if args.len() != 2 {
                 return Err(MultiPwshError::InvalidArguments(
-                    "alias unset requires: <major.minor>".to_string(),
+                    "alias unset requires: <major.minor> or <pwsh|pwsh-preview|pwsh-lts>".to_string(),
                 ));
+            }
+
+            if is_special_alias_command(&args[1]) {
+                set_special_alias_policy(&layout, &args[1], None)?;
+                if remove_alias(&layout, os, &args[1])? {
+                    println!("Removed alias {}", args[1]);
+                }
+                println!("Removed policy for {}", args[1]);
+                return Ok(());
             }
 
             let line = parse_major_minor_selector(&args[1])?;
@@ -957,7 +1146,7 @@ fn run_alias(args: &[String]) -> Result<()> {
             Ok(())
         }
         _ => Err(MultiPwshError::InvalidArguments(
-            "alias requires: set <major.minor> <version|latest> or unset <major.minor>".to_string(),
+            "alias requires: set <major.minor> <version|latest>, set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>, unset <major.minor>, or unset <pwsh|pwsh-preview|pwsh-lts>".to_string(),
         )),
     }
 }
@@ -1454,11 +1643,11 @@ fn run_package_install(selector_input: &str, install_options: InstallCommandOpti
 
     let token = env::var("GITHUB_TOKEN").ok();
     let release_client = ReleaseClient::new(token)?;
-    let releases = match selector {
+    let releases = match selector.clone() {
         VersionSelector::MajorMinorWildcard(line) => {
             release_client.resolve_all_in_line(line, os, arch, options.include_prerelease)?
         }
-        _ => vec![release_client.resolve_selector(selector, os, arch, options.include_prerelease)?],
+        _ => vec![release_client.resolve_selector(selector.clone(), os, arch, options.include_prerelease)?],
     };
 
     let mut metadata = load_package_metadata(&layout)?;
@@ -1523,6 +1712,9 @@ fn run_package_install(selector_input: &str, install_options: InstallCommandOpti
             println!("Updated major alias: {}", path.display());
         }
     }
+
+    ensure_default_special_policy(&layout, &selector)?;
+    refresh_special_aliases(&layout, os)?;
 
     println!("Alias bin: {}", layout.bin_dir().display());
     println!("Add to PATH once for this scope: {}", layout.bin_dir().display());
@@ -1810,11 +2002,11 @@ fn run_install(
 
     let token = env::var("GITHUB_TOKEN").ok();
     let release_client = ReleaseClient::new(token)?;
-    let releases = match selector {
+    let releases = match selector.clone() {
         VersionSelector::MajorMinorWildcard(line) => {
             release_client.resolve_all_in_line(line, os, arch, include_prerelease)?
         }
-        _ => vec![release_client.resolve_selector(selector, os, arch, include_prerelease)?],
+        _ => vec![release_client.resolve_selector(selector.clone(), os, arch, include_prerelease)?],
     };
 
     let mut touched_lines: Vec<MajorMinor> = Vec::new();
@@ -1868,6 +2060,9 @@ fn run_install(
             println!("Updated major alias: {}", path.display());
         }
     }
+
+    ensure_default_special_policy(&layout, &selector)?;
+    refresh_special_aliases(&layout, os)?;
 
     println!("Add to PATH once: {}", layout.bin_dir().display());
 
@@ -2002,6 +2197,8 @@ fn cleanup_aliases_for_removed_version(layout: &InstallLayout, os: HostOs, versi
         "Alias cleanup complete: {} updated, {} removed, {} pinned unresolved",
         updated_aliases, removed_aliases, unresolved_pinned_aliases
     );
+
+    refresh_special_aliases(layout, os)?;
 
     Ok(())
 }
@@ -2172,6 +2369,8 @@ fn run_doctor(args: &[String]) -> Result<()> {
     let layout = InstallLayout::new(os)?;
     layout.ensure_base_dirs()?;
 
+    refresh_special_aliases(&layout, os)?;
+
     let aliases = aliases::read_alias_metadata(&layout)?;
     if aliases.is_empty() {
         println!("No aliases found in metadata.");
@@ -2226,6 +2425,9 @@ fn run_doctor(args: &[String]) -> Result<()> {
             Some(AliasSelector::MajorMinor(line)) => create_or_update_alias(&layout, os, line, &version, &target)?,
             Some(AliasSelector::Major(major)) => create_or_update_major_alias(&layout, os, major, &version, &target)?,
             Some(AliasSelector::Exact(_)) => create_or_update_patch_alias(&layout, os, &version, &target)?,
+            None if is_special_alias_command(&alias_name) => {
+                create_or_update_named_alias(&layout, os, &alias_name, &version, &target)?
+            }
             None => {
                 eprintln!("Skipping alias {}: unsupported alias name format", alias_name);
                 skipped += 1;
@@ -2259,7 +2461,7 @@ fn run() -> Result<()> {
         "install" => {
             if args.len() < 2 {
                 return Err(MultiPwshError::InvalidArguments(
-                    "install requires <version|major|major.minor|major.minor.x>".to_string(),
+                    "install requires <stable|preview|lts|version|major|major.minor|major.minor.x>".to_string(),
                 ));
             }
             if os == HostOs::Windows || requires_scoped_install_backend(&args[2..]) {
@@ -2278,16 +2480,25 @@ fn run() -> Result<()> {
         "update" => {
             if args.len() < 2 {
                 return Err(MultiPwshError::InvalidArguments(
-                    "update requires <major.minor>".to_string(),
+                    "update requires <major.minor|stable|preview|lts>".to_string(),
                 ));
             }
+            let update_selector = parse_update_selector(&args[1])?;
+
             if os == HostOs::Windows || requires_scoped_install_backend(&args[2..]) {
-                parse_major_minor_selector(&args[1])?;
                 let options = parse_package_install_options(&args[2..])?;
                 run_package_install(&args[1], options)
-            } else {
+            } else if matches!(update_selector, VersionSelector::MajorMinor(_)) {
                 let options = parse_release_selection_options(&args[2..])?;
                 run_update(
+                    &args[1],
+                    options.arch,
+                    options.include_prerelease,
+                    options.checksum_source,
+                )
+            } else {
+                let options = parse_release_selection_options(&args[2..])?;
+                run_install(
                     &args[1],
                     options.arch,
                     options.include_prerelease,
@@ -2510,6 +2721,30 @@ mod tests {
     }
 
     #[test]
+    fn detect_implicit_host_selector_accepts_bare_pwsh_alias() {
+        let bin_dir = PathBuf::from("C:/Users/test/.pwsh/bin");
+
+        let selector = detect_implicit_host_selector(&bin_dir, &bin_dir.join("pwsh.exe"));
+        assert_eq!(selector, Some("pwsh".to_string()));
+    }
+
+    #[test]
+    fn detect_implicit_host_selector_accepts_preview_alias() {
+        let bin_dir = PathBuf::from("C:/Users/test/.pwsh/bin");
+
+        let selector = detect_implicit_host_selector(&bin_dir, &bin_dir.join("pwsh-preview.exe"));
+        assert_eq!(selector, Some("pwsh-preview".to_string()));
+    }
+
+    #[test]
+    fn detect_implicit_host_selector_accepts_lts_alias() {
+        let bin_dir = PathBuf::from("C:/Users/test/.pwsh/bin");
+
+        let selector = detect_implicit_host_selector(&bin_dir, &bin_dir.join("pwsh-lts.exe"));
+        assert_eq!(selector, Some("pwsh-lts".to_string()));
+    }
+
+    #[test]
     fn detect_implicit_host_selector_accepts_posix_alias_with_dot() {
         let bin_dir = PathBuf::from("/home/test/.pwsh/bin");
 
@@ -2715,6 +2950,76 @@ mod tests {
     fn parse_alias_set_target_accepts_exact_version() {
         let version = parse_alias_set_target("7.4.11").unwrap().unwrap();
         assert_eq!(version, Version::parse("7.4.11").unwrap());
+    }
+
+    #[test]
+    fn parse_special_alias_policy_accepts_channels() {
+        assert_eq!(
+            parse_special_alias_policy("stable").unwrap(),
+            SpecialAliasPolicy::Stable
+        );
+        assert_eq!(
+            parse_special_alias_policy("PREVIEW").unwrap(),
+            SpecialAliasPolicy::Preview
+        );
+        assert_eq!(parse_special_alias_policy("lts").unwrap(), SpecialAliasPolicy::Lts);
+    }
+
+    #[test]
+    fn parse_special_alias_policy_accepts_exact_version() {
+        assert_eq!(
+            parse_special_alias_policy("7.6.2").unwrap(),
+            SpecialAliasPolicy::Exact(Version::parse("7.6.2").unwrap())
+        );
+    }
+
+    #[test]
+    fn validate_special_alias_policy_restricts_preview_alias() {
+        assert!(validate_special_alias_policy(PWSH_PREVIEW_ALIAS, &SpecialAliasPolicy::Preview).is_ok());
+        assert!(validate_special_alias_policy(
+            PWSH_PREVIEW_ALIAS,
+            &SpecialAliasPolicy::Exact(Version::parse("7.7.0-preview.1").unwrap())
+        )
+        .is_ok());
+        assert!(validate_special_alias_policy(PWSH_PREVIEW_ALIAS, &SpecialAliasPolicy::Stable).is_err());
+    }
+
+    #[test]
+    fn validate_special_alias_policy_restricts_lts_alias() {
+        assert!(validate_special_alias_policy(PWSH_LTS_ALIAS, &SpecialAliasPolicy::Lts).is_ok());
+        assert!(validate_special_alias_policy(
+            PWSH_LTS_ALIAS,
+            &SpecialAliasPolicy::Exact(Version::parse("7.6.2").unwrap())
+        )
+        .is_ok());
+        assert!(validate_special_alias_policy(PWSH_LTS_ALIAS, &SpecialAliasPolicy::Stable).is_err());
+        assert!(validate_special_alias_policy(
+            PWSH_LTS_ALIAS,
+            &SpecialAliasPolicy::Exact(Version::parse("7.5.7").unwrap())
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn resolve_special_alias_policy_selects_expected_versions() {
+        let versions = vec![
+            Version::parse("7.7.0-preview.1").unwrap(),
+            Version::parse("7.6.2").unwrap(),
+            Version::parse("7.5.7").unwrap(),
+        ];
+
+        assert_eq!(
+            resolve_special_alias_policy_from_installed(&versions, &SpecialAliasPolicy::Stable),
+            Some(Version::parse("7.6.2").unwrap())
+        );
+        assert_eq!(
+            resolve_special_alias_policy_from_installed(&versions, &SpecialAliasPolicy::Preview),
+            Some(Version::parse("7.7.0-preview.1").unwrap())
+        );
+        assert_eq!(
+            resolve_special_alias_policy_from_installed(&versions, &SpecialAliasPolicy::Lts),
+            Some(Version::parse("7.6.2").unwrap())
+        );
     }
 
     #[test]

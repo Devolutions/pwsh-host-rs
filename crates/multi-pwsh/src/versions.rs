@@ -27,6 +27,9 @@ impl fmt::Display for MajorMinor {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VersionSelector {
+    Stable,
+    Preview,
+    Lts,
     Major(u64),
     Exact(Version),
     MajorMinor(MajorMinor),
@@ -34,6 +37,13 @@ pub enum VersionSelector {
 }
 
 pub fn parse_install_selector(value: &str) -> Result<VersionSelector> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "stable" => return Ok(VersionSelector::Stable),
+        "preview" => return Ok(VersionSelector::Preview),
+        "lts" => return Ok(VersionSelector::Lts),
+        _ => {}
+    }
+
     if let Ok(line) = parse_major_minor_wildcard_selector(value) {
         return Ok(VersionSelector::MajorMinorWildcard(line));
     }
@@ -48,6 +58,30 @@ pub fn parse_install_selector(value: &str) -> Result<VersionSelector> {
 
     let exact = parse_exact_version(value)?;
     Ok(VersionSelector::Exact(exact))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LtsLine {
+    pub line: MajorMinor,
+    pub current: bool,
+}
+
+pub const POWERSHELL_LTS_LINES: &[LtsLine] = &[
+    LtsLine {
+        line: MajorMinor { major: 7, minor: 6 },
+        current: true,
+    },
+    LtsLine {
+        line: MajorMinor { major: 7, minor: 4 },
+        current: false,
+    },
+];
+
+pub fn is_current_lts_version(version: &Version) -> bool {
+    let line = MajorMinor::from_version(version);
+    POWERSHELL_LTS_LINES
+        .iter()
+        .any(|lts_line| lts_line.current && lts_line.line == line)
 }
 
 pub fn parse_major_minor_wildcard_selector(value: &str) -> Result<MajorMinor> {
@@ -205,6 +239,13 @@ mod tests {
             }
             _ => panic!("expected major selector"),
         }
+    }
+
+    #[test]
+    fn parses_channel_selectors() {
+        assert_eq!(parse_install_selector("stable").unwrap(), VersionSelector::Stable);
+        assert_eq!(parse_install_selector("PREVIEW").unwrap(), VersionSelector::Preview);
+        assert_eq!(parse_install_selector("lts").unwrap(), VersionSelector::Lts);
     }
 
     #[test]
