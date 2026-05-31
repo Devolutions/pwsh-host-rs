@@ -7,6 +7,7 @@ mod platform;
 mod release;
 mod versions;
 
+use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -41,11 +42,95 @@ const POWERSHELL_UPDATECHECK_ENV_VAR: &str = "POWERSHELL_UPDATECHECK";
 const POWERSHELL_UPDATECHECK_OFF: &str = "Off";
 const VIRTUAL_ENVIRONMENT_FLAG: &str = "-virtualenvironment";
 const VIRTUAL_ENVIRONMENT_SHORT_FLAG: &str = "-venv";
+const HELP_TOPICS: &[&str] = &[
+    "install",
+    "update",
+    "uninstall",
+    "list",
+    "venv",
+    "alias",
+    "host",
+    "doctor",
+    "package",
+    "version",
+];
+
+fn usage_text() -> &'static str {
+    "Usage:\n  multi-pwsh --version\n  multi-pwsh --help\n  multi-pwsh help [command]\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease]\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh doctor --repair-aliases"
+}
 
 fn print_usage() {
-    eprintln!(
-        "Usage:\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease]\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh doctor --repair-aliases"
-    );
+    eprintln!("{}", usage_text());
+}
+
+fn print_global_help() {
+    println!("{}", usage_text());
+}
+
+fn print_version() {
+    println!("multi-pwsh {}", env!("CARGO_PKG_VERSION"));
+}
+
+fn is_help_flag(value: &str) -> bool {
+    matches!(value, "-h" | "--help")
+}
+
+fn help_topic_text(topic: &str) -> Option<&'static str> {
+    match topic {
+        "install" => Some(
+            "Usage:\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --arch <auto|x64|x86|arm64|arm32>\n  --include-prerelease\n  --add-path | --no-add-path\n  --register-manifest | --no-register-manifest\n  --enable-psremoting\n  --disable-telemetry\n  --add-explorer-context-menu\n  --add-file-context-menu\n  --skip-hash-verification\n  --hash-file <url-or-path>",
+        ),
+        "update" => Some(
+            "Usage:\n  multi-pwsh update <stable|preview|lts|major.minor> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --arch <auto|x64|x86|arm64|arm32>\n  --include-prerelease\n  --add-path | --no-add-path\n  --register-manifest | --no-register-manifest\n  --enable-psremoting\n  --disable-telemetry\n  --add-explorer-context-menu\n  --add-file-context-menu\n  --skip-hash-verification\n  --hash-file <url-or-path>",
+        ),
+        "uninstall" => Some(
+            "Usage:\n  multi-pwsh uninstall <version> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --force",
+        ),
+        "list" => Some(
+            "Usage:\n  multi-pwsh list [options]\n\nOptions:\n  --scope <user|machine|all>\n  --root <path>\n  --available\n  --include-prerelease",
+        ),
+        "venv" => Some(
+            "Usage:\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list",
+        ),
+        "alias" => Some(
+            "Usage:\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>",
+        ),
+        "host" => Some(
+            "Usage:\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]",
+        ),
+        "doctor" => Some("Usage:\n  multi-pwsh doctor --repair-aliases"),
+        "package" => Some(
+            "Usage:\n  multi-pwsh package install <selector> [options]\n  multi-pwsh package uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh package list [--scope <user|machine>] [--root <path>]",
+        ),
+        "version" => Some("Usage:\n  multi-pwsh --version\n  multi-pwsh -V\n  multi-pwsh version"),
+        _ => None,
+    }
+}
+
+fn print_help_topic(topic: &str) -> Result<()> {
+    let Some(text) = help_topic_text(topic) else {
+        return Err(MultiPwshError::InvalidArguments(format!(
+            "unknown help topic '{}'. expected one of: {}",
+            topic,
+            HELP_TOPICS.join(", ")
+        )));
+    };
+
+    println!("{}", text);
+    Ok(())
+}
+
+fn run_help(args: &[String]) -> Result<()> {
+    match args {
+        [] => {
+            print_global_help();
+            Ok(())
+        }
+        [topic] => print_help_topic(topic),
+        _ => Err(MultiPwshError::InvalidArguments(
+            "help accepts at most one command topic".to_string(),
+        )),
+    }
 }
 
 struct ReleaseSelectionOptions {
@@ -1772,6 +1857,7 @@ fn run_package_list(layout_options: PackageLayoutOptions) -> Result<()> {
     let records = metadata.resolved_records()?;
     if records.is_empty() {
         println!("Installed versions: (none)");
+        print_alias_metadata(&layout)?;
         return Ok(());
     }
 
@@ -1791,6 +1877,8 @@ fn run_package_list(layout_options: PackageLayoutOptions) -> Result<()> {
             record.record.enable_mu
         );
     }
+
+    print_alias_metadata(&layout)?;
 
     Ok(())
 }
@@ -1873,8 +1961,6 @@ fn run_current_user_list(os: HostOs, root: Option<PathBuf>) -> Result<()> {
         None => InstallLayout::new(os)?,
     };
     let versions = layout.installed_versions()?;
-    let aliases = aliases::read_alias_metadata(&layout)?;
-    let pins = read_minor_pins(&layout)?;
 
     println!("Home: {}", layout.home().display());
     println!("Alias bin: {}", layout.bin_dir().display());
@@ -1892,15 +1978,44 @@ fn run_current_user_list(os: HostOs, root: Option<PathBuf>) -> Result<()> {
         }
     }
 
+    print_alias_metadata(&layout)?;
+
+    Ok(())
+}
+
+fn format_special_alias_policy_line(alias_name: &str, policy_text: &str, aliases: &HashMap<String, String>) -> String {
+    match aliases.get(alias_name) {
+        Some(version) => format!("  - {} follows {} -> {}", alias_name, policy_text, version),
+        None => format!("  - {} follows {} -> unresolved", alias_name, policy_text),
+    }
+}
+
+fn print_alias_metadata(layout: &InstallLayout) -> Result<()> {
+    let aliases = aliases::read_alias_metadata(layout)?;
+    let policies = aliases::read_special_alias_policies(layout)?;
+    let pins = read_minor_pins(layout)?;
+
     println!();
     if aliases.is_empty() {
         println!("Aliases: (none)");
     } else {
         println!("Aliases:");
-        let mut items: Vec<_> = aliases.into_iter().collect();
-        items.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut items: Vec<_> = aliases.iter().collect();
+        items.sort_by(|a, b| a.0.cmp(b.0));
         for (alias, version) in items {
             println!("  - {} -> {}", alias, version);
+        }
+    }
+
+    println!();
+    if policies.is_empty() {
+        println!("Named alias policies: (none)");
+    } else {
+        println!("Named alias policies:");
+        let mut items: Vec<_> = policies.into_iter().collect();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        for (alias, policy) in items {
+            println!("{}", format_special_alias_policy_line(&alias, &policy, &aliases));
         }
     }
 
@@ -2109,6 +2224,7 @@ fn run_update(
     if let Some(path) = major_alias_path {
         println!("Updated major alias: {}", path.display());
     }
+    refresh_special_aliases(&layout, os)?;
     println!("Add to PATH once: {}", layout.bin_dir().display());
 
     Ok(())
@@ -2449,11 +2565,45 @@ fn run_doctor(args: &[String]) -> Result<()> {
 
 fn run() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
-    let os = HostOs::detect()?;
     if args.is_empty() {
         print_usage();
         return Err(MultiPwshError::InvalidArguments("missing command".to_string()));
     }
+
+    if is_help_flag(&args[0]) {
+        if args.len() != 1 {
+            return Err(MultiPwshError::InvalidArguments(
+                "--help does not accept additional arguments; use: multi-pwsh help <command>".to_string(),
+            ));
+        }
+        print_global_help();
+        return Ok(());
+    }
+
+    if args[0] == "help" {
+        return run_help(&args[1..]);
+    }
+
+    if args[0] == "version" && args.len() == 2 && is_help_flag(&args[1]) {
+        return print_help_topic("version");
+    }
+
+    if matches!(args[0].as_str(), "--version" | "-V" | "version") {
+        if args.len() != 1 {
+            return Err(MultiPwshError::InvalidArguments(format!(
+                "{} does not accept additional arguments",
+                args[0]
+            )));
+        }
+        print_version();
+        return Ok(());
+    }
+
+    if args.len() == 2 && is_help_flag(&args[1]) {
+        return print_help_topic(&args[0]);
+    }
+
+    let os = HostOs::detect()?;
 
     match args[0].as_str() {
         "install" => {
@@ -2525,12 +2675,8 @@ fn run() -> Result<()> {
             process::exit(exit_code);
         }
         "doctor" => run_doctor(&args[1..]),
-        "-h" | "--help" | "help" => {
-            print_usage();
-            Ok(())
-        }
         command => Err(MultiPwshError::InvalidArguments(format!(
-            "unknown command '{}'. expected: install, update, uninstall, list, venv, alias, host, doctor",
+            "unknown command '{}'. expected: install, update, uninstall, list, venv, alias, host, doctor, package, version",
             command
         ))),
     }
@@ -3018,6 +3164,41 @@ mod tests {
             resolve_special_alias_policy_from_installed(&versions, &SpecialAliasPolicy::Lts),
             Some(Version::parse("7.6.2").unwrap())
         );
+    }
+
+    #[test]
+    fn format_special_alias_policy_line_shows_resolved_and_unresolved_state() {
+        let mut aliases = HashMap::new();
+        aliases.insert(PWSH_LTS_ALIAS.to_string(), "7.6.2".to_string());
+
+        assert_eq!(
+            format_special_alias_policy_line(PWSH_LTS_ALIAS, "lts", &aliases),
+            "  - pwsh-lts follows lts -> 7.6.2"
+        );
+        assert_eq!(
+            format_special_alias_policy_line(PWSH_PREVIEW_ALIAS, "preview", &aliases),
+            "  - pwsh-preview follows preview -> unresolved"
+        );
+    }
+
+    #[test]
+    fn refresh_special_aliases_updates_policy_to_newest_matching_installed_version() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = InstallLayout::from_root(HostOs::detect().unwrap(), temp_dir.path().join("home")).unwrap();
+        layout.ensure_base_dirs().unwrap();
+
+        for version in ["7.6.1", "7.6.2"] {
+            let version = Version::parse(version).unwrap();
+            let executable = layout.version_executable(&version);
+            fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            fs::write(executable, b"").unwrap();
+        }
+
+        set_special_alias_policy(&layout, PWSH_LTS_ALIAS, Some("lts")).unwrap();
+        refresh_special_aliases(&layout, layout.os()).unwrap();
+
+        let aliases = aliases::read_alias_metadata(&layout).unwrap();
+        assert_eq!(aliases.get(PWSH_LTS_ALIAS).map(String::as_str), Some("7.6.2"));
     }
 
     #[test]

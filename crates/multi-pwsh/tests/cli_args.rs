@@ -74,6 +74,141 @@ fn normalize_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n").trim().to_string()
 }
 
+#[test]
+fn top_level_help_prints_usage() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    for flag in ["--help", "-h", "help"] {
+        let output = run_multi_pwsh(&[flag], temp_dir.path());
+
+        assert!(
+            output.status.success(),
+            "expected {} to succeed: {}",
+            flag,
+            normalize_output(&output.stderr)
+        );
+        let stdout = normalize_output(&output.stdout);
+        assert!(stdout.contains("Usage:"), "unexpected stdout: {}", stdout);
+        assert!(
+            stdout.contains("multi-pwsh help [command]"),
+            "unexpected stdout: {}",
+            stdout
+        );
+    }
+}
+
+#[test]
+fn subcommand_help_prints_focused_usage() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    for args in [
+        &["install", "--help"][..],
+        &["install", "-h"][..],
+        &["help", "install"][..],
+    ] {
+        let output = run_multi_pwsh(args, temp_dir.path());
+
+        assert!(
+            output.status.success(),
+            "expected {:?} to succeed: {}",
+            args,
+            normalize_output(&output.stderr)
+        );
+        let stdout = normalize_output(&output.stdout);
+        assert!(
+            stdout.contains("multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x>"),
+            "unexpected stdout: {}",
+            stdout
+        );
+        assert!(
+            stdout.contains("--hash-file <url-or-path>"),
+            "unexpected stdout: {}",
+            stdout
+        );
+    }
+}
+
+#[test]
+fn version_command_help_prints_focused_usage() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let output = run_multi_pwsh(&["version", "--help"], temp_dir.path());
+
+    assert!(
+        output.status.success(),
+        "expected version help to succeed: {}",
+        normalize_output(&output.stderr)
+    );
+    let stdout = normalize_output(&output.stdout);
+    assert!(stdout.contains("multi-pwsh --version"), "unexpected stdout: {}", stdout);
+}
+
+#[test]
+fn help_rejects_unknown_topic() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let output = run_multi_pwsh(&["help", "missing"], temp_dir.path());
+
+    assert!(!output.status.success(), "expected unknown help topic to fail");
+    let stderr = normalize_output(&output.stderr);
+    assert!(
+        stderr.contains("unknown help topic 'missing'"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn version_flag_prints_package_version() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    for flag in ["--version", "-V"] {
+        let output = run_multi_pwsh(&[flag], temp_dir.path());
+
+        assert!(
+            output.status.success(),
+            "expected {} to succeed: {}",
+            flag,
+            normalize_output(&output.stderr)
+        );
+        assert_eq!(
+            normalize_output(&output.stdout),
+            format!("multi-pwsh {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+}
+
+#[test]
+fn version_command_prints_package_version() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let output = run_multi_pwsh(&["version"], temp_dir.path());
+
+    assert!(
+        output.status.success(),
+        "expected version command to succeed: {}",
+        normalize_output(&output.stderr)
+    );
+    assert_eq!(
+        normalize_output(&output.stdout),
+        format!("multi-pwsh {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn version_rejects_extra_arguments() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    for args in [
+        &["--version", "extra"][..],
+        &["-V", "extra"][..],
+        &["version", "extra"][..],
+    ] {
+        let output = run_multi_pwsh(args, temp_dir.path());
+
+        assert!(!output.status.success(), "expected {:?} to fail", args);
+        let stderr = normalize_output(&output.stderr);
+        assert!(
+            stderr.contains("does not accept additional arguments"),
+            "unexpected stderr: {}",
+            stderr
+        );
+    }
+}
+
 fn split_module_path_entries(module_path: &str) -> Vec<PathBuf> {
     std::env::split_paths(&std::ffi::OsString::from(module_path)).collect()
 }
@@ -1077,6 +1212,39 @@ fn list_uses_explicit_root_and_scope() {
     assert!(
         stdout.contains(&package_root_text),
         "expected package root in output: {}",
+        stdout
+    );
+}
+
+#[test]
+fn list_reports_named_alias_policy_resolution() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let home_text = temp_dir.path().display().to_string();
+    let configure_output = run_multi_pwsh(&["alias", "set", "pwsh", "stable"], temp_dir.path());
+
+    assert!(
+        configure_output.status.success(),
+        "expected alias policy configuration to succeed: {}",
+        normalize_output(&configure_output.stderr)
+    );
+
+    let output = run_multi_pwsh(&["list", "--scope", "user", "--root", &home_text], temp_dir.path());
+
+    assert!(
+        output.status.success(),
+        "expected list to succeed: {}",
+        normalize_output(&output.stderr)
+    );
+
+    let stdout = normalize_output(&output.stdout);
+    assert!(
+        stdout.contains("Named alias policies:"),
+        "expected named alias policy section: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("  - pwsh follows stable -> unresolved"),
+        "expected unresolved pwsh stable policy: {}",
         stdout
     );
 }

@@ -16,14 +16,14 @@ curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/m
 irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.ps1 | iex
 ```
 
-Install a specific tag (example `v0.9.0`):
+Install a specific tag (example `v0.10.0`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.sh | bash -s -- v0.9.0
+curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.sh | bash -s -- v0.10.0
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.ps1))) -Version v0.9.0
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.ps1))) -Version v0.10.0
 ```
 
 Uninstall bootstrap scripts:
@@ -57,6 +57,7 @@ pwsh-7.4 --version
 ## More docs
 
 - [Native host mode and virtual environments](docs/host-and-venv.md)
+- [Feature matrix and roadmap](docs/feature-matrix.md)
 - [Testing guide](docs/testing.md)
 - [Release process](RELEASE.md)
 
@@ -170,6 +171,9 @@ multi-pwsh venv list
 `multi-pwsh` usage reference:
 
 ```text
+multi-pwsh --version
+multi-pwsh --help
+multi-pwsh help [command]
 multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]
 multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]
 multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]
@@ -185,6 +189,8 @@ multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>
 multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]
 multi-pwsh doctor --repair-aliases
 ```
+
+Use `multi-pwsh <command> --help` or `multi-pwsh help <command>` for focused command usage, for example `multi-pwsh install --help`.
 
 The Windows integration flags in the `install` and `update` forms are limited to archive-friendly behaviors; on macOS/Linux, use `--scope`, `--root`, `--arch`, `--include-prerelease`, and `--add-path` controls. Legacy scope aliases such as `current-user` and `all-users` are still accepted for compatibility.
 
@@ -206,6 +212,8 @@ If a pinned target version is not installed, the pin remains in metadata and the
 
 The bare `pwsh` alias is a managed policy alias. Configure it with `multi-pwsh alias set pwsh stable`, `multi-pwsh alias set pwsh lts`, `multi-pwsh alias set pwsh preview`, or an exact version. `pwsh-preview` tracks preview by default, and `pwsh-lts` tracks LTS by default. Policy aliases resolve only to installed versions; install or update the desired channel before pointing an alias at it.
 
+Use `multi-pwsh list` to inspect both resolved aliases and managed named alias policies. The policy section shows whether aliases such as `pwsh`, `pwsh-preview`, and `pwsh-lts` currently resolve to an installed version or remain configured but unresolved.
+
 The current LTS line is encoded in the tool; at the moment that is `7.6`.
 
 ## Native host mode and virtual environments
@@ -222,4 +230,3 @@ See [docs/host-and-venv.md](docs/host-and-venv.md) for host shims, venv layout, 
 - Venv matrix tests: `pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-VenvTestMatrix.ps1`
 
 See [docs/testing.md](docs/testing.md) for online test mode, alias-targeted runs, and troubleshooting flags.
-
