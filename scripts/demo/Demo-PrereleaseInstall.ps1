@@ -1,11 +1,18 @@
 param(
     [int]$PauseSeconds = 2,
-    [switch]$KeepArtifacts
+    [switch]$KeepArtifacts,
+    [switch]$Deck
 )
 
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot '_DemoCommon.ps1')
+
+if ($Deck) {
+    $script:DemoDeckMode = $true
+    $PauseSeconds = 0
+    $KeepArtifacts = $true
+}
 
 $context = New-DemoContext -DemoName 'prerelease-install' -KeepArtifacts:$KeepArtifacts
 

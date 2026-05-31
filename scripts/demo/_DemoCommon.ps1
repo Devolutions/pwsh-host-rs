@@ -1,9 +1,18 @@
 Set-StrictMode -Version Latest
 
+if (-not (Get-Variable -Name DemoDeckMode -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:DemoDeckMode = $false
+}
+
 function Show-Banner {
     param([string]$Text)
 
     Write-Host ''
+    if ($script:DemoDeckMode) {
+        Write-Host "### $Text" -ForegroundColor Cyan
+        return
+    }
+
     Write-Host ('=' * 78) -ForegroundColor DarkCyan
     Write-Host $Text -ForegroundColor Cyan
     Write-Host ('=' * 78) -ForegroundColor DarkCyan
@@ -26,6 +35,10 @@ function Invoke-DemoStep {
     )
 
     Show-Banner $Caption
+    if ($script:DemoDeckMode) {
+        Write-Host ''
+    }
+
     Write-Host "PS> $DisplayedCommand" -ForegroundColor Yellow
     Pause-Demo -PauseSeconds $PauseSeconds
     & $Action
