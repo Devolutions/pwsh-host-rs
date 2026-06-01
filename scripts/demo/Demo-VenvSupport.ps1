@@ -1,9 +1,19 @@
 param(
     [int]$PauseSeconds = 2,
-    [switch]$KeepArtifacts
+    [switch]$KeepArtifacts,
+    [switch]$Deck
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($Deck) {
+    $script:DemoDeckMode = $true
+    $PauseSeconds = 0
+    $KeepArtifacts = $true
+}
+else {
+    $script:DemoDeckMode = $false
+}
 
 $multiPwshExe = 'multi-pwsh'
 $multiPwshDisplay = 'multi-pwsh'
@@ -16,6 +26,11 @@ function Show-Banner {
     param([string]$Text)
 
     Write-Host ''
+    if ($script:DemoDeckMode) {
+        Write-Host "### $Text" -ForegroundColor Cyan
+        return
+    }
+
     Write-Host ('=' * 78) -ForegroundColor DarkCyan
     Write-Host $Text -ForegroundColor Cyan
     Write-Host ('=' * 78) -ForegroundColor DarkCyan
@@ -35,6 +50,10 @@ function Invoke-DemoStep {
     )
 
     Show-Banner $Caption
+    if ($script:DemoDeckMode) {
+        Write-Host ''
+    }
+
     Write-Host "PS> $DisplayedCommand" -ForegroundColor Yellow
     Pause-Demo
     & $Action
@@ -88,15 +107,58 @@ function Show-VenvListing {
     }
 }
 
-$venvRoot = Join-Path $HOME '.pwsh\venv'
+$previous = $null
+$demoHome = $null
+if ($Deck) {
+    $demoHome = Join-Path $HOME '.pwsh-demo\venv-support'
+    $previous = [pscustomobject]@{
+        MultiPwshHome = [Environment]::GetEnvironmentVariable('MULTI_PWSH_HOME', 'Process')
+        MultiPwshBinDir = [Environment]::GetEnvironmentVariable('MULTI_PWSH_BIN_DIR', 'Process')
+        MultiPwshCacheDir = [Environment]::GetEnvironmentVariable('MULTI_PWSH_CACHE_DIR', 'Process')
+        MultiPwshVenvDir = [Environment]::GetEnvironmentVariable('MULTI_PWSH_VENV_DIR', 'Process')
+        Path = $env:PATH
+    }
+
+    $demoBin = Join-Path $demoHome 'bin'
+    $demoCache = Join-Path $demoHome 'cache'
+    $demoVenv = Join-Path $demoHome 'venv'
+
+    if (Test-Path -LiteralPath $demoHome) {
+        Remove-Item -LiteralPath $demoHome -Recurse -Force
+    }
+
+    New-Item -ItemType Directory -Force -Path $demoHome, $demoBin, $demoVenv | Out-Null
+    $env:MULTI_PWSH_HOME = $demoHome
+    $env:MULTI_PWSH_BIN_DIR = $demoBin
+    $env:MULTI_PWSH_CACHE_DIR = $demoCache
+    $env:MULTI_PWSH_VENV_DIR = $demoVenv
+    $env:PATH = "$demoBin;$($env:PATH)"
+}
+
+$venvRoot = if ([string]::IsNullOrWhiteSpace($env:MULTI_PWSH_VENV_DIR)) {
+    Join-Path $HOME '.pwsh\venv'
+}
+else {
+    $env:MULTI_PWSH_VENV_DIR
+}
 $classicRoot = Join-Path $venvRoot $classicVenv
 $modernRoot = Join-Path $venvRoot $modernVenv
 $copyRoot = Join-Path $venvRoot $copyVenv
 $classicModulesRoot = Join-Path $classicRoot 'Modules'
 $modernModulesRoot = Join-Path $modernRoot 'Modules'
 $copyModulesRoot = Join-Path $copyRoot 'Modules'
-$copyArchive = Join-Path $HOME '.pwsh\graph-auth-demo.zip'
-$copyArchiveDisplay = '~/.pwsh/graph-auth-demo.zip'
+$copyArchive = if ($Deck) {
+    Join-Path $demoHome 'graph-auth-demo.zip'
+}
+else {
+    Join-Path $HOME '.pwsh\graph-auth-demo.zip'
+}
+$copyArchiveDisplay = if ($Deck) {
+    '~/.pwsh-demo/venv-support/graph-auth-demo.zip'
+}
+else {
+    '~/.pwsh/graph-auth-demo.zip'
+}
 
 $psGetInstallQuery = @'
 $ProgressPreference = 'SilentlyContinue'
@@ -191,7 +253,9 @@ try {
         & $multiPwshExe venv create $modernVenv | Write-NormalizedOutput
     }
 
-    Invoke-DemoStep '4. Verify the demo venvs exist under the default ~/.pwsh/venv root' "$multiPwshDisplay venv list" {
+    $venvRootLabel = if ($Deck) { '~/.pwsh-demo/venv-support/venv' } else { '~/.pwsh/venv' }
+
+    Invoke-DemoStep "4. Verify the demo venvs exist under the $venvRootLabel root" "$multiPwshDisplay venv list" {
         & $multiPwshExe venv list | Write-NormalizedOutput
     }
 
@@ -236,7 +300,8 @@ try {
     }
 
     Show-Banner 'Demo complete'
-    Write-Host 'Artifacts root: ~/.pwsh/venv' -ForegroundColor Green
+    $artifactRootLabel = if ($Deck) { '~/.pwsh-demo/venv-support' } else { '~/.pwsh/venv' }
+    Write-Host "Artifacts root: $artifactRootLabel" -ForegroundColor Green
     if (-not $KeepArtifacts) {
         Write-Host 'Cleaning up demo artifacts...' -ForegroundColor DarkYellow
         foreach ($demoPath in @($classicRoot, $modernRoot, $copyRoot)) {
@@ -254,4 +319,25 @@ try {
     }
 }
 finally {
+    if ($Deck -and $previous) {
+        $env:PATH = $previous.Path
+
+        foreach ($entry in @(
+            @{ Name = 'MULTI_PWSH_HOME'; Value = $previous.MultiPwshHome },
+            @{ Name = 'MULTI_PWSH_BIN_DIR'; Value = $previous.MultiPwshBinDir },
+            @{ Name = 'MULTI_PWSH_CACHE_DIR'; Value = $previous.MultiPwshCacheDir },
+            @{ Name = 'MULTI_PWSH_VENV_DIR'; Value = $previous.MultiPwshVenvDir }
+        )) {
+            if ($null -eq $entry.Value) {
+                Remove-Item "Env:$($entry.Name)" -ErrorAction SilentlyContinue
+            }
+            else {
+                Set-Item "Env:$($entry.Name)" -Value $entry.Value
+            }
+        }
+
+        if (-not $KeepArtifacts -and $demoHome -and (Test-Path -LiteralPath $demoHome)) {
+            Remove-Item -LiteralPath $demoHome -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
