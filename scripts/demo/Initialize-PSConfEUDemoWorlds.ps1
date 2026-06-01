@@ -1,7 +1,5 @@
 [CmdletBinding()]
-param(
-    [switch]$Full
-)
+param()
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -22,21 +20,6 @@ $worlds = @(
         Message = 'AD / scheduled job / firewall-safe path in the on-prem world'
     }
 )
-
-if ($Full) {
-    $worlds += @(
-        @{
-            Name = 'preview'
-            ModuleName = 'Conference.PreviewLab'
-            Message = 'Preview / compatibility test before the next PSConfEU session'
-        },
-        @{
-            Name = 'ai'
-            ModuleName = 'Conference.AISafety'
-            Message = 'AI-generated script review in a disposable module world'
-        }
-    )
-}
 
 foreach ($world in $worlds) {
     $venvPath = Join-Path $env:MULTI_PWSH_VENV_DIR $world.Name

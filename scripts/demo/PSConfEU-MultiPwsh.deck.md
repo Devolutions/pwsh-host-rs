@@ -3,11 +3,11 @@ background: "#101820"
 foreground: "#f8f8f2"
 border: "#4fd1c5"
 borderStyle: "rounded"
-h1: "small"
+h1: "04B_03__"
 h1Color: "#4fd1c5"
-h2: "small"
+h2: "04B_03__"
 h2Color: "#ffd166"
-h3: "mini"
+h3: "04B_03__"
 h3Color: "#4fd1c5"
 pagination: true
 paginationStyle: "progress"
@@ -17,61 +17,16 @@ paginationStyle: "progress"
 
 ---
 
-### Four tracks. One laptop.
+### All the PowerShells. One laptop.
 <!-- paginationStyle: dots -->
 
-PSConfEU 2026 live terminal demo.
-
-| In 10 minutes | You will see |
-|---------------|--------------|
-| versions | disposable PowerShell engines |
-| aliases | safe upgrade and rollback |
-| hosts | deterministic engine selection |
-| venvs | portable module worlds |
-
-Then we use the last 5 minutes for the rabbit hole you care about.
-
----
-
-## Why this matters
-
----
-
-### The hallway problem
-
-Someone hands you a script between sessions.
-
-* It worked yesterday on 7.4 LTS.
-* The pipeline is testing stable.
-* The hallway fix needs preview.
-* The module stack might be Graph, Az, VMware, Exchange, or something internal.
-
-You want to try it without turning your laptop into the experiment.
-
----
-
-### Demo promise
-
-Everything today is:
-
-* terminal-native.
-* reversible.
-* disposable.
-* safe to repeat after the talk.
-
-No admin path. No Wi-Fi dependency. No "trust me, it works on my machine".
-
----
-
-### The shape of the demo
-
-| Beat | What changes | What stays stable |
-|------|--------------|-------------------|
-| install/list | available engines | your system PowerShell |
-| alias pinning | target version | command name |
-| host selection | runtime engine | command line |
-| venv selection | module world | laptop state |
-| export/import | machine boundary | working environment |
+| If you need to... | multi-pwsh lets you... |
+|-------------------|------------------------|
+| try another PowerShell release | install it beside the one you already use |
+| keep stable, LTS, and preview handy | use `pwsh`, `pwsh-lts`, and `pwsh-preview` |
+| run a script on a specific version | launch exactly that PowerShell |
+| test a risky module stack | use a disposable module venv |
+| repeat the setup elsewhere | export and import the venv as a zip |
 
 ---
 
@@ -79,43 +34,47 @@ No admin path. No Wi-Fi dependency. No "trust me, it works on my machine".
 
 ---
 
-### 1. See the engines
+### 1. See the PowerShells
 
 First, make version sprawl visible.
 
 ```powershell
-multi-pwsh list
 multi-pwsh install 7.4.12
-multi-pwsh install 7.4.13
-multi-pwsh install 7.5
+multi-pwsh install 7.5.x
+multi-pwsh install 7.6
 multi-pwsh list
 ```
 
-Point: the installed engines are explicit, named, and disposable.
+Point: the installed PowerShell versions are explicit, named, and disposable.
 
 ---
 
-### 2. Upgrade without renaming scripts
+### 2. Keep release channels side by side
 
-Production scripts can keep calling `pwsh-7.4`.
+The useful everyday aliases are the release channels.
 
 ```powershell
-multi-pwsh alias set 7.4 7.4.12
-pwsh-7.4 -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
+multi-pwsh alias set pwsh stable
+multi-pwsh alias set pwsh-lts lts
+multi-pwsh alias set pwsh-preview preview
 
+pwsh -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
+pwsh-lts -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
+pwsh-preview -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
+```
+
+Keep latest stable as your default, with LTS and preview always handy.
+
+---
+
+### 3. Upgrade and rollback without renaming scripts
+
+Version-specific aliases are still there when a script needs a fixed line.
+
+```powershell
 multi-pwsh alias set 7.4 7.4.13
 pwsh-7.4 -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
-```
 
-Same command name. Different pinned engine.
-
----
-
-### 3. Rollback is the reveal
-
-This is the part people should remember.
-
-```powershell
 multi-pwsh alias set 7.4 7.4.12
 pwsh-7.4 -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
 ```
@@ -132,7 +91,7 @@ pwsh-7.4 -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
 
 ### 4. Stop guessing what `pwsh` means
 
-Exact engine
+Exact version
 
 ```powershell
 multi-pwsh host 7.4.12 -NoLogo -NoProfile -NonInteractive `
@@ -169,18 +128,18 @@ That is useful in a shell, a test harness, and a GitHub Actions matrix.
 
 ---
 
-### 5. Two conference realities
+### 5. PowerShell module venvs
 
-Create two local module worlds without PSGallery.
+Borrow the Python idea, apply it to PowerShell modules.
 
 ```powershell
-multi-pwsh venv create cloud
-multi-pwsh venv create onprem
+. .\scripts\demo\_DemoCommon.ps1
+$context = New-DemoContext -DemoName 'psconfeu-deck' -KeepArtifacts
 .\scripts\demo\Initialize-PSConfEUDemoWorlds.ps1
 multi-pwsh venv list
 ```
 
-The helper seeds tiny local modules for the live demo.
+Now a script can bring its dependencies with it, without polluting your real `PSModulePath`.
 
 ---
 
@@ -230,7 +189,7 @@ Module conflicts become test data instead of laptop state.
 
 ### 7. Export what worked
 
-The working module world becomes an artifact.
+The working module environment becomes a repeatable artifact.
 
 ```powershell
 $archive = Join-Path $env:TEMP 'multi-pwsh-cloud.zip'
@@ -241,7 +200,7 @@ multi-pwsh host 7.4.12 -venv cloud-copy -NoLogo -NoProfile -NonInteractive `
   -Command $cmd
 ```
 
-Now the environment can move to CI, a teammate, or tomorrow's Open Stage.
+Now the dependency set can move to CI, a teammate, or tomorrow's Open Stage.
 
 ---
 
@@ -267,25 +226,12 @@ Same idea as a build matrix, but available locally first.
 
 ### The takeaways
 
-* PowerShell versions became named, disposable engines.
-* Aliases made upgrades reversible.
+* PowerShell versions became named and disposable.
+* Aliases made stable, LTS, and preview easy to keep side by side.
 * `host` made runtime selection explicit.
-* Venvs made module stacks portable.
-* Export/import made the working state shareable.
+* Venvs made module stacks disposable, isolated, and portable.
+* Export/import made dependencies shareable.
 
 The real feature is confidence before you run someone else's PowerShell.
 
 ---
-
-### Pick the Q&A path
-
-| If you ask about... | I will jump to... |
-|---------------------|-------------------|
-| Graph or Az | real PSGallery-backed venvs |
-| preview releases | prerelease selectors |
-| CI | version and venv matrix |
-| repair | alias doctor demo |
-| packaging | backend package commands |
-| limitations | the honest tradeoff slide |
-
-The full source deck has all of these ready.

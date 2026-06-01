@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
     [int] $StartSlide = 1,
-    [switch] $Full,
     [switch] $Strict
 )
 
@@ -17,8 +16,7 @@ if (-not (Get-Module -ListAvailable -Name Deck)) {
 
 Import-Module Deck -ErrorAction Stop
 
-$deckName = if ($Full) { 'PSConfEU-MultiPwsh-Full.deck.md' } else { 'PSConfEU-MultiPwsh.deck.md' }
-$deckPath = Join-Path $PSScriptRoot $deckName
+$deckPath = Join-Path $PSScriptRoot 'PSConfEU-MultiPwsh.deck.md'
 $showDeckParameters = @{
     Path = $deckPath
 }
