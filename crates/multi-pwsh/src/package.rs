@@ -260,6 +260,22 @@ pub fn package_layout(
     install_root: Option<PathBuf>,
 ) -> Result<InstallLayout> {
     match (os, scope, install_root) {
+        (HostOs::Windows, PackageScope::CurrentUser, None) => {
+            let root = default_install_root(os, PackageScope::CurrentUser, arch)?;
+            // Use the default layout's venvs_dir so that `multi-pwsh venv` commands and
+            // package install alias shims resolve venvs from the same directory.
+            let default_venvs_dir = InstallLayout::new(os)
+                .map(|l| l.venvs_dir())
+                .unwrap_or_else(|_| root.join("venv"));
+            InstallLayout::from_parts(
+                os,
+                root.clone(),
+                root.join("bin"),
+                root.join("cache"),
+                default_venvs_dir,
+                root,
+            )
+        }
         (HostOs::Windows, scope, install_root) => {
             let root = match install_root {
                 Some(root) => root,
@@ -886,6 +902,28 @@ fn remove_file_context_menu(scope: PackageScope) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env_var<T>(key: &str, value: Option<&Path>, action: impl FnOnce() -> T) -> T {
+        let previous = env::var_os(key);
+
+        match value {
+            Some(value) => unsafe { env::set_var(key, value) },
+            None => unsafe { env::remove_var(key) },
+        }
+
+        let result = action();
+
+        match previous {
+            Some(value) => unsafe { env::set_var(key, value) },
+            None => unsafe { env::remove_var(key) },
+        }
+
+        result
+    }
 
     #[test]
     fn package_scope_parses_aliases() {
@@ -1009,6 +1047,26 @@ mod tests {
             layout.version_install_dir(&Version::parse("7.4.13").unwrap()),
             PathBuf::from(r"C:\PowerShell\7.4.13")
         );
+    }
+
+    #[test]
+    fn package_layout_windows_user_default_uses_default_venv_root() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let local_app_data = temp_dir.path().join("local-app-data");
+        let default_home = temp_dir.path().join("pwsh-home");
+
+        with_env_var("LOCALAPPDATA", Some(&local_app_data), || {
+            with_env_var("MULTI_PWSH_HOME", Some(&default_home), || {
+                let layout = package_layout(HostOs::Windows, HostArch::X64, PackageScope::CurrentUser, None).unwrap();
+
+                let expected_install_root = local_app_data.join("PowerShell");
+                assert_eq!(layout.home(), expected_install_root.as_path());
+                assert_eq!(layout.bin_dir(), expected_install_root.join("bin"));
+                assert_eq!(layout.versions_dir(), expected_install_root);
+                assert_eq!(layout.venvs_dir(), default_home.join("venv"));
+            })
+        });
     }
 
     #[test]

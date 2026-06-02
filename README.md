@@ -16,14 +16,14 @@ curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/m
 irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.ps1 | iex
 ```
 
-Install a specific tag (example `v0.10.0`):
+Install a specific tag (example `v0.6.0`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.sh | bash -s -- v0.10.0
+curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.sh | bash -s -- v0.6.0
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.ps1))) -Version v0.10.0
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.ps1))) -Version v0.6.0
 ```
 
 Uninstall bootstrap scripts:

@@ -34,7 +34,29 @@ paginationStyle: "progress"
 
 ---
 
-### 1. See the PowerShells
+### 1. Bootstrapping multi-pwsh
+
+Bootstrap multi-pwsh executable
+
+From bash (if you don't have pwsh):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.sh | bash
+```
+
+From Windows PowerShell (if you don't have pwsh):
+
+```powershell
+irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.ps1 | iex
+```
+
+multi-pwsh doesn't require PowerShell to install PowerShell
+
+---
+
+---
+
+### 2. Install PowerShell versions
 
 First, make version sprawl visible.
 
@@ -42,6 +64,15 @@ First, make version sprawl visible.
 multi-pwsh install 7.4.12
 multi-pwsh install 7.5.x
 multi-pwsh install 7.6
+```
+
+```powershell
+pwsh-7.4.12 -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
+pwsh-7.5 -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
+pwsh-7.6 -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
+```
+
+```powershell
 multi-pwsh list
 ```
 
@@ -49,25 +80,29 @@ Point: the installed PowerShell versions are explicit, named, and disposable.
 
 ---
 
-### 2. Keep release channels side by side
+### 3. Install PowerShell release channels
 
 The useful everyday aliases are the release channels.
 
 ```powershell
-multi-pwsh alias set pwsh stable
-multi-pwsh alias set pwsh-lts lts
-multi-pwsh alias set pwsh-preview preview
+multi-pwsh install stable
+multi-pwsh install lts
+multi-pwsh install preview
 
 pwsh -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
 pwsh-lts -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
 pwsh-preview -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
 ```
 
+```powershell
+multi-pwsh list
+```
+
 Keep latest stable as your default, with LTS and preview always handy.
 
 ---
 
-### 3. Upgrade and rollback without renaming scripts
+### 4. Upgrade and rollback without renaming scripts
 
 Version-specific aliases are still there when a script needs a fixed line.
 
@@ -77,37 +112,12 @@ pwsh-7.4 -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
 
 multi-pwsh alias set 7.4 7.4.12
 pwsh-7.4 -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
+
+multi-pwsh alias set stable 7.6
+pwsh -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion'
 ```
 
-* Upgrade is one command.
-* Rollback is one command.
-* Scripts and PATH do not need surgery.
-
----
-
-## Deterministic hosts
-
----
-
-### 4. Stop guessing what `pwsh` means
-
-Exact version
-
-```powershell
-multi-pwsh host 7.4.12 -NoLogo -NoProfile -NonInteractive `
-  -Command '$PSVersionTable.PSVersion.ToString()'
-```
-
-|||
-
-Channel selector
-
-```powershell
-multi-pwsh host 7.4 -NoLogo -NoProfile -NonInteractive `
-  -Command '$PSVersionTable.PSVersion.ToString()'
-```
-
-The caller chooses the runtime.
+No explicit launching of pwsh in a custom path - just use one of the aliases
 
 ---
 
@@ -124,80 +134,41 @@ That is useful in a shell, a test harness, and a GitHub Actions matrix.
 
 ---
 
-## Module worlds
+## Virtual Environments
 
 ---
 
-### 5. PowerShell module venvs
+### 5. Creating PowerShell venv
 
 Borrow the Python idea, apply it to PowerShell modules.
 
 ```powershell
-. .\scripts\demo\_DemoCommon.ps1
-$context = New-DemoContext -DemoName 'psconfeu-deck' -KeepArtifacts
-.\scripts\demo\Initialize-PSConfEUDemoWorlds.ps1
+multi-pwsh venv create jake
 multi-pwsh venv list
+```
+
+```powershell
+pwsh-lts -venv jake
+@('Deck','Stepper') | % { Install-Module -Name $_ -Force }
 ```
 
 Now a script can bring its dependencies with it, without polluting your real `PSModulePath`.
 
 ---
 
-### Cloud and on-prem side by side
-
-Cloud identity world
-
-```powershell
-multi-pwsh host 7.4.12 -venv cloud
-```
-
-Module: `Conference.CloudIdentity`
-
-|||
-
-On-prem automation world
-
-```powershell
-multi-pwsh host 7.4.12 -venv onprem
-```
-
-Module: `Conference.OnPremOps`
+## Environment Exportability
 
 ---
 
-### 6. Same command, different reality
-
-The selected venv decides what exists.
-
-```powershell
-$cmd = 'Import-Module Conference.CloudIdentity -ErrorAction SilentlyContinue; Import-Module Conference.OnPremOps -ErrorAction SilentlyContinue; Get-ConferenceReality'
-
-multi-pwsh host 7.4.12 -venv cloud -NoLogo -NoProfile -NonInteractive `
-  -Command $cmd
-
-multi-pwsh host 7.4.12 -venv onprem -NoLogo -NoProfile -NonInteractive `
-  -Command $cmd
-```
-
-Module conflicts become test data instead of laptop state.
-
----
-
-## Portable confidence
-
----
-
-### 7. Export what worked
+### 6. Exporting PowerShell venv
 
 The working module environment becomes a repeatable artifact.
 
 ```powershell
-$archive = Join-Path $env:TEMP 'multi-pwsh-cloud.zip'
-multi-pwsh venv export cloud $archive
-multi-pwsh venv import cloud-copy $archive
-
-multi-pwsh host 7.4.12 -venv cloud-copy -NoLogo -NoProfile -NonInteractive `
-  -Command $cmd
+$archive = Join-Path $env:TEMP 'jake-venv.zip'
+multi-pwsh venv export jake $archive
+multi-pwsh venv import horse $archive
+pwsh-lts -venv horse -Command { Get-Module }
 ```
 
 Now the dependency set can move to CI, a teammate, or tomorrow's Open Stage.
@@ -210,10 +181,12 @@ Before trusting a generated script or pipeline change:
 
 ```powershell
 foreach ($version in '7.4', '7.5') {
-  multi-pwsh host $version -venv cloud -NoLogo -NoProfile -File .\Invoke-SmokeTest.ps1
+  multi-pwsh host $version -venv jake -NoLogo -NoProfile -Command { .\Invoke-Deck.ps1 }
 }
+```
 
-multi-pwsh host 7.4 -venv onprem -NoLogo -NoProfile -File .\candidate.ps1
+```powershell
+pwsh-lts -venv jake -NoLogo -NoProfile -Command { .\Invoke-Stepper.ps1 }
 ```
 
 Same idea as a build matrix, but available locally first.
@@ -226,11 +199,9 @@ Same idea as a build matrix, but available locally first.
 
 ### The takeaways
 
-* PowerShell versions became named and disposable.
+* PowerShell versions and release channels easily available
 * Aliases made stable, LTS, and preview easy to keep side by side.
-* `host` made runtime selection explicit.
-* Venvs made module stacks disposable, isolated, and portable.
-* Export/import made dependencies shareable.
+* Venvs made script dependencies isolated, exportable, and portable.
 
 The real feature is confidence before you run someone else's PowerShell.
 
