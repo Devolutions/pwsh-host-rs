@@ -207,9 +207,6 @@ jobs:
           $projectPath = Join-Path $smokeRoot 'multi-pwsh-cli-package-smoke.csproj'
           $project = Get-Content -Path $projectPath -Raw
           $project = $project -replace '</Project>', @"
-            <PropertyGroup>
-              <DevolutionsMultiPwshCliWindowsOutputName>multi-pwsh-ci.exe</DevolutionsMultiPwshCliWindowsOutputName>
-            </PropertyGroup>
             <ItemGroup>
               <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="$version" />
             </ItemGroup>
@@ -232,7 +229,7 @@ jobs:
           dotnet build $projectPath --configfile $nugetConfig
           if ($LASTEXITCODE -ne 0) { throw 'Smoke project build failed.' }
 
-          $expected = Join-Path $smokeRoot 'bin\Debug\net8.0\runtimes\win-x64\native\multi-pwsh-ci.exe'
+          $expected = Join-Path $smokeRoot 'bin\Debug\net8.0\runtimes\win-x64\native\multi-pwsh.exe'
           if (-not (Test-Path -Path $expected -PathType Leaf)) {
             throw "Expected smoke output file was not found: $expected"
           }

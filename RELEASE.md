@@ -68,8 +68,3 @@ Reference the package and build your project:
 ```
 
 The package contributes `multi-pwsh` payloads under `runtimes/<rid>/native/` and copies them to build/publish output.
-
-Optional output-name overrides:
-
-- `DevolutionsMultiPwshCliWindowsOutputName` (default: `multi-pwsh.exe`)
-- `DevolutionsMultiPwshCliUnixOutputName` (default: `multi-pwsh`)
