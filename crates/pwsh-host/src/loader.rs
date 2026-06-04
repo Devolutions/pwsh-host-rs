@@ -65,9 +65,6 @@ pub fn get_assembly_delegate_loader() -> AssemblyDelegateLoader<PdCString> {
     assert!(pwsh_path.is_ok());
     let pwsh_path = pwsh_path.unwrap();
 
-    let hostfxr = load_hostfxr();
-    assert!(hostfxr.is_ok());
-    let _hostfxr = hostfxr.unwrap();
 
     get_assembly_delegate_loader_for_pwsh_dir(&pwsh_path).unwrap()
 }
