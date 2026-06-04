@@ -5,8 +5,13 @@ on:
     inputs:
       tag:
         description: Release tag to create/update when publishing
-        required: true
+        required: false
         type: string
+      dry_run:
+        description: Build and package only, then upload downloadable workflow artifacts (no GitHub release publish).
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -20,6 +25,7 @@ jobs:
       release_tag: ${{ steps.validate.outputs.release_tag }}
       release_target: ${{ steps.validate.outputs.release_target }}
       release_version: ${{ steps.validate.outputs.release_version }}
+      dry_run: ${{ steps.validate.outputs.dry_run }}
 
     steps:
       - name: Checkout selected ref
@@ -35,15 +41,15 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.inputs.tag }}
           CHECKOUT_REF: ${{ github.ref }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
-          tag="${RELEASE_TAG}"
-
-          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "Release tag must match vX.Y.Z or vX.Y.Z-suffix. Got: ${tag}" >&2
-            exit 1
+          dry_run="$(echo "${DRY_RUN}" | tr '[:upper:]' '[:lower:]')"
+          if [[ "${dry_run}" != "true" && "${dry_run}" != "false" ]]; then
+            dry_run="false"
           fi
 
-          release_version="${tag#v}"
+          tag="${RELEASE_TAG}"
+
           multi_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/multi-pwsh/Cargo.toml | head -n 1)"
           host_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pwsh-host/Cargo.toml | head -n 1)"
 
@@ -57,9 +63,25 @@ jobs:
             exit 1
           fi
 
-          if [[ "${multi_version}" != "${release_version}" ]]; then
-            echo "Release tag ${tag} does not match crate version ${multi_version}" >&2
-            exit 1
+          release_version="${multi_version}"
+
+          if [[ "${dry_run}" != "true" ]]; then
+            if [[ -z "${tag}" ]]; then
+              echo "Release tag is required when dry_run is false." >&2
+              exit 1
+            fi
+
+            if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "Release tag must match vX.Y.Z or vX.Y.Z-suffix. Got: ${tag}" >&2
+              exit 1
+            fi
+
+            if [[ "${multi_version}" != "${tag#v}" ]]; then
+              echo "Release tag ${tag} does not match crate version ${multi_version}" >&2
+              exit 1
+            fi
+          elif [[ -z "${tag}" ]]; then
+            tag="v${release_version}"
           fi
 
           release_target="$(git rev-parse HEAD)"
@@ -68,6 +90,7 @@ jobs:
           echo "release_tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "release_target=${release_target}" >> "$GITHUB_OUTPUT"
           echo "release_version=${release_version}" >> "$GITHUB_OUTPUT"
+          echo "dry_run=${dry_run}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.name }}
@@ -289,6 +312,13 @@ jobs:
             -NoBuild `
             -Clean:$false
 
+      - name: Upload CLI NuGet package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-nuget
+          path: artifacts/cli-nuget/*.nupkg
+          if-no-files-found: error
+
       - name: Generate checksums
         shell: pwsh
         working-directory: dist
@@ -312,6 +342,7 @@ jobs:
           Get-Content -Path checksums.txt
 
       - name: Publish release assets
+        if: ${{ needs.validate.outputs.dry_run != 'true' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}

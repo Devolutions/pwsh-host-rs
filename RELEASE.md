@@ -31,7 +31,10 @@ dotnet test dotnet\bindings\Devolutions.PowerShell.SDK.Bindings.csproj --no-buil
 
 ## 3. Publish the release
 
-Dispatch `.github/workflows/release.yml` from the branch or commit you want to release, with the matching tag value, for example `v0.9.0`.
+Dispatch `.github/workflows/release.yml` from the branch or commit you want to release.
+
+- For an actual publish, set `dry_run` to `false` and provide the matching `tag` value, for example `v0.9.0`.
+- For an inspection build, set `dry_run` to `true`. This builds and packs artifacts, uploads the `.nupkg` as a workflow artifact, and skips GitHub release publishing.
 
 You do **not** need to create the tag ahead of time. If the tag does not exist yet, the workflow creates it at the dispatched commit when it creates the GitHub release.
 
@@ -45,6 +48,10 @@ The workflow:
 - uploads install/uninstall bootstrap scripts to the GitHub release so users do not need `raw.githubusercontent.com`
 
 If the release already exists, the workflow uploads the refreshed assets with `--clobber`.
+
+### Dry-run artifact download
+
+When `dry_run` is `true`, download the `cli-nuget` artifact from the workflow run page to inspect `Devolutions.MultiPwsh.Cli.<version>.nupkg`.
 
 ## 4. Verify release assets
 
