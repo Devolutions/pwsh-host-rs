@@ -302,7 +302,8 @@ fn query_command_metadata(
     powershell: &SharedPowerShell,
     command_name: &str,
 ) -> Result<CommandMetadata, Box<dyn std::error::Error>> {
-    let response: ScriptResponse<CommandMetadata> = invoke_script(powershell, COMMAND_METADATA_SCRIPT, &[command_name])?;
+    let response: ScriptResponse<CommandMetadata> =
+        invoke_script(powershell, COMMAND_METADATA_SCRIPT, &[command_name])?;
     if !response.ok {
         return Err(response
             .message
@@ -329,7 +330,11 @@ fn invoke_command(powershell: &SharedPowerShell, command_name: &str, arguments_j
     }
 }
 
-fn invoke_script<T>(powershell: &SharedPowerShell, script: &'static str, arguments: &[&str]) -> Result<T, Box<dyn std::error::Error>>
+fn invoke_script<T>(
+    powershell: &SharedPowerShell,
+    script: &'static str,
+    arguments: &[&str],
+) -> Result<T, Box<dyn std::error::Error>>
 where
     T: for<'de> Deserialize<'de>,
 {

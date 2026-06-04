@@ -1,13 +1,13 @@
+use crate::context::HostfxrContext;
 use crate::delegate_loader::AssemblyDelegateLoader;
 use crate::error::Error;
-use crate::host_exit_code::KnownHostExitCode;
 use crate::host_detect::pwsh_host_detect;
 use crate::host_exit_code::HostExitCode;
-use crate::hostfxr::load_hostfxr_from_pwsh_dir;
+use crate::host_exit_code::KnownHostExitCode;
 use crate::hostfxr::load_hostfxr;
+use crate::hostfxr::load_hostfxr_from_pwsh_dir;
 use crate::pdcstr;
 use crate::pdcstring::PdCString;
-use crate::context::HostfxrContext;
 use crate::pwsh_cli::configure_startup_hooks_for_context;
 
 pub const BINDINGS_DLL: &[u8] =
@@ -24,7 +24,9 @@ pub fn get_assembly_delegate_loader_for_pwsh_dir(
         Err(error) => {
             let should_fallback = matches!(
                 error.downcast_ref::<Error>(),
-                Some(Error::Hostfxr(crate::host_exit_code::HostExitCode::Known(KnownHostExitCode::InvalidArgFailure)))
+                Some(Error::Hostfxr(crate::host_exit_code::HostExitCode::Known(
+                    KnownHostExitCode::InvalidArgFailure
+                )))
             );
 
             if !should_fallback {
@@ -64,7 +66,6 @@ pub fn get_assembly_delegate_loader() -> AssemblyDelegateLoader<PdCString> {
     let pwsh_path = pwsh_host_detect();
     assert!(pwsh_path.is_ok());
     let pwsh_path = pwsh_path.unwrap();
-
 
     get_assembly_delegate_loader_for_pwsh_dir(&pwsh_path).unwrap()
 }

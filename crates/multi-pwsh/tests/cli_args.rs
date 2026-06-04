@@ -93,11 +93,7 @@ fn top_level_help_prints_usage() {
             "unexpected stdout: {}",
             stdout
         );
-        assert!(
-            stdout.contains("multi-pwsh -V"),
-            "unexpected stdout: {}",
-            stdout
-        );
+        assert!(stdout.contains("multi-pwsh -V"), "unexpected stdout: {}", stdout);
         assert!(
             stdout.contains("multi-pwsh package install <selector> [options]"),
             "unexpected stdout: {}",
