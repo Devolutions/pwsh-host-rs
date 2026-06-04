@@ -259,7 +259,7 @@ jobs:
           gh release view "$env:RELEASE_TAG" *> $null
 
           if ($LASTEXITCODE -eq 0) {
-            gh release upload "$env:RELEASE_TAG" @zipFiles "dist/checksums.txt" --clobber
+            gh release upload "$env:RELEASE_TAG" @zipFiles "dist/checksums.txt" "tools/install-multi-pwsh.ps1" "tools/install-multi-pwsh.sh" "tools/uninstall-multi-pwsh.ps1" "tools/uninstall-multi-pwsh.sh" --clobber
           }
           else {
             $createArgs = @(
@@ -268,6 +268,10 @@ jobs:
 
             $createArgs += $zipFiles
             $createArgs += "dist/checksums.txt"
+            $createArgs += "tools/install-multi-pwsh.ps1"
+            $createArgs += "tools/install-multi-pwsh.sh"
+            $createArgs += "tools/uninstall-multi-pwsh.ps1"
+            $createArgs += "tools/uninstall-multi-pwsh.sh"
             $createArgs += "--generate-notes"
             $createArgs += "--target"
             $createArgs += "$env:RELEASE_TARGET"

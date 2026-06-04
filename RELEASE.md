@@ -41,6 +41,7 @@ The workflow:
 - builds artifacts from the commit you dispatched the workflow from
 - creates the tag at that commit if needed
 - uploads archives and `checksums.txt` to the GitHub release
+- uploads install/uninstall bootstrap scripts to the GitHub release so users do not need `raw.githubusercontent.com`
 
 If the release already exists, the workflow uploads the refreshed assets with `--clobber`.
 
@@ -50,4 +51,6 @@ Confirm the release contains:
 
 - all platform zip archives
 - `checksums.txt`
+- `install-multi-pwsh.ps1` and `install-multi-pwsh.sh`
+- `uninstall-multi-pwsh.ps1` and `uninstall-multi-pwsh.sh`
 - generated release notes or any required manual edits

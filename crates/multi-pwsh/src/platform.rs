@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::error::{MultiPwshError, Result};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,6 +27,29 @@ impl HostOs {
             HostOs::Windows => "pwsh.exe",
             HostOs::Macos | HostOs::Linux => "pwsh",
         }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "windows" | "win" => Some(HostOs::Windows),
+            "macos" | "osx" | "darwin" => Some(HostOs::Macos),
+            "linux" => Some(HostOs::Linux),
+            _ => None,
+        }
+    }
+
+    pub fn as_manifest_value(self) -> &'static str {
+        match self {
+            HostOs::Windows => "windows",
+            HostOs::Macos => "macos",
+            HostOs::Linux => "linux",
+        }
+    }
+}
+
+impl fmt::Display for HostOs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_manifest_value())
     }
 }
 
@@ -55,5 +80,20 @@ impl HostArch {
             "arm32" => Some(HostArch::Arm32),
             _ => None,
         }
+    }
+
+    pub fn as_manifest_value(self) -> &'static str {
+        match self {
+            HostArch::X64 => "x64",
+            HostArch::X86 => "x86",
+            HostArch::Arm64 => "arm64",
+            HostArch::Arm32 => "arm32",
+        }
+    }
+}
+
+impl fmt::Display for HostArch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_manifest_value())
     }
 }

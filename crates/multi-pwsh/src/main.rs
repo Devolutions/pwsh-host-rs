@@ -24,7 +24,7 @@ use aliases::{
     AliasSelector, PWSH_ALIAS, PWSH_LTS_ALIAS, PWSH_PREVIEW_ALIAS,
 };
 use error::{MultiPwshError, Result};
-use install::{ensure_installed, ChecksumSource};
+use install::{copy_asset_to_path, ensure_installed, validate_archive_checksum, ChecksumSource};
 use layout::InstallLayout;
 use package::{
     load_package_metadata, package_layout, persist_installed_version_registration, persist_installer_properties,
@@ -32,7 +32,10 @@ use package::{
     save_package_metadata, PackageInstallOptions, PackageScope, PACKAGE_METADATA_FILE,
 };
 use platform::{HostArch, HostOs};
-use release::ReleaseClient;
+use release::{
+    load_or_default_powershell_manifest, save_powershell_manifest, AssetSource, OfflinePowerShellAsset,
+    OfflinePowerShellManifest, OfflineReleaseClient, ReleaseClient, ResolvedRelease,
+};
 use versions::{
     is_current_lts_version, parse_exact_version, parse_install_selector, parse_major_minor_selector,
     parse_major_selector, MajorMinor, VersionSelector,
@@ -40,6 +43,8 @@ use versions::{
 
 const POWERSHELL_UPDATECHECK_ENV_VAR: &str = "POWERSHELL_UPDATECHECK";
 const POWERSHELL_UPDATECHECK_OFF: &str = "Off";
+const MULTI_PWSH_OFFLINE_CACHE_ENV_VAR: &str = "MULTI_PWSH_OFFLINE_CACHE";
+const MULTI_PWSH_RELEASE_SOURCE_ENV_VAR: &str = "MULTI_PWSH_RELEASE_SOURCE";
 const VIRTUAL_ENVIRONMENT_FLAG: &str = "-virtualenvironment";
 const VIRTUAL_ENVIRONMENT_SHORT_FLAG: &str = "-venv";
 const HELP_TOPICS: &[&str] = &[
@@ -51,12 +56,13 @@ const HELP_TOPICS: &[&str] = &[
     "alias",
     "host",
     "doctor",
+    "cache",
     "package",
     "version",
 ];
 
 fn usage_text() -> &'static str {
-    "Usage:\n  multi-pwsh --version\n  multi-pwsh --help\n  multi-pwsh help [command]\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease]\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh doctor --repair-aliases"
+    "Usage:\n  multi-pwsh --version\n  multi-pwsh --help\n  multi-pwsh help [command]\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh cache warm <selector> [--os <windows|linux|macos|all>] [--arch <x64|x86|arm64|arm32|all>] [--include-prerelease] [--output <path>]\n  multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease] [--offline-cache <path>]\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh doctor --repair-aliases"
 }
 
 fn print_usage() {
@@ -78,16 +84,16 @@ fn is_help_flag(value: &str) -> bool {
 fn help_topic_text(topic: &str) -> Option<&'static str> {
     match topic {
         "install" => Some(
-            "Usage:\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --arch <auto|x64|x86|arm64|arm32>\n  --include-prerelease\n  --add-path | --no-add-path\n  --register-manifest | --no-register-manifest\n  --enable-psremoting\n  --disable-telemetry\n  --add-explorer-context-menu\n  --add-file-context-menu\n  --skip-hash-verification\n  --hash-file <url-or-path>",
+            "Usage:\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --arch <auto|x64|x86|arm64|arm32>\n  --include-prerelease\n  --offline-cache <path>\n  --add-path | --no-add-path\n  --register-manifest | --no-register-manifest\n  --enable-psremoting\n  --disable-telemetry\n  --add-explorer-context-menu\n  --add-file-context-menu\n  --skip-hash-verification\n  --hash-file <url-or-path>",
         ),
         "update" => Some(
-            "Usage:\n  multi-pwsh update <stable|preview|lts|major.minor> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --arch <auto|x64|x86|arm64|arm32>\n  --include-prerelease\n  --add-path | --no-add-path\n  --register-manifest | --no-register-manifest\n  --enable-psremoting\n  --disable-telemetry\n  --add-explorer-context-menu\n  --add-file-context-menu\n  --skip-hash-verification\n  --hash-file <url-or-path>",
+            "Usage:\n  multi-pwsh update <stable|preview|lts|major.minor> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --arch <auto|x64|x86|arm64|arm32>\n  --include-prerelease\n  --offline-cache <path>\n  --add-path | --no-add-path\n  --register-manifest | --no-register-manifest\n  --enable-psremoting\n  --disable-telemetry\n  --add-explorer-context-menu\n  --add-file-context-menu\n  --skip-hash-verification\n  --hash-file <url-or-path>",
         ),
         "uninstall" => Some(
             "Usage:\n  multi-pwsh uninstall <version> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --force",
         ),
         "list" => Some(
-            "Usage:\n  multi-pwsh list [options]\n\nOptions:\n  --scope <user|machine|all>\n  --root <path>\n  --available\n  --include-prerelease",
+            "Usage:\n  multi-pwsh list [options]\n\nOptions:\n  --scope <user|machine|all>\n  --root <path>\n  --available\n  --include-prerelease\n  --offline-cache <path>",
         ),
         "venv" => Some(
             "Usage:\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list",
@@ -99,6 +105,9 @@ fn help_topic_text(topic: &str) -> Option<&'static str> {
             "Usage:\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]",
         ),
         "doctor" => Some("Usage:\n  multi-pwsh doctor --repair-aliases"),
+        "cache" => Some(
+            "Usage:\n  multi-pwsh cache warm <selector> [options]\n\nOptions:\n  --os <windows|linux|macos|all>\n  --arch <x64|x86|arm64|arm32|all>\n  --include-prerelease\n  --output <path>\n  --product <powershell|multi-pwsh|all>",
+        ),
         "package" => Some(
             "Usage:\n  multi-pwsh package install <selector> [options]\n  multi-pwsh package uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh package list [--scope <user|machine>] [--root <path>]",
         ),
@@ -137,12 +146,14 @@ struct ReleaseSelectionOptions {
     arch: Option<HostArch>,
     include_prerelease: bool,
     checksum_source: ChecksumSource,
+    offline_cache: Option<PathBuf>,
 }
 
 #[derive(Debug)]
 struct InstallCommandOptions {
     package: PackageInstallOptions,
     checksum_source: ChecksumSource,
+    offline_cache: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -183,7 +194,68 @@ enum ListOption {
     },
     Available {
         include_prerelease: bool,
+        offline_cache: Option<PathBuf>,
     },
+}
+
+enum ReleaseResolver {
+    Github(ReleaseClient),
+    Offline(OfflineReleaseClient),
+}
+
+impl ReleaseResolver {
+    fn new(offline_cache: Option<PathBuf>) -> Result<Self> {
+        if let Some(path) = effective_offline_cache(offline_cache) {
+            return Ok(ReleaseResolver::Offline(OfflineReleaseClient::new(path)?));
+        }
+
+        let token = env::var("GITHUB_TOKEN").ok();
+        Ok(ReleaseResolver::Github(ReleaseClient::new(token)?))
+    }
+
+    fn http_client(&self) -> Option<&ureq::Agent> {
+        match self {
+            ReleaseResolver::Github(client) => Some(client.http_client()),
+            ReleaseResolver::Offline(_) => None,
+        }
+    }
+
+    fn resolve_selector(
+        &self,
+        selector: VersionSelector,
+        os: HostOs,
+        arch: HostArch,
+        include_prerelease: bool,
+    ) -> Result<ResolvedRelease> {
+        match self {
+            ReleaseResolver::Github(client) => client.resolve_selector(selector, os, arch, include_prerelease),
+            ReleaseResolver::Offline(client) => client.resolve_selector(selector, os, arch, include_prerelease),
+        }
+    }
+
+    fn resolve_all_in_line(
+        &self,
+        line: MajorMinor,
+        os: HostOs,
+        arch: HostArch,
+        include_prerelease: bool,
+    ) -> Result<Vec<ResolvedRelease>> {
+        match self {
+            ReleaseResolver::Github(client) => client.resolve_all_in_line(line, os, arch, include_prerelease),
+            ReleaseResolver::Offline(client) => client.resolve_all_in_line(line, os, arch, include_prerelease),
+        }
+    }
+
+    fn list_available_versions(&self, include_prerelease: bool) -> Result<Vec<Version>> {
+        match self {
+            ReleaseResolver::Github(client) => client.list_available_versions(include_prerelease),
+            ReleaseResolver::Offline(client) => Ok(client.list_available_versions(include_prerelease)),
+        }
+    }
+
+    fn is_offline(&self) -> bool {
+        matches!(self, ReleaseResolver::Offline(_))
+    }
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -1004,6 +1076,492 @@ fn parse_update_selector(value: &str) -> Result<VersionSelector> {
     }
 }
 
+fn offline_cache_from_env() -> Option<PathBuf> {
+    if let Some(path) = env::var_os(MULTI_PWSH_OFFLINE_CACHE_ENV_VAR) {
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
+        }
+    }
+
+    let value = env::var_os(MULTI_PWSH_RELEASE_SOURCE_ENV_VAR)?;
+    if value.is_empty() {
+        return None;
+    }
+
+    let text = value.to_string_lossy();
+    if text.eq_ignore_ascii_case("github") || text.eq_ignore_ascii_case("online") {
+        return None;
+    }
+
+    Some(PathBuf::from(value))
+}
+
+fn effective_offline_cache(cli_value: Option<PathBuf>) -> Option<PathBuf> {
+    cli_value.or_else(offline_cache_from_env)
+}
+
+fn parse_offline_cache_option(
+    args: &[String],
+    index: usize,
+    offline_cache: &mut Option<PathBuf>,
+) -> Result<Option<usize>> {
+    match args[index].as_str() {
+        "--offline-cache" => {
+            if index + 1 >= args.len() {
+                return Err(MultiPwshError::InvalidArguments(
+                    "expected value after --offline-cache".to_string(),
+                ));
+            }
+
+            if offline_cache.is_some() {
+                return Err(MultiPwshError::InvalidArguments(
+                    "--offline-cache can only be specified once".to_string(),
+                ));
+            }
+
+            *offline_cache = Some(PathBuf::from(&args[index + 1]));
+            Ok(Some(index + 2))
+        }
+        _ => Ok(None),
+    }
+}
+
+struct CacheWarmOptions {
+    target_oses: Vec<HostOs>,
+    target_arches: Vec<HostArch>,
+    include_prerelease: bool,
+    output: Option<PathBuf>,
+    product: CacheProduct,
+    os_wildcard: bool,
+    arch_wildcard: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CacheProduct {
+    PowerShell,
+    MultiPwsh,
+    All,
+}
+
+impl CacheProduct {
+    fn includes_powershell(self) -> bool {
+        matches!(self, CacheProduct::PowerShell | CacheProduct::All)
+    }
+
+    fn includes_multi_pwsh(self) -> bool {
+        matches!(self, CacheProduct::MultiPwsh | CacheProduct::All)
+    }
+}
+
+fn all_host_oses() -> Vec<HostOs> {
+    vec![HostOs::Windows, HostOs::Macos, HostOs::Linux]
+}
+
+fn all_host_arches() -> Vec<HostArch> {
+    vec![HostArch::X64, HostArch::X86, HostArch::Arm64, HostArch::Arm32]
+}
+
+fn parse_cache_warm_options(args: &[String]) -> Result<CacheWarmOptions> {
+    let mut target_oses = vec![HostOs::detect()?];
+    let mut target_arches = vec![HostArch::detect()];
+    let mut os_specified = false;
+    let mut arch_specified = false;
+    let mut os_wildcard = false;
+    let mut arch_wildcard = false;
+    let mut include_prerelease = false;
+    let mut output = None;
+    let mut product = CacheProduct::All;
+    let mut product_specified = false;
+    let mut index = 0usize;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--os" => {
+                if index + 1 >= args.len() {
+                    return Err(MultiPwshError::InvalidArguments(
+                        "expected value after --os".to_string(),
+                    ));
+                }
+                if os_specified {
+                    return Err(MultiPwshError::InvalidArguments(
+                        "--os can only be specified once".to_string(),
+                    ));
+                }
+                if args[index + 1].eq_ignore_ascii_case("all") {
+                    target_oses = all_host_oses();
+                    os_wildcard = true;
+                } else {
+                    target_oses = vec![HostOs::parse(&args[index + 1]).ok_or_else(|| {
+                        MultiPwshError::InvalidArguments(format!(
+                            "unsupported operating system '{}', expected one of: windows, linux, macos, all",
+                            args[index + 1]
+                        ))
+                    })?];
+                }
+                os_specified = true;
+                index += 2;
+            }
+            "--arch" | "-a" => {
+                if index + 1 >= args.len() {
+                    return Err(MultiPwshError::InvalidArguments(
+                        "expected value after --arch".to_string(),
+                    ));
+                }
+                if arch_specified {
+                    return Err(MultiPwshError::InvalidArguments(
+                        "--arch can only be specified once".to_string(),
+                    ));
+                }
+                if args[index + 1].eq_ignore_ascii_case("all") {
+                    target_arches = all_host_arches();
+                    arch_wildcard = true;
+                } else {
+                    target_arches = vec![HostArch::parse(&args[index + 1]).ok_or_else(|| {
+                        MultiPwshError::InvalidArguments(format!(
+                            "unsupported architecture '{}', expected one of: x64, x86, arm64, arm32, all",
+                            args[index + 1]
+                        ))
+                    })?];
+                }
+                arch_specified = true;
+                index += 2;
+            }
+            "--include-prerelease" | "--prerelease" => {
+                include_prerelease = true;
+                index += 1;
+            }
+            "--output" | "-o" => {
+                if index + 1 >= args.len() {
+                    return Err(MultiPwshError::InvalidArguments(
+                        "expected value after --output".to_string(),
+                    ));
+                }
+                if output.is_some() {
+                    return Err(MultiPwshError::InvalidArguments(
+                        "--output can only be specified once".to_string(),
+                    ));
+                }
+                output = Some(PathBuf::from(&args[index + 1]));
+                index += 2;
+            }
+            "--product" => {
+                if index + 1 >= args.len() {
+                    return Err(MultiPwshError::InvalidArguments(
+                        "expected value after --product".to_string(),
+                    ));
+                }
+                if product_specified {
+                    return Err(MultiPwshError::InvalidArguments(
+                        "--product can only be specified once".to_string(),
+                    ));
+                }
+                product = match args[index + 1].to_ascii_lowercase().as_str() {
+                    "powershell" | "pwsh" => CacheProduct::PowerShell,
+                    "multi-pwsh" | "multipwsh" | "self" => CacheProduct::MultiPwsh,
+                    "all" => CacheProduct::All,
+                    value => {
+                        return Err(MultiPwshError::InvalidArguments(format!(
+                            "unsupported product '{}', expected one of: powershell, multi-pwsh, all",
+                            value
+                        )));
+                    }
+                };
+                product_specified = true;
+                index += 2;
+            }
+            _ => {
+                return Err(MultiPwshError::InvalidArguments(
+                    "expected optional --os <windows|linux|macos|all>, --arch <x64|x86|arm64|arm32|all>, --include-prerelease, --output <path>, and/or --product <powershell|multi-pwsh|all>".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(CacheWarmOptions {
+        target_oses,
+        target_arches,
+        include_prerelease,
+        output,
+        product,
+        os_wildcard,
+        arch_wildcard,
+    })
+}
+
+fn bundle_relative_path(parts: &[String]) -> String {
+    parts.join("/")
+}
+
+fn bundle_path(root: &Path, relative_path: &str) -> PathBuf {
+    let mut path = root.to_path_buf();
+    for part in relative_path.split('/') {
+        path.push(part);
+    }
+    path
+}
+
+fn cache_target_error_can_be_skipped(error: &MultiPwshError) -> bool {
+    matches!(
+        error,
+        MultiPwshError::UnsupportedPlatform(_) | MultiPwshError::AssetNotFound(_) | MultiPwshError::ReleaseNotFound(_)
+    )
+}
+
+fn resolve_cache_releases(
+    client: &ReleaseClient,
+    selector: VersionSelector,
+    target_os: HostOs,
+    target_arch: HostArch,
+    include_prerelease: bool,
+) -> Result<Vec<ResolvedRelease>> {
+    match selector {
+        VersionSelector::MajorMinorWildcard(line) => {
+            client.resolve_all_in_line(line, target_os, target_arch, include_prerelease)
+        }
+        _ => Ok(vec![client.resolve_selector(
+            selector,
+            target_os,
+            target_arch,
+            include_prerelease,
+        )?]),
+    }
+}
+
+fn cache_release_artifacts(
+    client: &ReleaseClient,
+    output_root: &Path,
+    manifest: &mut OfflinePowerShellManifest,
+    release: &ResolvedRelease,
+    target_os: HostOs,
+    target_arch: HostArch,
+) -> Result<()> {
+    let release_dir = format!("v{}", release.version);
+    let asset_relative_path = bundle_relative_path(&[
+        "PowerShell".to_string(),
+        release_dir.clone(),
+        release.asset_name.clone(),
+    ]);
+    let asset_path = bundle_path(output_root, &asset_relative_path);
+    if !asset_path.exists() {
+        copy_asset_to_path(Some(client.http_client()), &release.asset_source, &asset_path)?;
+    }
+
+    let checksum_name = release.checksum_asset_name.clone().ok_or_else(|| {
+        MultiPwshError::Archive(format!(
+            "release '{}' is missing checksum asset metadata and cannot be mirrored safely",
+            release.asset_name
+        ))
+    })?;
+    let checksum_source = release.checksum_asset_source.as_ref().ok_or_else(|| {
+        MultiPwshError::Archive(format!(
+            "release '{}' is missing checksum asset source and cannot be mirrored safely",
+            release.asset_name
+        ))
+    })?;
+    let checksum_relative_path = bundle_relative_path(&["PowerShell".to_string(), release_dir, checksum_name.clone()]);
+    let checksum_path = bundle_path(output_root, &checksum_relative_path);
+    if !checksum_path.exists() {
+        copy_asset_to_path(Some(client.http_client()), checksum_source, &checksum_path)?;
+    }
+
+    let cached_release = ResolvedRelease {
+        version: release.version.clone(),
+        asset_name: release.asset_name.clone(),
+        asset_source: AssetSource::File(asset_path.clone()),
+        checksum_asset_name: Some(checksum_name.clone()),
+        checksum_asset_source: Some(AssetSource::File(checksum_path)),
+    };
+    validate_archive_checksum(None, &cached_release, &ChecksumSource::ReleaseAsset, &asset_path)?;
+
+    manifest.upsert_asset(
+        &release.version,
+        !release.version.pre.is_empty(),
+        OfflinePowerShellAsset {
+            name: release.asset_name.clone(),
+            path: asset_relative_path,
+            os: target_os.as_manifest_value().to_string(),
+            arch: target_arch.as_manifest_value().to_string(),
+            checksum_name: Some(checksum_name),
+            checksum_path: Some(checksum_relative_path),
+        },
+    );
+
+    println!(
+        "Cached PowerShell {} for {} {}: {}",
+        release.version, target_os, target_arch, release.asset_name
+    );
+    Ok(())
+}
+
+fn multi_pwsh_asset_name(target_os: HostOs, target_arch: HostArch) -> Result<String> {
+    let os = match target_os {
+        HostOs::Windows => "windows",
+        HostOs::Macos => "macos",
+        HostOs::Linux => "linux",
+    };
+
+    let arch = match (target_os, target_arch) {
+        (_, HostArch::X64) => "x64",
+        (HostOs::Windows | HostOs::Macos | HostOs::Linux, HostArch::Arm64) => "arm64",
+        _ => {
+            return Err(MultiPwshError::UnsupportedPlatform(format!(
+                "multi-pwsh does not publish an archive for {} {}",
+                target_os, target_arch
+            )));
+        }
+    };
+
+    Ok(format!("multi-pwsh-{}-{}.zip", os, arch))
+}
+
+fn cache_multi_pwsh_artifact(
+    client: &ReleaseClient,
+    output_root: &Path,
+    target_os: HostOs,
+    target_arch: HostArch,
+) -> Result<()> {
+    let version = Version::parse(env!("CARGO_PKG_VERSION"))?;
+    let tag = format!("v{}", version);
+    let asset_name = multi_pwsh_asset_name(target_os, target_arch)?;
+    let asset_relative_path = bundle_relative_path(&["multi-pwsh".to_string(), tag.clone(), asset_name.clone()]);
+    let checksum_relative_path =
+        bundle_relative_path(&["multi-pwsh".to_string(), tag.clone(), "checksums.txt".to_string()]);
+    let asset_path = bundle_path(output_root, &asset_relative_path);
+    let checksum_path = bundle_path(output_root, &checksum_relative_path);
+    let release_base = format!("https://github.com/Devolutions/multi-pwsh/releases/download/{}", tag);
+
+    if !asset_path.exists() {
+        copy_asset_to_path(
+            Some(client.http_client()),
+            &AssetSource::Url(format!("{}/{}", release_base, asset_name)),
+            &asset_path,
+        )?;
+    }
+
+    if !checksum_path.exists() {
+        copy_asset_to_path(
+            Some(client.http_client()),
+            &AssetSource::Url(format!("{}/checksums.txt", release_base)),
+            &checksum_path,
+        )?;
+    }
+
+    let cached_release = ResolvedRelease {
+        version,
+        asset_name: asset_name.clone(),
+        asset_source: AssetSource::File(asset_path.clone()),
+        checksum_asset_name: Some("checksums.txt".to_string()),
+        checksum_asset_source: Some(AssetSource::File(checksum_path)),
+    };
+    validate_archive_checksum(None, &cached_release, &ChecksumSource::ReleaseAsset, &asset_path)?;
+
+    println!(
+        "Cached multi-pwsh {} for {} {}",
+        env!("CARGO_PKG_VERSION"),
+        target_os,
+        target_arch
+    );
+    Ok(())
+}
+
+fn run_cache_warm(selector_input: &str, options: CacheWarmOptions) -> Result<()> {
+    let selector = parse_install_selector(selector_input)?;
+    let output_root = options.output.unwrap_or_else(|| {
+        InstallLayout::new(HostOs::detect().unwrap_or(HostOs::Windows))
+            .map(|layout| layout.cache_dir())
+            .unwrap_or_else(|_| PathBuf::from("."))
+    });
+    fs::create_dir_all(&output_root)?;
+
+    let token = env::var("GITHUB_TOKEN").ok();
+    let release_client = ReleaseClient::new(token)?;
+    let mut manifest = load_or_default_powershell_manifest(&output_root)?;
+    let mut cached_count = 0usize;
+    let mut multi_pwsh_count = 0usize;
+
+    if options.product.includes_powershell() {
+        for target_os in &options.target_oses {
+            for target_arch in &options.target_arches {
+                let releases = match resolve_cache_releases(
+                    &release_client,
+                    selector.clone(),
+                    *target_os,
+                    *target_arch,
+                    options.include_prerelease,
+                ) {
+                    Ok(releases) => releases,
+                    Err(error)
+                        if (options.os_wildcard || options.arch_wildcard)
+                            && cache_target_error_can_be_skipped(&error) =>
+                    {
+                        eprintln!("Skipping {} {}: {}", target_os, target_arch, error);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+
+                for release in releases {
+                    cache_release_artifacts(
+                        &release_client,
+                        &output_root,
+                        &mut manifest,
+                        &release,
+                        *target_os,
+                        *target_arch,
+                    )?;
+                    cached_count += 1;
+                }
+            }
+        }
+        save_powershell_manifest(&output_root, &manifest)?;
+    }
+
+    if options.product.includes_multi_pwsh() {
+        for target_os in &options.target_oses {
+            for target_arch in &options.target_arches {
+                match cache_multi_pwsh_artifact(&release_client, &output_root, *target_os, *target_arch) {
+                    Ok(()) => multi_pwsh_count += 1,
+                    Err(error)
+                        if (options.os_wildcard || options.arch_wildcard)
+                            && cache_target_error_can_be_skipped(&error) =>
+                    {
+                        eprintln!("Skipping multi-pwsh {} {}: {}", target_os, target_arch, error);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+
+    println!("Offline cache root: {}", output_root.display());
+    println!("PowerShell artifacts cached: {}", cached_count);
+    println!("multi-pwsh artifacts cached: {}", multi_pwsh_count);
+    Ok(())
+}
+
+fn run_cache(args: &[String]) -> Result<()> {
+    if args.is_empty() {
+        return Err(MultiPwshError::InvalidArguments(
+            "cache requires: warm <selector>".to_string(),
+        ));
+    }
+
+    match args[0].as_str() {
+        "warm" => {
+            if args.len() < 2 {
+                return Err(MultiPwshError::InvalidArguments(
+                    "cache warm requires <stable|preview|lts|version|major|major.minor|major.minor.x>".to_string(),
+                ));
+            }
+            let options = parse_cache_warm_options(&args[2..])?;
+            run_cache_warm(&args[1], options)
+        }
+        _ => Err(MultiPwshError::InvalidArguments(
+            "cache requires: warm <selector>".to_string(),
+        )),
+    }
+}
+
 fn run_venv(args: &[String]) -> Result<()> {
     if args.is_empty() {
         return Err(MultiPwshError::InvalidArguments(
@@ -1240,9 +1798,15 @@ fn parse_release_selection_options(args: &[String]) -> Result<ReleaseSelectionOp
     let mut include_prerelease = false;
     let mut checksum_source = ChecksumSource::ReleaseAsset;
     let mut checksum_source_specified = false;
+    let mut offline_cache = None;
 
     let mut index = 0usize;
     while index < args.len() {
+        if let Some(next_index) = parse_offline_cache_option(args, index, &mut offline_cache)? {
+            index = next_index;
+            continue;
+        }
+
         if let Some(next_index) =
             parse_checksum_cli_option(args, index, &mut checksum_source, &mut checksum_source_specified)?
         {
@@ -1284,7 +1848,7 @@ fn parse_release_selection_options(args: &[String]) -> Result<ReleaseSelectionOp
             }
             _ => {
                 return Err(MultiPwshError::InvalidArguments(
-                    "expected optional --arch <value>, --include-prerelease, --skip-hash-verification, and/or --hash-file <url-or-path>".to_string(),
+                    "expected optional --arch <value>, --include-prerelease, --offline-cache <path>, --skip-hash-verification, and/or --hash-file <url-or-path>".to_string(),
                 ));
             }
         }
@@ -1294,6 +1858,7 @@ fn parse_release_selection_options(args: &[String]) -> Result<ReleaseSelectionOp
         arch,
         include_prerelease,
         checksum_source,
+        offline_cache,
     })
 }
 
@@ -1420,9 +1985,15 @@ fn parse_package_install_options(args: &[String]) -> Result<InstallCommandOption
     let mut arch_specified = false;
     let mut checksum_source = ChecksumSource::ReleaseAsset;
     let mut checksum_source_specified = false;
+    let mut offline_cache = None;
     let mut index = 0usize;
 
     while index < args.len() {
+        if let Some(next_index) = parse_offline_cache_option(args, index, &mut offline_cache)? {
+            index = next_index;
+            continue;
+        }
+
         if let Some(next_index) =
             parse_checksum_cli_option(args, index, &mut checksum_source, &mut checksum_source_specified)?
         {
@@ -1568,6 +2139,7 @@ fn parse_package_install_options(args: &[String]) -> Result<InstallCommandOption
     Ok(InstallCommandOptions {
         package: options,
         checksum_source,
+        offline_cache,
     })
 }
 
@@ -1720,17 +2292,17 @@ fn run_package_install(selector_input: &str, install_options: InstallCommandOpti
     let os = HostOs::detect()?;
     let options = install_options.package;
     let checksum_source = install_options.checksum_source;
+    let offline_cache = install_options.offline_cache;
     let arch = options.arch.unwrap_or_else(HostArch::detect);
     let layout = package_layout(os, arch, options.scope, options.install_root.clone())?;
     layout.ensure_base_dirs()?;
 
-    let token = env::var("GITHUB_TOKEN").ok();
-    let release_client = ReleaseClient::new(token)?;
+    let release_resolver = ReleaseResolver::new(offline_cache)?;
     let releases = match selector.clone() {
         VersionSelector::MajorMinorWildcard(line) => {
-            release_client.resolve_all_in_line(line, os, arch, options.include_prerelease)?
+            release_resolver.resolve_all_in_line(line, os, arch, options.include_prerelease)?
         }
-        _ => vec![release_client.resolve_selector(selector.clone(), os, arch, options.include_prerelease)?],
+        _ => vec![release_resolver.resolve_selector(selector.clone(), os, arch, options.include_prerelease)?],
     };
 
     let mut metadata = load_package_metadata(&layout)?;
@@ -1738,7 +2310,8 @@ fn run_package_install(selector_input: &str, install_options: InstallCommandOpti
     let mut touched_majors: Vec<u64> = Vec::new();
 
     for release in releases {
-        let executable_path = ensure_installed(&layout, release_client.http_client(), os, &release, &checksum_source)?;
+        let executable_path =
+            ensure_installed(&layout, release_resolver.http_client(), os, &release, &checksum_source)?;
         let patch_alias = create_or_update_patch_alias(&layout, os, &release.version, &executable_path)?;
         let version_path = executable_path.parent().unwrap_or_else(|| Path::new(""));
 
@@ -2105,6 +2678,7 @@ fn run_install(
     arch: Option<HostArch>,
     include_prerelease: bool,
     checksum_source: ChecksumSource,
+    offline_cache: Option<PathBuf>,
 ) -> Result<()> {
     let selector = parse_install_selector(selector_input)?;
     let os = HostOs::detect()?;
@@ -2113,20 +2687,20 @@ fn run_install(
     let layout = InstallLayout::new(os)?;
     layout.ensure_base_dirs()?;
 
-    let token = env::var("GITHUB_TOKEN").ok();
-    let release_client = ReleaseClient::new(token)?;
+    let release_resolver = ReleaseResolver::new(offline_cache)?;
     let releases = match selector.clone() {
         VersionSelector::MajorMinorWildcard(line) => {
-            release_client.resolve_all_in_line(line, os, arch, include_prerelease)?
+            release_resolver.resolve_all_in_line(line, os, arch, include_prerelease)?
         }
-        _ => vec![release_client.resolve_selector(selector.clone(), os, arch, include_prerelease)?],
+        _ => vec![release_resolver.resolve_selector(selector.clone(), os, arch, include_prerelease)?],
     };
 
     let mut touched_lines: Vec<MajorMinor> = Vec::new();
     let mut touched_majors: Vec<u64> = Vec::new();
 
     for release in releases {
-        let executable_path = ensure_installed(&layout, release_client.http_client(), os, &release, &checksum_source)?;
+        let executable_path =
+            ensure_installed(&layout, release_resolver.http_client(), os, &release, &checksum_source)?;
         let patch_alias = create_or_update_patch_alias(&layout, os, &release.version, &executable_path)?;
         let version_path = executable_path.parent().unwrap_or_else(|| Path::new(""));
 
@@ -2187,6 +2761,7 @@ fn run_update(
     arch: Option<HostArch>,
     include_prerelease: bool,
     checksum_source: ChecksumSource,
+    offline_cache: Option<PathBuf>,
 ) -> Result<()> {
     let line = parse_major_minor_selector(line_input)?;
     let os = HostOs::detect()?;
@@ -2195,10 +2770,9 @@ fn run_update(
     let layout = InstallLayout::new(os)?;
     layout.ensure_base_dirs()?;
 
-    let token = env::var("GITHUB_TOKEN").ok();
-    let release_client = ReleaseClient::new(token)?;
-    let release = release_client.resolve_latest_in_line(line, os, arch, include_prerelease)?;
-    let executable_path = ensure_installed(&layout, release_client.http_client(), os, &release, &checksum_source)?;
+    let release_resolver = ReleaseResolver::new(offline_cache)?;
+    let release = release_resolver.resolve_selector(VersionSelector::MajorMinor(line), os, arch, include_prerelease)?;
+    let executable_path = ensure_installed(&layout, release_resolver.http_client(), os, &release, &checksum_source)?;
     let patch_alias_path = create_or_update_patch_alias(&layout, os, &release.version, &executable_path)?;
     let version_path = executable_path.parent().unwrap_or_else(|| Path::new(""));
 
@@ -2335,11 +2909,17 @@ fn parse_force_option(args: &[String]) -> Result<bool> {
 fn parse_list_option(args: &[String]) -> Result<ListOption> {
     let mut available = false;
     let mut include_prerelease = false;
+    let mut offline_cache = None;
     let mut scope = None;
     let mut root = None;
     let mut index = 0usize;
 
     while index < args.len() {
+        if let Some(next_index) = parse_offline_cache_option(args, index, &mut offline_cache)? {
+            index = next_index;
+            continue;
+        }
+
         match args[index].as_str() {
             "--available" | "--online" => {
                 available = true;
@@ -2388,7 +2968,7 @@ fn parse_list_option(args: &[String]) -> Result<ListOption> {
             }
             _ => {
                 return Err(MultiPwshError::InvalidArguments(
-                    "expected optional --scope <user|machine|all>, --root <path>, --available, and/or --include-prerelease"
+                    "expected optional --scope <user|machine|all>, --root <path>, --available, --include-prerelease, and/or --offline-cache <path>"
                         .to_string(),
                 ));
             }
@@ -2407,7 +2987,16 @@ fn parse_list_option(args: &[String]) -> Result<ListOption> {
                 "--scope and --root are only supported for installed-version listings".to_string(),
             ));
         }
-        return Ok(ListOption::Available { include_prerelease });
+        return Ok(ListOption::Available {
+            include_prerelease,
+            offline_cache,
+        });
+    }
+
+    if offline_cache.is_some() {
+        return Err(MultiPwshError::InvalidArguments(
+            "--offline-cache requires --available".to_string(),
+        ));
     }
 
     Ok(ListOption::Installed { scope, root })
@@ -2448,17 +3037,29 @@ fn run_list(option: ListOption) -> Result<()> {
 
             run_scoped_list(scope, root)
         }
-        ListOption::Available { include_prerelease } => {
-            let token = env::var("GITHUB_TOKEN").ok();
-            let release_client = ReleaseClient::new(token)?;
-            let versions = release_client.list_available_versions(include_prerelease)?;
+        ListOption::Available {
+            include_prerelease,
+            offline_cache,
+        } => {
+            let release_resolver = ReleaseResolver::new(offline_cache)?;
+            let versions = release_resolver.list_available_versions(include_prerelease)?;
 
             if versions.is_empty() {
-                println!("Available online versions: (none)");
+                if release_resolver.is_offline() {
+                    println!("Available offline bundle versions: (none)");
+                } else {
+                    println!("Available online versions: (none)");
+                }
                 return Ok(());
             }
 
-            if include_prerelease {
+            if release_resolver.is_offline() {
+                if include_prerelease {
+                    println!("Available offline bundle versions (including prerelease):");
+                } else {
+                    println!("Available offline bundle versions:");
+                }
+            } else if include_prerelease {
                 println!("Available online versions (including prerelease):");
             } else {
                 println!("Available online versions:");
@@ -2622,6 +3223,7 @@ fn run() -> Result<()> {
                     options.arch,
                     options.include_prerelease,
                     options.checksum_source,
+                    options.offline_cache,
                 )
             }
         }
@@ -2643,6 +3245,7 @@ fn run() -> Result<()> {
                     options.arch,
                     options.include_prerelease,
                     options.checksum_source,
+                    options.offline_cache,
                 )
             } else {
                 let options = parse_release_selection_options(&args[2..])?;
@@ -2651,6 +3254,7 @@ fn run() -> Result<()> {
                     options.arch,
                     options.include_prerelease,
                     options.checksum_source,
+                    options.offline_cache,
                 )
             }
         }
@@ -2668,6 +3272,7 @@ fn run() -> Result<()> {
             run_list(list_option)
         }
         "package" => run_package(&args[1..]),
+        "cache" => run_cache(&args[1..]),
         "venv" => run_venv(&args[1..]),
         "alias" => run_alias(&args[1..]),
         "host" => {
@@ -2676,7 +3281,7 @@ fn run() -> Result<()> {
         }
         "doctor" => run_doctor(&args[1..]),
         command => Err(MultiPwshError::InvalidArguments(format!(
-            "unknown command '{}'. expected: install, update, uninstall, list, venv, alias, host, doctor, package, version",
+            "unknown command '{}'. expected: install, update, uninstall, list, cache, venv, alias, host, doctor, package, version",
             command
         ))),
     }
@@ -2760,7 +3365,8 @@ mod tests {
         assert!(matches!(
             parse_list_option(&args).unwrap(),
             ListOption::Available {
-                include_prerelease: false
+                include_prerelease: false,
+                offline_cache: None
             }
         ));
     }
@@ -2771,9 +3377,32 @@ mod tests {
         assert!(matches!(
             parse_list_option(&args).unwrap(),
             ListOption::Available {
-                include_prerelease: true
+                include_prerelease: true,
+                offline_cache: None
             }
         ));
+    }
+
+    #[test]
+    fn parse_list_option_accepts_available_with_offline_cache() {
+        let args = vec![
+            "--available".to_string(),
+            "--offline-cache".to_string(),
+            "C:\\cache".to_string(),
+        ];
+        assert!(matches!(
+            parse_list_option(&args).unwrap(),
+            ListOption::Available {
+                include_prerelease: false,
+                offline_cache: Some(path)
+            } if path == Path::new("C:\\cache")
+        ));
+    }
+
+    #[test]
+    fn parse_list_option_rejects_offline_cache_without_available() {
+        let args = vec!["--offline-cache".to_string(), "C:\\cache".to_string()];
+        assert!(parse_list_option(&args).is_err());
     }
 
     #[test]
@@ -2813,6 +3442,50 @@ mod tests {
         assert!(error
             .to_string()
             .contains("Microsoft Update integration is not supported for archive installs yet"));
+    }
+
+    #[test]
+    fn parse_release_selection_options_accepts_offline_cache() {
+        let args = vec!["--offline-cache".to_string(), "C:\\cache".to_string()];
+        let options = parse_release_selection_options(&args).unwrap();
+
+        assert_eq!(options.offline_cache, Some(PathBuf::from("C:\\cache")));
+    }
+
+    #[test]
+    fn parse_package_install_options_accepts_offline_cache() {
+        let args = vec![
+            "--scope".to_string(),
+            "user".to_string(),
+            "--offline-cache".to_string(),
+            "C:\\cache".to_string(),
+        ];
+        let options = parse_package_install_options(&args).unwrap();
+
+        assert_eq!(options.offline_cache, Some(PathBuf::from("C:\\cache")));
+        assert_eq!(options.package.scope, PackageScope::CurrentUser);
+    }
+
+    #[test]
+    fn parse_cache_warm_options_accepts_cross_platform_all_products() {
+        let args = vec![
+            "--os".to_string(),
+            "all".to_string(),
+            "--arch".to_string(),
+            "all".to_string(),
+            "--product".to_string(),
+            "all".to_string(),
+            "--output".to_string(),
+            "C:\\cache".to_string(),
+        ];
+        let options = parse_cache_warm_options(&args).unwrap();
+
+        assert_eq!(options.target_oses, all_host_oses());
+        assert_eq!(options.target_arches, all_host_arches());
+        assert_eq!(options.product, CacheProduct::All);
+        assert_eq!(options.output, Some(PathBuf::from("C:\\cache")));
+        assert!(options.os_wildcard);
+        assert!(options.arch_wildcard);
     }
 
     #[test]

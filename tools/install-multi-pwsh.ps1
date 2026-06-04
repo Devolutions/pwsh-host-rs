@@ -7,7 +7,16 @@ param(
     [string]$Owner = 'Devolutions',
 
     [Parameter(Mandatory = $false)]
-    [string]$Repository = 'multi-pwsh'
+    [string]$Repository = 'multi-pwsh',
+
+    [Parameter(Mandatory = $false)]
+    [string]$OfflineCache,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ArchivePath,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ChecksumPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -67,6 +76,88 @@ function Get-MultiPwshBinDir {
     return (Join-Path (Get-MultiPwshHome) 'bin')
 }
 
+function Resolve-ReleaseVersionDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CacheRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RequestedVersion,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AssetName
+    )
+
+    $multiPwshRoot = Join-Path $CacheRoot 'multi-pwsh'
+    if (-not (Test-Path -LiteralPath $multiPwshRoot -PathType Container)) {
+        throw "Offline cache does not contain a multi-pwsh directory: $multiPwshRoot"
+    }
+
+    if ($RequestedVersion -eq 'latest') {
+        $candidates = Get-ChildItem -LiteralPath $multiPwshRoot -Directory |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName $AssetName) -PathType Leaf } |
+            Sort-Object Name -Descending
+
+        if (-not $candidates) {
+            throw "Offline cache does not contain $AssetName under $multiPwshRoot"
+        }
+
+        return $candidates[0].FullName
+    }
+
+    $versionDirectoryName = if ($RequestedVersion.StartsWith('v', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $RequestedVersion
+    }
+    else {
+        "v$RequestedVersion"
+    }
+    $versionDirectory = Join-Path $multiPwshRoot $versionDirectoryName
+    if (-not (Test-Path -LiteralPath (Join-Path $versionDirectory $AssetName) -PathType Leaf)) {
+        throw "Offline cache does not contain $AssetName under $versionDirectory"
+    }
+
+    return $versionDirectory
+}
+
+function Assert-ArchiveChecksum {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ChecksumPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AssetName
+    )
+
+    if (-not (Test-Path -LiteralPath $ChecksumPath -PathType Leaf)) {
+        throw "Checksum file was not found: $ChecksumPath"
+    }
+
+    $expected = $null
+    foreach ($line in Get-Content -LiteralPath $ChecksumPath) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
+            continue
+        }
+
+        if ($trimmed -match '^([0-9a-fA-F]{64})\s+\*?(.+)$' -and $Matches[2].Trim() -eq $AssetName) {
+            $expected = $Matches[1].ToLowerInvariant()
+            break
+        }
+    }
+
+    if (-not $expected) {
+        throw "Checksum entry for $AssetName was not found in $ChecksumPath"
+    }
+
+    $actual = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        throw "Checksum mismatch for $AssetName`: expected $expected, got $actual"
+    }
+}
+
 $arch = Get-ReleaseArch
 $assetName = "multi-pwsh-windows-$arch.zip"
 
@@ -84,29 +175,57 @@ else {
 }
 
 $downloadUrl = "https://github.com/$Owner/$Repository/releases/$releasePath/$assetName"
+$checksumUrl = "https://github.com/$Owner/$Repository/releases/$releasePath/checksums.txt"
 $installHome = Get-MultiPwshHome
 $binDir = Get-MultiPwshBinDir
 $targetExe = Join-Path $binDir 'multi-pwsh.exe'
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("multi-pwsh-install-" + [System.Guid]::NewGuid().ToString('N'))
-$archivePath = Join-Path $tempRoot $assetName
+$archivePath = if ([string]::IsNullOrWhiteSpace($ArchivePath)) { Join-Path $tempRoot $assetName } else { $ArchivePath }
+$localChecksumPath = if ([string]::IsNullOrWhiteSpace($ChecksumPath)) { Join-Path $tempRoot 'checksums.txt' } else { $ChecksumPath }
 $extractDir = Join-Path $tempRoot 'extract'
 
 New-Item -Path $extractDir -ItemType Directory -Force | Out-Null
 
 try {
-    Write-Host "Downloading $assetName ($displayVersion)..."
+    if (-not [string]::IsNullOrWhiteSpace($OfflineCache)) {
+        $versionDirectory = Resolve-ReleaseVersionDirectory -CacheRoot $OfflineCache -RequestedVersion $Version -AssetName $assetName
+        $sourceArchive = Join-Path $versionDirectory $assetName
+        $sourceChecksum = if ([string]::IsNullOrWhiteSpace($ChecksumPath)) { Join-Path $versionDirectory 'checksums.txt' } else { $ChecksumPath }
+        Write-Host "Using offline $assetName from $sourceArchive"
+        if (-not [string]::Equals([System.IO.Path]::GetFullPath($sourceArchive), [System.IO.Path]::GetFullPath($archivePath), [System.StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $sourceArchive -Destination $archivePath -Force
+        }
+        if (-not [string]::Equals([System.IO.Path]::GetFullPath($sourceChecksum), [System.IO.Path]::GetFullPath($localChecksumPath), [System.StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $sourceChecksum -Destination $localChecksumPath -Force
+        }
+    }
+    elseif ([string]::IsNullOrWhiteSpace($ArchivePath)) {
+        Write-Host "Downloading $assetName ($displayVersion)..."
 
-    $invokeParams = @{
-        Uri = $downloadUrl
-        OutFile = $archivePath
+        $invokeParams = @{
+            Uri = $downloadUrl
+            OutFile = $archivePath
+        }
+
+        $checksumInvokeParams = @{
+            Uri = $checksumUrl
+            OutFile = $localChecksumPath
+        }
+
+        if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            $invokeParams['UseBasicParsing'] = $true
+            $checksumInvokeParams['UseBasicParsing'] = $true
+        }
+
+        Invoke-WebRequest @invokeParams
+        Invoke-WebRequest @checksumInvokeParams
+    }
+    elseif ([string]::IsNullOrWhiteSpace($ChecksumPath)) {
+        throw '-ChecksumPath is required when -ArchivePath is used without -OfflineCache'
     }
 
-    if ($PSVersionTable.PSEdition -eq 'Desktop') {
-        $invokeParams['UseBasicParsing'] = $true
-    }
-
-    Invoke-WebRequest @invokeParams
+    Assert-ArchiveChecksum -ArchivePath $archivePath -ChecksumPath $localChecksumPath -AssetName $assetName
 
     Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force
 

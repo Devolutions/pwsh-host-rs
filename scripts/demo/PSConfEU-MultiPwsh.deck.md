@@ -41,13 +41,13 @@ Bootstrap multi-pwsh executable
 From bash (if you don't have pwsh):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.sh | bash
+curl -fsSL https://github.com/Devolutions/multi-pwsh/releases/latest/download/install-multi-pwsh.sh | bash
 ```
 
 From Windows PowerShell (if you don't have pwsh):
 
 ```powershell
-irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.ps1 | iex
+irm https://github.com/Devolutions/multi-pwsh/releases/latest/download/install-multi-pwsh.ps1 | iex
 ```
 
 multi-pwsh doesn't require PowerShell to install PowerShell
