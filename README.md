@@ -9,31 +9,31 @@ Install and manage side-by-side PowerShell versions with aliases and native host
 Latest release bootstrap scripts:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.sh | bash
+curl -fsSL https://github.com/Devolutions/multi-pwsh/releases/latest/download/install-multi-pwsh.sh | bash
 ```
 
 ```powershell
-irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.ps1 | iex
+irm https://github.com/Devolutions/multi-pwsh/releases/latest/download/install-multi-pwsh.ps1 | iex
 ```
 
 Install a specific tag (example `v0.11.0`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.sh | bash -s -- v0.11.0
+curl -fsSL https://github.com/Devolutions/multi-pwsh/releases/download/v0.11.0/install-multi-pwsh.sh | bash -s -- v0.11.0
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/install-multi-pwsh.ps1))) -Version v0.11.0
+& ([scriptblock]::Create((irm https://github.com/Devolutions/multi-pwsh/releases/download/v0.11.0/install-multi-pwsh.ps1))) -Version v0.11.0
 ```
 
 Uninstall bootstrap scripts:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/uninstall-multi-pwsh.sh | bash
+curl -fsSL https://github.com/Devolutions/multi-pwsh/releases/latest/download/uninstall-multi-pwsh.sh | bash
 ```
 
 ```powershell
-irm https://raw.githubusercontent.com/Devolutions/multi-pwsh/refs/heads/master/tools/uninstall-multi-pwsh.ps1 | iex
+irm https://github.com/Devolutions/multi-pwsh/releases/latest/download/uninstall-multi-pwsh.ps1 | iex
 ```
 
 ## Install and verify aliases
@@ -53,6 +53,40 @@ pwsh-preview --version
 pwsh-lts --version
 pwsh-7.4 --version
 ```
+
+## Offline and network-share installs
+
+GitHub remains the default source, but you can prefetch release artifacts on a connected machine and use them from a disconnected machine.
+
+On a connected machine, warm an offline bundle into the same directory shape used by the download cache:
+
+```powershell
+multi-pwsh cache warm stable --os windows --arch x64 --output \\fileserver\multi-pwsh-cache
+multi-pwsh cache warm 7.4.x --os all --arch all --output \\fileserver\multi-pwsh-cache
+```
+
+The bundle includes PowerShell archives, PowerShell `hashes.sha256`, a relocatable manifest, and the current `multi-pwsh` release archive/checksums for the requested platform targets. Copy that directory locally or expose it as a read-only network share, then use it offline:
+
+```powershell
+$env:MULTI_PWSH_OFFLINE_CACHE = '\\fileserver\multi-pwsh-cache'
+multi-pwsh list --available
+multi-pwsh install stable
+multi-pwsh update 7.4
+```
+
+You can also pass `--offline-cache <path>` to `install`, `update`, `package install`, and `list --available`. Offline mode uses only the local manifest/artifacts and fails instead of falling back to GitHub when something is missing.
+
+Disconnected bootstrap uses the same bundle:
+
+```powershell
+.\install-multi-pwsh.ps1 -OfflineCache \\fileserver\multi-pwsh-cache -Version latest
+```
+
+```bash
+./install-multi-pwsh.sh --offline-cache /mnt/share/multi-pwsh-cache --version latest
+```
+
+Rerun the bootstrap script against a newer warmed bundle to update `multi-pwsh` itself. Archives are verified against the mirrored checksum files before installation.
 
 ## More docs
 
@@ -174,10 +208,11 @@ multi-pwsh venv list
 multi-pwsh --version
 multi-pwsh --help
 multi-pwsh help [command]
-multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]
-multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]
+multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]
+multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]
+multi-pwsh cache warm <selector> [--os <windows|linux|macos|all>] [--arch <x64|x86|arm64|arm32|all>] [--include-prerelease] [--output <path>] [--product <powershell|multi-pwsh|all>]
 multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]
-multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease]
+multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease] [--offline-cache <path>]
 multi-pwsh venv create <name>
 multi-pwsh venv delete <name>
 multi-pwsh venv export <name> <archive.zip>

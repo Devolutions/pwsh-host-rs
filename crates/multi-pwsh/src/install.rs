@@ -12,7 +12,7 @@ use ureq::Agent;
 use crate::error::{MultiPwshError, Result};
 use crate::layout::InstallLayout;
 use crate::platform::HostOs;
-use crate::release::ResolvedRelease;
+use crate::release::{AssetSource, ResolvedRelease};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChecksumSource {
@@ -24,7 +24,7 @@ pub enum ChecksumSource {
 
 pub fn ensure_installed(
     layout: &InstallLayout,
-    http: &Agent,
+    http: Option<&Agent>,
     os: HostOs,
     release: &ResolvedRelease,
     checksum_source: &ChecksumSource,
@@ -45,14 +45,14 @@ pub fn ensure_installed(
     let archive_path = cache_dir.join(&release.asset_name);
 
     if !archive_path.exists() {
-        download_with_retry(http, &release.asset_url, &archive_path, 8)?;
+        copy_asset_to_path(http, &release.asset_source, &archive_path)?;
     }
 
     validate_archive_checksum(http, release, checksum_source, &archive_path)?;
 
     extract_archive(&archive_path, &install_dir)?;
 
-    if !cache_keep_archives() {
+    if !cache_keep_archives() && !asset_source_matches_path(&release.asset_source, &archive_path) {
         let _ = fs::remove_file(&archive_path);
     }
 
@@ -69,6 +69,29 @@ pub fn ensure_installed(
     }
 
     Ok(executable)
+}
+
+pub fn copy_asset_to_path(http: Option<&Agent>, source: &AssetSource, destination: &Path) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    match source {
+        AssetSource::Url(url) => {
+            let http = http.ok_or_else(|| {
+                MultiPwshError::Archive(format!("cannot download '{}' because no HTTP client is available", url))
+            })?;
+            download_with_retry(http, url, destination, 8)
+        }
+        AssetSource::File(source_path) => {
+            if asset_source_matches_path(source, destination) {
+                return Ok(());
+            }
+
+            fs::copy(source_path, destination)?;
+            Ok(())
+        }
+    }
 }
 
 fn download_with_retry(http: &Agent, url: &str, destination: &Path, retries: usize) -> Result<()> {
@@ -205,8 +228,8 @@ enum TextEncoding {
     Utf16BeNoBom,
 }
 
-fn validate_archive_checksum(
-    http: &Agent,
+pub fn validate_archive_checksum(
+    http: Option<&Agent>,
     release: &ResolvedRelease,
     checksum_source: &ChecksumSource,
     archive_path: &Path,
@@ -223,7 +246,9 @@ fn validate_archive_checksum(
         return Ok(());
     }
 
-    let _ = fs::remove_file(archive_path);
+    if !asset_source_matches_path(&release.asset_source, archive_path) {
+        let _ = fs::remove_file(archive_path);
+    }
     Err(MultiPwshError::Archive(format!(
         "checksum mismatch for '{}' using '{}': expected {}, got {}",
         release.asset_name, checksum_source_name, expected, actual
@@ -231,13 +256,13 @@ fn validate_archive_checksum(
 }
 
 fn load_checksum_text(
-    http: &Agent,
+    http: Option<&Agent>,
     release: &ResolvedRelease,
     checksum_source: &ChecksumSource,
 ) -> Result<(String, String)> {
     match checksum_source {
         ChecksumSource::ReleaseAsset => {
-            let checksum_url = release.checksum_asset_url.as_deref().ok_or_else(|| {
+            let checksum_source = release.checksum_asset_source.as_ref().ok_or_else(|| {
                 MultiPwshError::Archive(format!(
                     "release '{}' is missing checksum asset metadata; provide --hash-file <url-or-path> or use --skip-hash-verification to bypass verification",
                     release.asset_name
@@ -247,14 +272,55 @@ fn load_checksum_text(
                 .checksum_asset_name
                 .clone()
                 .unwrap_or_else(|| "hashes.sha256".to_string());
-            Ok((download_text_with_retry(http, checksum_url, 8)?, checksum_name))
+            Ok((load_text_from_asset_source(http, checksum_source)?, checksum_name))
         }
-        ChecksumSource::Url(url) => Ok((download_text_with_retry(http, url, 8)?, url.clone())),
+        ChecksumSource::Url(url) => {
+            let http = http.ok_or_else(|| {
+                MultiPwshError::Archive(format!(
+                    "cannot download checksum '{}' because no HTTP client is available",
+                    url
+                ))
+            })?;
+            Ok((download_text_with_retry(http, url, 8)?, url.clone()))
+        }
         ChecksumSource::File(path) => {
             let bytes = fs::read(path)?;
             Ok((decode_checksum_text(&bytes)?, path.display().to_string()))
         }
         ChecksumSource::Skip => Ok((String::new(), "checksum verification disabled".to_string())),
+    }
+}
+
+fn load_text_from_asset_source(http: Option<&Agent>, source: &AssetSource) -> Result<String> {
+    match source {
+        AssetSource::Url(url) => {
+            let http = http.ok_or_else(|| {
+                MultiPwshError::Archive(format!(
+                    "cannot download checksum '{}' because no HTTP client is available",
+                    url
+                ))
+            })?;
+            download_text_with_retry(http, url, 8)
+        }
+        AssetSource::File(path) => {
+            let bytes = fs::read(path)?;
+            decode_checksum_text(&bytes)
+        }
+    }
+}
+
+fn asset_source_matches_path(source: &AssetSource, path: &Path) -> bool {
+    let AssetSource::File(source_path) = source else {
+        return false;
+    };
+
+    paths_refer_to_same_location(source_path, path)
+}
+
+fn paths_refer_to_same_location(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
     }
 }
 
@@ -539,13 +605,13 @@ mod tests {
         let release = ResolvedRelease {
             version: semver::Version::parse("7.4.13").unwrap(),
             asset_name: "PowerShell-7.4.13-win-x64.zip".to_string(),
-            asset_url: "https://example.invalid/PowerShell-7.4.13-win-x64.zip".to_string(),
+            asset_source: AssetSource::Url("https://example.invalid/PowerShell-7.4.13-win-x64.zip".to_string()),
             checksum_asset_name: None,
-            checksum_asset_url: None,
+            checksum_asset_source: None,
         };
 
         let (content, source_name) =
-            load_checksum_text(&http, &release, &ChecksumSource::File(checksum_path.clone())).unwrap();
+            load_checksum_text(Some(&http), &release, &ChecksumSource::File(checksum_path.clone())).unwrap();
 
         assert!(content.contains("PowerShell-7.4.13-win-x64.zip"));
         assert_eq!(source_name, checksum_path.display().to_string());
@@ -557,12 +623,12 @@ mod tests {
         let release = ResolvedRelease {
             version: semver::Version::parse("7.4.13").unwrap(),
             asset_name: "PowerShell-7.4.13-win-x64.zip".to_string(),
-            asset_url: "https://example.invalid/PowerShell-7.4.13-win-x64.zip".to_string(),
+            asset_source: AssetSource::Url("https://example.invalid/PowerShell-7.4.13-win-x64.zip".to_string()),
             checksum_asset_name: None,
-            checksum_asset_url: None,
+            checksum_asset_source: None,
         };
 
-        let error = load_checksum_text(&http, &release, &ChecksumSource::ReleaseAsset).unwrap_err();
+        let error = load_checksum_text(Some(&http), &release, &ChecksumSource::ReleaseAsset).unwrap_err();
 
         assert!(error.to_string().contains("missing checksum asset metadata"));
     }
