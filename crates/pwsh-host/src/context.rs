@@ -17,6 +17,10 @@ use crate::pdcstring::PdCStr;
 #[allow(dead_code)]
 pub struct InitializedForCommandLine;
 
+/// A marker struct indicating that the context was initialized from a runtimeconfig.json.
+#[allow(dead_code)]
+pub struct InitializedForRuntimeConfig;
+
 #[derive(Debug, Clone, Copy)]
 pub struct HostfxrHandle(NonNull<()>);
 

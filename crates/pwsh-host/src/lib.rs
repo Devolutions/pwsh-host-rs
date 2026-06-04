@@ -25,6 +25,7 @@ extern crate quick_error;
 mod pdcstring;
 
 pub use bindings::PowerShell;
+pub use loader::get_assembly_delegate_loader_for_pwsh_dir;
 pub use named_pipe_command::{preprocess_named_pipe_command_args, NamedPipeCommandError};
 pub use pwsh_cli::{run_pwsh_command_line, run_pwsh_command_line_for_pwsh_dir, run_pwsh_command_line_for_pwsh_exe};
 pub use startup_hook::{

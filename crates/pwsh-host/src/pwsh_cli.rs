@@ -2,6 +2,7 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::path::Path;
 
+use crate::context::HostfxrContext;
 use crate::host_detect::pwsh_host_detect;
 use crate::hostfxr::load_hostfxr_from_pwsh_dir;
 use crate::pdcstr;
@@ -44,6 +45,55 @@ fn resolve_startup_hooks(
         }
         None => StartupHooksTarget::None,
     }
+}
+
+pub(crate) fn configure_startup_hooks_for_context<I>(
+    context: &HostfxrContext<'_, I>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let startup_hooks = take_env_var(STARTUP_HOOKS_ENV_VAR);
+    let module_venv_path =
+        take_env_var(MODULE_VENV_PATH_ENV_VAR).or_else(|| take_env_var(LEGACY_FORCE_MODULE_PATH_ENV_VAR));
+    let log_path = take_env_var(LOG_PATH_ENV_VAR);
+    let strategy = take_env_var(STRATEGY_ENV_VAR);
+    let startup_hooks = resolve_startup_hooks(
+        startup_hooks,
+        module_venv_path.as_ref(),
+        log_path.as_ref(),
+        strategy.as_ref(),
+    );
+
+    match &startup_hooks {
+        StartupHooksTarget::None => {}
+        StartupHooksTarget::Path(startup_hooks) => {
+            let startup_hooks_pd = PdCString::from_os_str(startup_hooks)?;
+            context.set_runtime_property_value(pdcstr!("STARTUP_HOOKS"), &startup_hooks_pd)?;
+        }
+        StartupHooksTarget::EmbeddedAssemblyName => {
+            let startup_hooks_pd = PdCString::from_os_str(STARTUP_HOOK_ASSEMBLY_NAME)?;
+            context.set_runtime_property_value(pdcstr!("STARTUP_HOOKS"), &startup_hooks_pd)?;
+        }
+    }
+
+    if let Some(module_venv_path) = module_venv_path {
+        let module_venv_path_pd = PdCString::from_os_str(&module_venv_path)?;
+        context.set_runtime_property_value(pdcstr!("PSMODULE_VENV_PATH"), &module_venv_path_pd)?;
+    }
+
+    if let Some(log_path) = log_path {
+        let log_path_pd = PdCString::from_os_str(&log_path)?;
+        context.set_runtime_property_value(pdcstr!("PWSH_STARTUP_HOOK_LOG_PATH"), &log_path_pd)?;
+    }
+
+    if let Some(strategy) = strategy {
+        let strategy_pd = PdCString::from_os_str(&strategy)?;
+        context.set_runtime_property_value(pdcstr!("PWSH_STARTUP_HOOK_STRATEGY"), &strategy_pd)?;
+    }
+
+    if let StartupHooksTarget::EmbeddedAssemblyName = startup_hooks {
+        context.load_assembly_bytes_in_default_context(STARTUP_HOOK_DLL, None)?;
+    }
+
+    Ok(())
 }
 
 pub fn run_pwsh_command_line<I, A>(args: I) -> Result<i32, Box<dyn std::error::Error>>
@@ -89,52 +139,7 @@ where
 
     let hostfxr = load_hostfxr_from_pwsh_dir(pwsh_dir)?;
     let context = hostfxr.initialize_for_dotnet_command_line_args(&host_args)?;
-
-    let startup_hooks = take_env_var(STARTUP_HOOKS_ENV_VAR);
-    let module_venv_path =
-        take_env_var(MODULE_VENV_PATH_ENV_VAR).or_else(|| take_env_var(LEGACY_FORCE_MODULE_PATH_ENV_VAR));
-    let log_path = take_env_var(LOG_PATH_ENV_VAR);
-    let strategy = take_env_var(STRATEGY_ENV_VAR);
-    let startup_hooks = resolve_startup_hooks(
-        startup_hooks,
-        module_venv_path.as_ref(),
-        log_path.as_ref(),
-        strategy.as_ref(),
-    );
-
-    match &startup_hooks {
-        StartupHooksTarget::None => {}
-        StartupHooksTarget::Path(startup_hooks) => {
-            let startup_hooks_pd = PdCString::from_os_str(startup_hooks)?;
-            context.set_runtime_property_value(pdcstr!("STARTUP_HOOKS"), &startup_hooks_pd)?;
-        }
-        StartupHooksTarget::EmbeddedAssemblyName => {
-            let startup_hooks_pd = PdCString::from_os_str(STARTUP_HOOK_ASSEMBLY_NAME)?;
-            context.set_runtime_property_value(pdcstr!("STARTUP_HOOKS"), &startup_hooks_pd)?;
-        }
-    }
-
-    if let Some(module_venv_path) = module_venv_path {
-        let module_venv_path_pd = PdCString::from_os_str(&module_venv_path)?;
-        context.set_runtime_property_value(pdcstr!("PSMODULE_VENV_PATH"), &module_venv_path_pd)?;
-    }
-
-    if let Some(log_path) = log_path {
-        let log_path_pd = PdCString::from_os_str(&log_path)?;
-        context.set_runtime_property_value(pdcstr!("PWSH_STARTUP_HOOK_LOG_PATH"), &log_path_pd)?;
-    }
-
-    if let Some(strategy) = strategy {
-        let strategy_pd = PdCString::from_os_str(&strategy)?;
-        context.set_runtime_property_value(pdcstr!("PWSH_STARTUP_HOOK_STRATEGY"), &strategy_pd)?;
-    }
-
-    if let StartupHooksTarget::EmbeddedAssemblyName = startup_hooks {
-        // STARTUP_HOOKS must be set before the runtime is materialized; after that,
-        // we can preload the embedded hook bytes into the default load context so
-        // StartupHookProvider resolves the simple assembly name without a temp DLL.
-        context.load_assembly_bytes_in_default_context(STARTUP_HOOK_DLL, None)?;
-    }
+    configure_startup_hooks_for_context(&context)?;
 
     Ok(context.run_app())
 }
