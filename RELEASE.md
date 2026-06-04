@@ -41,6 +41,7 @@ The workflow:
 - builds artifacts from the commit you dispatched the workflow from
 - creates the tag at that commit if needed
 - uploads archives and `checksums.txt` to the GitHub release
+- builds and uploads `Devolutions.MultiPwsh.Cli.<version>.nupkg` to the GitHub release
 - uploads install/uninstall bootstrap scripts to the GitHub release so users do not need `raw.githubusercontent.com`
 
 If the release already exists, the workflow uploads the refreshed assets with `--clobber`.
@@ -50,7 +51,25 @@ If the release already exists, the workflow uploads the refreshed assets with `-
 Confirm the release contains:
 
 - all platform zip archives
+- `Devolutions.MultiPwsh.Cli.<version>.nupkg`
 - `checksums.txt`
 - `install-multi-pwsh.ps1` and `install-multi-pwsh.sh`
 - `uninstall-multi-pwsh.ps1` and `uninstall-multi-pwsh.sh`
 - generated release notes or any required manual edits
+
+## 5. Package consumption in .NET apps
+
+Reference the package and build your project:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.9.0" />
+</ItemGroup>
+```
+
+The package contributes `multi-pwsh` payloads under `runtimes/<rid>/native/` and copies them to build/publish output.
+
+Optional output-name overrides:
+
+- `DevolutionsMultiPwshCliWindowsOutputName` (default: `multi-pwsh.exe`)
+- `DevolutionsMultiPwshCliUnixOutputName` (default: `multi-pwsh`)

@@ -80,36 +80,42 @@ jobs:
           - name: linux-x64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            runtime_id: linux-x64
             multi_archive: multi-pwsh-linux-x64.zip
             multi_binary: multi-pwsh
 
           - name: linux-arm64
             os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            runtime_id: linux-arm64
             multi_archive: multi-pwsh-linux-arm64.zip
             multi_binary: multi-pwsh
 
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+            runtime_id: win-x64
             multi_archive: multi-pwsh-windows-x64.zip
             multi_binary: multi-pwsh.exe
 
           - name: windows-arm64
             os: windows-latest
             target: aarch64-pc-windows-msvc
+            runtime_id: win-arm64
             multi_archive: multi-pwsh-windows-arm64.zip
             multi_binary: multi-pwsh.exe
 
           - name: macos-x64
             os: macos-14
             target: x86_64-apple-darwin
+            runtime_id: osx-x64
             multi_archive: multi-pwsh-macos-x64.zip
             multi_binary: multi-pwsh
 
           - name: macos-arm64
             os: macos-14
             target: aarch64-apple-darwin
+            runtime_id: osx-arm64
             multi_archive: multi-pwsh-macos-arm64.zip
             multi_binary: multi-pwsh
 
@@ -199,6 +205,29 @@ jobs:
           path: ${{ matrix.multi_archive }}
           if-no-files-found: error
 
+      - name: Stage NuGet runtime artifact
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          MULTI_BIN_NAME: ${{ matrix.multi_binary }}
+          RUNTIME_ID: ${{ matrix.runtime_id }}
+        run: |
+          $binaryPath = [System.IO.Path]::Combine("target", $env:TARGET, "release", $env:MULTI_BIN_NAME)
+          if (-not (Test-Path -Path $binaryPath -PathType Leaf)) {
+            throw "Binary not found: $binaryPath"
+          }
+
+          $stageDir = Join-Path "nuget-stage" $env:RUNTIME_ID
+          New-Item -Path $stageDir -ItemType Directory -Force | Out-Null
+          Copy-Item -Path $binaryPath -Destination (Join-Path $stageDir $env:MULTI_BIN_NAME) -Force
+
+      - name: Upload NuGet runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-pwsh-nuget-${{ matrix.runtime_id }}
+          path: nuget-stage/${{ matrix.runtime_id }}/*
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub release
     runs-on: ubuntu-latest
@@ -216,6 +245,49 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Arrange staged NuGet runtime artifacts
+        shell: pwsh
+        run: |
+          $Mappings = @(
+            @{ Artifact = 'multi-pwsh-nuget-win-x64'; Rid = 'win-x64'; Binary = 'multi-pwsh.exe' },
+            @{ Artifact = 'multi-pwsh-nuget-win-arm64'; Rid = 'win-arm64'; Binary = 'multi-pwsh.exe' },
+            @{ Artifact = 'multi-pwsh-nuget-linux-x64'; Rid = 'linux-x64'; Binary = 'multi-pwsh' },
+            @{ Artifact = 'multi-pwsh-nuget-linux-arm64'; Rid = 'linux-arm64'; Binary = 'multi-pwsh' },
+            @{ Artifact = 'multi-pwsh-nuget-osx-x64'; Rid = 'osx-x64'; Binary = 'multi-pwsh' },
+            @{ Artifact = 'multi-pwsh-nuget-osx-arm64'; Rid = 'osx-arm64'; Binary = 'multi-pwsh' }
+          )
+
+          foreach ($mapping in $Mappings) {
+            $source = Join-Path 'dist' $mapping.Artifact
+            if (-not (Test-Path -Path $source -PathType Container)) {
+              throw "Downloaded NuGet runtime artifact directory not found: $source"
+            }
+
+            $binaryPath = Join-Path $source $mapping.Binary
+            if (-not (Test-Path -Path $binaryPath -PathType Leaf)) {
+              throw "Runtime binary not found in artifact: $binaryPath"
+            }
+
+            $targetDir = Join-Path 'artifacts\cli\multi-pwsh' $mapping.Rid
+            New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
+            Copy-Item -Path $binaryPath -Destination (Join-Path $targetDir $mapping.Binary) -Force
+          }
+
+      - name: Pack CLI NuGet package
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: |
+          pwsh -NoLogo -NoProfile -File (Resolve-Path 'scripts\Build-CliNativeNuGetPackage.ps1') `
+            -Version $env:PACKAGE_VERSION `
+            -NoBuild `
+            -Clean:$false
 
       - name: Generate checksums
         shell: pwsh
@@ -251,15 +323,22 @@ jobs:
             Where-Object { $_.Name -like 'multi-pwsh-*.zip' } |
             Sort-Object Name |
             ForEach-Object { $_.FullName }
+          $nugetPackages = Get-ChildItem -Path artifacts/cli-nuget -Filter 'Devolutions.MultiPwsh.Cli.*.nupkg' |
+            Sort-Object Name |
+            ForEach-Object { $_.FullName }
 
           if (-not $zipFiles) {
             throw 'No release archives found under dist'
           }
 
+          if (-not $nugetPackages) {
+            throw 'No CLI NuGet package was produced.'
+          }
+
           gh release view "$env:RELEASE_TAG" *> $null
 
           if ($LASTEXITCODE -eq 0) {
-            gh release upload "$env:RELEASE_TAG" @zipFiles "dist/checksums.txt" "tools/install-multi-pwsh.ps1" "tools/install-multi-pwsh.sh" "tools/uninstall-multi-pwsh.ps1" "tools/uninstall-multi-pwsh.sh" --clobber
+            gh release upload "$env:RELEASE_TAG" @zipFiles @nugetPackages "dist/checksums.txt" "tools/install-multi-pwsh.ps1" "tools/install-multi-pwsh.sh" "tools/uninstall-multi-pwsh.ps1" "tools/uninstall-multi-pwsh.sh" --clobber
           }
           else {
             $createArgs = @(
@@ -267,6 +346,7 @@ jobs:
             )
 
             $createArgs += $zipFiles
+            $createArgs += $nugetPackages
             $createArgs += "dist/checksums.txt"
             $createArgs += "tools/install-multi-pwsh.ps1"
             $createArgs += "tools/install-multi-pwsh.sh"
