@@ -3,6 +3,7 @@ mod error;
 mod install;
 mod layout;
 mod mcp;
+mod mcp;
 mod package;
 mod platform;
 mod release;
