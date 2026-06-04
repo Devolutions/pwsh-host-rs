@@ -5,7 +5,7 @@ use std::path::Path;
 
 use dlopen::wrapper::{Container, WrapperApi};
 
-use crate::context::{HostfxrContext, HostfxrHandle, InitializedForCommandLine};
+use crate::context::{HostfxrContext, HostfxrHandle, InitializedForCommandLine, InitializedForRuntimeConfig};
 use crate::host_detect::pwsh_host_detect;
 use crate::pdcstring::{PdCStr, PdCString};
 
@@ -180,6 +180,32 @@ impl Hostfxr {
                 host_context_handle,
             )
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn initialize_for_runtime_config_path(
+        &self,
+        runtime_config_path: impl AsRef<PdCStr>,
+    ) -> Result<HostfxrContext<'_, InitializedForRuntimeConfig>, Box<dyn std::error::Error>> {
+        use std::ptr;
+
+        use crate::host_exit_code::HostExitCode;
+
+        let mut host_context_handle = ptr::null::<Hostfxrhandle>() as Hostfxrhandle;
+        let result = unsafe {
+            self.lib.hostfxr_initialize_for_runtime_config(
+                runtime_config_path.as_ref().as_ptr(),
+                ptr::null(),
+                &mut host_context_handle,
+            )
+        };
+
+        HostExitCode::from(result).into_result()?;
+
+        Ok(HostfxrContext::new(
+            unsafe { HostfxrHandle::new_unchecked(host_context_handle) },
+            self,
+        ))
     }
 
     #[allow(dead_code)]

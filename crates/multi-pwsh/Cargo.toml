@@ -24,6 +24,8 @@ home = "0.5"
 tempfile = "3.12"
 pwsh-host = { path = "../pwsh-host" }
 sha2 = "0.10"
+rmcp = { version = "1.7", features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["io-std", "net", "rt", "rt-multi-thread"] }
 
 [build-dependencies]
 winresource = "0.1"
