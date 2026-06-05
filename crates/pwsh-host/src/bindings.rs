@@ -4,8 +4,10 @@
 mod bindings_generated;
 
 use std::ffi::{CStr, CString};
+use std::path::Path;
 
 use self::bindings_generated::{Bindings, PowerShellHandle};
+use crate::loader::get_assembly_delegate_loader_for_pwsh_dir;
 
 pub struct PowerShell {
     inner: Bindings,
@@ -17,6 +19,16 @@ impl PowerShell {
         let bindings = Bindings::new().ok()?;
         let handle = unsafe { (bindings.create_fn)() };
         Some(Self {
+            inner: bindings,
+            handle,
+        })
+    }
+
+    pub fn new_for_pwsh_dir(pwsh_dir: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
+        let loader = get_assembly_delegate_loader_for_pwsh_dir(pwsh_dir)?;
+        let bindings = Bindings::new_with_loader(&loader)?;
+        let handle = unsafe { (bindings.create_fn)() };
+        Ok(Self {
             inner: bindings,
             handle,
         })

@@ -2,6 +2,7 @@ mod aliases;
 mod error;
 mod install;
 mod layout;
+mod mcp;
 mod package;
 mod platform;
 mod release;
@@ -62,7 +63,7 @@ const HELP_TOPICS: &[&str] = &[
 ];
 
 fn usage_text() -> &'static str {
-    "Usage:\n  multi-pwsh --version\n  multi-pwsh --help\n  multi-pwsh help [command]\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh cache warm <selector> [--os <windows|linux|macos|all>] [--arch <x64|x86|arm64|arm32|all>] [--include-prerelease] [--output <path>]\n  multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease] [--offline-cache <path>]\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh doctor --repair-aliases"
+    "Usage:\n  multi-pwsh --version\n  multi-pwsh -V\n  multi-pwsh --help\n  multi-pwsh help [command]\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease] [--offline-cache <path>]\n  multi-pwsh package install <selector> [options]\n  multi-pwsh package uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh package list [--scope <user|machine>] [--root <path>]\n  multi-pwsh cache warm <selector> [--os <windows|linux|macos|all>] [--arch <x64|x86|arm64|arm32|all>] [--include-prerelease] [--output <path>] [--product <powershell|multi-pwsh|all>]\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh doctor --repair-aliases\n\nCommands:\n  install, update, uninstall, list, package, cache, venv, alias, host, doctor, version"
 }
 
 fn print_usage() {
@@ -102,7 +103,7 @@ fn help_topic_text(topic: &str) -> Option<&'static str> {
             "Usage:\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>",
         ),
         "host" => Some(
-            "Usage:\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]",
+            "Usage:\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh host <version|major|major.minor|pwsh-alias> -mcp -McpCommands <command> [command ...] [-VirtualEnvironment <name>|-venv <name>]",
         ),
         "doctor" => Some("Usage:\n  multi-pwsh doctor --repair-aliases"),
         "cache" => Some(
@@ -262,6 +263,17 @@ impl ReleaseResolver {
 struct HostLaunchOptions {
     pwsh_args: Vec<OsString>,
     virtual_environment: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HostMcpOptions {
+    commands: Vec<String>,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct HostDispatchOptions {
+    launch: HostLaunchOptions,
+    mcp: Option<HostMcpOptions>,
 }
 
 struct ProcessEnvVarGuard {
@@ -427,9 +439,100 @@ fn is_virtual_environment_flag(arg: &OsStr) -> bool {
     )
 }
 
+fn is_mcp_flag(arg: &OsStr) -> bool {
+    matches!(normalize_host_flag(arg).as_str(), "-mcp" | "/mcp")
+}
+
+fn is_mcp_commands_flag(arg: &OsStr) -> bool {
+    matches!(normalize_host_flag(arg).as_str(), "-mcpcommands" | "/mcpcommands")
+}
+
 fn is_option_like(arg: &OsStr) -> bool {
     let text = arg.to_string_lossy();
     text.starts_with('-') || text.starts_with('/')
+}
+
+fn parse_mcp_command_values(value: &OsStr) -> Vec<String> {
+    value
+        .to_string_lossy()
+        .split(|character| matches!(character, ',' | ';'))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn extract_mcp_args(args: Vec<OsString>) -> Result<(Vec<OsString>, Option<HostMcpOptions>)> {
+    let mut rewritten = Vec::with_capacity(args.len());
+    let mut commands = Vec::new();
+    let mut mcp_enabled = false;
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = &args[index];
+
+        if is_mcp_flag(arg.as_os_str()) {
+            if mcp_enabled {
+                return Err(MultiPwshError::InvalidArguments(
+                    "-mcp can only be specified once".to_string(),
+                ));
+            }
+
+            mcp_enabled = true;
+            index += 1;
+            continue;
+        }
+
+        if is_mcp_commands_flag(arg.as_os_str()) {
+            if !commands.is_empty() {
+                return Err(MultiPwshError::InvalidArguments(
+                    "-McpCommands can only be specified once".to_string(),
+                ));
+            }
+
+            index += 1;
+            while index < args.len() {
+                let value = &args[index];
+                if is_option_like(value.as_os_str()) {
+                    break;
+                }
+
+                commands.extend(parse_mcp_command_values(value.as_os_str()));
+                index += 1;
+            }
+
+            if commands.is_empty() {
+                return Err(MultiPwshError::InvalidArguments(
+                    "-McpCommands requires at least one PowerShell command name".to_string(),
+                ));
+            }
+
+            continue;
+        }
+
+        rewritten.push(arg.clone());
+        index += 1;
+    }
+
+    if !mcp_enabled && !commands.is_empty() {
+        return Err(MultiPwshError::InvalidArguments(
+            "-McpCommands requires -mcp".to_string(),
+        ));
+    }
+
+    if mcp_enabled && commands.is_empty() {
+        return Err(MultiPwshError::InvalidArguments(
+            "-mcp requires -McpCommands <command> [command ...]".to_string(),
+        ));
+    }
+
+    let mcp = if mcp_enabled {
+        Some(HostMcpOptions { commands })
+    } else {
+        None
+    };
+
+    Ok((rewritten, mcp))
 }
 
 fn is_command_flag(arg: &OsStr) -> bool {
@@ -570,7 +673,8 @@ fn extract_virtual_environment_arg(args: Vec<OsString>) -> Result<(Vec<OsString>
     Ok((rewritten, virtual_environment_name))
 }
 
-fn preprocess_host_args(args: Vec<OsString>) -> Result<HostLaunchOptions> {
+fn preprocess_host_args(args: Vec<OsString>) -> Result<HostDispatchOptions> {
+    let (args, mcp) = extract_mcp_args(args)?;
     let (args, virtual_environment) = extract_virtual_environment_arg(args)?;
     let args = if virtual_environment.is_some() {
         inject_virtual_environment_command_bootstrap(args)
@@ -580,9 +684,12 @@ fn preprocess_host_args(args: Vec<OsString>) -> Result<HostLaunchOptions> {
     let pwsh_args = pwsh_host::preprocess_named_pipe_command_args(args)
         .map_err(|error| MultiPwshError::Host(format!("invalid host arguments: {}", error)))?;
 
-    Ok(HostLaunchOptions {
-        pwsh_args,
-        virtual_environment,
+    Ok(HostDispatchOptions {
+        launch: HostLaunchOptions {
+            pwsh_args,
+            virtual_environment,
+        },
+        mcp,
     })
 }
 
@@ -747,15 +854,11 @@ fn run_host_mode_with_layout(layout: InstallLayout, selector_input: &str, pwsh_a
     layout.ensure_base_dirs()?;
 
     let (_version, executable) = resolve_host_executable(&layout, selector_input)?;
+    let HostDispatchOptions { launch, mcp } = preprocess_host_args(pwsh_args)?;
     let HostLaunchOptions {
         pwsh_args,
         virtual_environment,
-    } = preprocess_host_args(pwsh_args)?;
-    let (pwsh_args, _stdin_script_file) = if virtual_environment.is_some() {
-        rewrite_virtual_environment_stdin_file(pwsh_args)?
-    } else {
-        (pwsh_args, None)
-    };
+    } = launch;
     disable_powershell_update_notifications();
 
     let _virtual_environment_guards = virtual_environment
@@ -764,6 +867,28 @@ fn run_host_mode_with_layout(layout: InstallLayout, selector_input: &str, pwsh_a
         .transpose()?
         .map(|venv_dir| configure_virtual_environment_host_env(os, &venv_dir))
         .transpose()?;
+
+    if let Some(mcp) = mcp {
+        if !pwsh_args.is_empty() {
+            return Err(MultiPwshError::InvalidArguments(
+                "host -mcp does not accept additional pwsh arguments; use -McpCommands to choose exposed commands"
+                    .to_string(),
+            ));
+        }
+
+        return mcp::run_stdio_mcp_server(&executable, &mcp.commands).map_err(|error| {
+            MultiPwshError::Host(format!(
+                "failed to start MCP host for selector '{}': {}",
+                selector_input, error
+            ))
+        });
+    }
+
+    let (pwsh_args, _stdin_script_file) = if virtual_environment.is_some() {
+        rewrite_virtual_environment_stdin_file(pwsh_args)?
+    } else {
+        (pwsh_args, None)
+    };
 
     pwsh_host::run_pwsh_command_line_for_pwsh_exe(&executable, pwsh_args).map_err(|error| {
         MultiPwshError::Host(format!(
@@ -782,7 +907,7 @@ fn run_host_mode(selector_input: &str, pwsh_args: Vec<OsString>) -> Result<i32> 
 fn run_host_command(args: &[String]) -> Result<i32> {
     if args.is_empty() {
         return Err(MultiPwshError::InvalidArguments(
-            "host requires: <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]"
+            "host requires: <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...] or -mcp -McpCommands <command> [command ...]"
                 .to_string(),
         ));
     }
@@ -3519,6 +3644,48 @@ mod tests {
     }
 
     #[test]
+    fn extract_mcp_args_accepts_mcp_mode_with_multiple_commands() {
+        let args = vec![
+            OsString::from("-mcp"),
+            OsString::from("-McpCommands"),
+            OsString::from("Get-Help"),
+            OsString::from("Get-Command,Get-Date"),
+            OsString::from("-venv"),
+            OsString::from("demo"),
+        ];
+
+        let (rewritten, mcp) = extract_mcp_args(args).unwrap();
+
+        assert_eq!(rewritten, vec![OsString::from("-venv"), OsString::from("demo")]);
+        assert_eq!(
+            mcp,
+            Some(HostMcpOptions {
+                commands: vec![
+                    "Get-Help".to_string(),
+                    "Get-Command".to_string(),
+                    "Get-Date".to_string(),
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn extract_mcp_args_rejects_commands_without_mcp_flag() {
+        let args = vec![OsString::from("-McpCommands"), OsString::from("Get-Help")];
+        let error = extract_mcp_args(args).unwrap_err();
+        assert!(error.to_string().contains("-McpCommands requires -mcp"));
+    }
+
+    #[test]
+    fn extract_mcp_args_requires_command_names() {
+        let args = vec![OsString::from("-mcp"), OsString::from("-McpCommands")];
+        let error = extract_mcp_args(args).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("-McpCommands requires at least one PowerShell command name"));
+    }
+
+    #[test]
     fn disable_powershell_update_notifications_sets_off() {
         with_env_var(POWERSHELL_UPDATECHECK_ENV_VAR, Some("LTS"), || {
             disable_powershell_update_notifications();
@@ -3945,8 +4112,8 @@ mod tests {
         ];
 
         let options = preprocess_host_args(args).unwrap();
-        assert_eq!(options.virtual_environment, Some("msgraph".to_string()));
-        assert_eq!(options.pwsh_args, vec![OsString::from("-NoProfile")]);
+        assert_eq!(options.launch.virtual_environment, Some("msgraph".to_string()));
+        assert_eq!(options.launch.pwsh_args, vec![OsString::from("-NoProfile")]);
     }
 
     #[test]
@@ -3959,11 +4126,11 @@ mod tests {
         ];
 
         let options = preprocess_host_args(args).unwrap();
-        assert_eq!(options.virtual_environment, Some("msgraph".to_string()));
-        assert_eq!(options.pwsh_args.len(), 2);
-        assert_eq!(options.pwsh_args[0], OsString::from("-Command"));
+        assert_eq!(options.launch.virtual_environment, Some("msgraph".to_string()));
+        assert_eq!(options.launch.pwsh_args.len(), 2);
+        assert_eq!(options.launch.pwsh_args[0], OsString::from("-Command"));
 
-        let command = options.pwsh_args[1].to_string_lossy();
+        let command = options.launch.pwsh_args[1].to_string_lossy();
         assert!(command.contains("Get-Command Import-Module -ErrorAction SilentlyContinue"));
         assert!(command.contains("$__multiPwshImportModule.CommandType -eq 'Alias'"));
         assert!(command.contains("Get-InstalledModule Pester"));
@@ -3979,8 +4146,11 @@ mod tests {
         ];
 
         let options = preprocess_host_args(args).unwrap();
-        assert_eq!(options.virtual_environment, Some("msgraph".to_string()));
-        assert_eq!(options.pwsh_args, vec![OsString::from("-File"), OsString::from("-")]);
+        assert_eq!(options.launch.virtual_environment, Some("msgraph".to_string()));
+        assert_eq!(
+            options.launch.pwsh_args,
+            vec![OsString::from("-File"), OsString::from("-")]
+        );
     }
 
     #[test]
