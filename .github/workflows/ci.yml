@@ -157,3 +157,79 @@ jobs:
       - name: Run .NET tests
         shell: pwsh
         run: dotnet test dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj --no-build -p:PwshExePath="pwsh-7.4"
+
+  nuget-cli:
+    name: NuGet CLI package smoke (Windows)
+    runs-on: windows-latest
+    needs: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc
+          rustup default stable
+
+      - name: Build and pack CLI NuGet package
+        shell: pwsh
+        run: |
+          pwsh -NoLogo -NoProfile -File (Resolve-Path 'scripts\Build-CliNativeNuGetPackage.ps1') `
+            -RuntimeIdentifiers 'win-x64' `
+            -Clean
+
+      - name: Smoke test PackageReference copy targets
+        shell: pwsh
+        run: |
+          $packageSource = (Resolve-Path 'artifacts\cli-nuget').Path
+          $smokeRoot = Join-Path $env:RUNNER_TEMP 'multi-pwsh-cli-package-smoke'
+          $env:NUGET_PACKAGES = Join-Path $env:RUNNER_TEMP 'multi-pwsh-cli-package-smoke-nuget-cache'
+          New-Item -Path $smokeRoot -ItemType Directory -Force | Out-Null
+          New-Item -Path $env:NUGET_PACKAGES -ItemType Directory -Force | Out-Null
+
+          $package = Get-ChildItem -Path $packageSource -Filter 'Devolutions.MultiPwsh.Cli.*.nupkg' | Select-Object -First 1
+          if ($null -eq $package) {
+            throw 'Smoke test package was not found.'
+          }
+
+          $version = $package.BaseName.Substring('Devolutions.MultiPwsh.Cli.'.Length)
+
+          dotnet new console --framework net8.0 --output $smokeRoot
+          if ($LASTEXITCODE -ne 0) { throw 'Smoke project creation failed.' }
+
+          $projectPath = Join-Path $smokeRoot 'multi-pwsh-cli-package-smoke.csproj'
+          $project = Get-Content -Path $projectPath -Raw
+          $project = $project -replace '</Project>', @"
+            <ItemGroup>
+              <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="$version" />
+            </ItemGroup>
+          </Project>
+          "@
+          Set-Content -Path $projectPath -Value $project -Encoding utf8
+
+          $nugetConfig = Join-Path $smokeRoot 'NuGet.Config'
+          @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="local" value="$packageSource" />
+              <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+            </packageSources>
+          </configuration>
+          "@ | Set-Content -Path $nugetConfig -Encoding utf8
+
+          dotnet build $projectPath --configfile $nugetConfig
+          if ($LASTEXITCODE -ne 0) { throw 'Smoke project build failed.' }
+
+          $expected = Join-Path $smokeRoot 'bin\Debug\net8.0\runtimes\win-x64\native\multi-pwsh.exe'
+          if (-not (Test-Path -Path $expected -PathType Leaf)) {
+            throw "Expected smoke output file was not found: $expected"
+          }

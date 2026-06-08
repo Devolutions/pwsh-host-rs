@@ -5,8 +5,22 @@ on:
     inputs:
       tag:
         description: Release tag to create/update when publishing
-        required: true
+        required: false
         type: string
+      dry_run:
+        description: Build and package only, then upload downloadable workflow artifacts (no GitHub release publish).
+        required: false
+        default: false
+        type: boolean
+      github-env:
+        description: GitHub environment for code signing secrets (auto, test, or prod).
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - test
+          - prod
 
 permissions:
   contents: write
@@ -20,10 +34,12 @@ jobs:
       release_tag: ${{ steps.validate.outputs.release_tag }}
       release_target: ${{ steps.validate.outputs.release_target }}
       release_version: ${{ steps.validate.outputs.release_version }}
+      dry_run: ${{ steps.validate.outputs.dry_run }}
+      publish_env: ${{ steps.validate.outputs.publish_env }}
 
     steps:
       - name: Checkout selected ref
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -35,15 +51,38 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.inputs.tag }}
           CHECKOUT_REF: ${{ github.ref }}
+          SOURCE_BRANCH: ${{ github.ref_name }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          REQUESTED_ENVIRONMENT: ${{ inputs['github-env'] }}
         run: |
-          tag="${RELEASE_TAG}"
-
-          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "Release tag must match vX.Y.Z or vX.Y.Z-suffix. Got: ${tag}" >&2
-            exit 1
+          dry_run="$(echo "${DRY_RUN}" | tr '[:upper:]' '[:lower:]')"
+          if [[ "${dry_run}" != "true" && "${dry_run}" != "false" ]]; then
+            dry_run="false"
           fi
 
-          release_version="${tag#v}"
+          requested_environment="$(echo "${REQUESTED_ENVIRONMENT:-auto}" | tr '[:upper:]' '[:lower:]')"
+          case "${requested_environment}" in
+            auto)
+              if [[ "${SOURCE_BRANCH}" == "master" ]]; then
+                publish_env="publish-prod"
+              else
+                publish_env="publish-test"
+              fi
+              ;;
+            test)
+              publish_env="publish-test"
+              ;;
+            prod)
+              publish_env="publish-prod"
+              ;;
+            *)
+              echo "Unsupported github-env value: ${requested_environment}. Expected auto, test, or prod." >&2
+              exit 1
+              ;;
+          esac
+
+          tag="${RELEASE_TAG}"
+
           multi_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/multi-pwsh/Cargo.toml | head -n 1)"
           host_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pwsh-host/Cargo.toml | head -n 1)"
 
@@ -57,9 +96,25 @@ jobs:
             exit 1
           fi
 
-          if [[ "${multi_version}" != "${release_version}" ]]; then
-            echo "Release tag ${tag} does not match crate version ${multi_version}" >&2
-            exit 1
+          release_version="${multi_version}"
+
+          if [[ "${dry_run}" != "true" ]]; then
+            if [[ -z "${tag}" ]]; then
+              echo "Release tag is required when dry_run is false." >&2
+              exit 1
+            fi
+
+            if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "Release tag must match vX.Y.Z or vX.Y.Z-suffix. Got: ${tag}" >&2
+              exit 1
+            fi
+
+            if [[ "${multi_version}" != "${tag#v}" ]]; then
+              echo "Release tag ${tag} does not match crate version ${multi_version}" >&2
+              exit 1
+            fi
+          elif [[ -z "${tag}" ]]; then
+            tag="v${release_version}"
           fi
 
           release_target="$(git rev-parse HEAD)"
@@ -68,6 +123,8 @@ jobs:
           echo "release_tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "release_target=${release_target}" >> "$GITHUB_OUTPUT"
           echo "release_version=${release_version}" >> "$GITHUB_OUTPUT"
+          echo "dry_run=${dry_run}" >> "$GITHUB_OUTPUT"
+          echo "publish_env=${publish_env}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.name }}
@@ -80,47 +137,53 @@ jobs:
           - name: linux-x64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            runtime_id: linux-x64
             multi_archive: multi-pwsh-linux-x64.zip
             multi_binary: multi-pwsh
 
           - name: linux-arm64
             os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            runtime_id: linux-arm64
             multi_archive: multi-pwsh-linux-arm64.zip
             multi_binary: multi-pwsh
 
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+            runtime_id: win-x64
             multi_archive: multi-pwsh-windows-x64.zip
             multi_binary: multi-pwsh.exe
 
           - name: windows-arm64
             os: windows-latest
             target: aarch64-pc-windows-msvc
+            runtime_id: win-arm64
             multi_archive: multi-pwsh-windows-arm64.zip
             multi_binary: multi-pwsh.exe
 
           - name: macos-x64
             os: macos-14
             target: x86_64-apple-darwin
+            runtime_id: osx-x64
             multi_archive: multi-pwsh-macos-x64.zip
             multi_binary: multi-pwsh
 
           - name: macos-arm64
             os: macos-14
             target: aarch64-apple-darwin
+            runtime_id: osx-arm64
             multi_archive: multi-pwsh-macos-arm64.zip
             multi_binary: multi-pwsh
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.validate.outputs.checkout_ref }}
 
       - name: Install .NET SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
 
@@ -150,6 +213,7 @@ jobs:
           cargo build --locked --release --package multi-pwsh --bin multi-pwsh --target "${{ matrix.target }}"
 
       - name: Package artifacts
+        if: ${{ !contains(matrix.target, 'windows-msvc') }}
         shell: pwsh
         env:
           TARGET: ${{ matrix.target }}
@@ -193,10 +257,235 @@ jobs:
           New-BinaryArchive -BinaryName $env:MULTI_BIN_NAME -ArchiveName $env:MULTI_ARCHIVE_NAME
 
       - name: Upload multi-pwsh artifact
+        if: ${{ !contains(matrix.target, 'windows-msvc') }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.multi_archive }}
           path: ${{ matrix.multi_archive }}
+          if-no-files-found: error
+
+      - name: Upload unsigned Windows binary
+        if: ${{ contains(matrix.target, 'windows-msvc') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-pwsh-unsigned-${{ matrix.runtime_id }}
+          path: target/${{ matrix.target }}/release/${{ matrix.multi_binary }}
+          if-no-files-found: error
+
+      - name: Stage NuGet runtime artifact
+        if: ${{ !contains(matrix.target, 'windows-msvc') }}
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          MULTI_BIN_NAME: ${{ matrix.multi_binary }}
+          RUNTIME_ID: ${{ matrix.runtime_id }}
+        run: |
+          $binaryPath = [System.IO.Path]::Combine("target", $env:TARGET, "release", $env:MULTI_BIN_NAME)
+          if (-not (Test-Path -Path $binaryPath -PathType Leaf)) {
+            throw "Binary not found: $binaryPath"
+          }
+
+          $stageDir = Join-Path "nuget-stage" $env:RUNTIME_ID
+          New-Item -Path $stageDir -ItemType Directory -Force | Out-Null
+          Copy-Item -Path $binaryPath -Destination (Join-Path $stageDir $env:MULTI_BIN_NAME) -Force
+
+      - name: Upload NuGet runtime artifact
+        if: ${{ !contains(matrix.target, 'windows-msvc') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-pwsh-nuget-${{ matrix.runtime_id }}
+          path: nuget-stage/${{ matrix.runtime_id }}/*
+          if-no-files-found: error
+
+  sign-windows:
+    name: Sign Windows artifacts
+    runs-on: ubuntu-latest
+    needs:
+      - validate
+      - build
+    environment: ${{ needs.validate.outputs.publish_env }}
+
+    steps:
+      - name: Download unsigned Windows x64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: multi-pwsh-unsigned-win-x64
+          path: work/win-x64
+
+      - name: Download unsigned Windows arm64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: multi-pwsh-unsigned-win-arm64
+          path: work/win-arm64
+
+      - name: Resolve signing mode
+        id: signing_mode
+        shell: pwsh
+        env:
+          CODE_SIGNING_KEYVAULT_URL: ${{ secrets.CODE_SIGNING_KEYVAULT_URL }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          CODE_SIGNING_CLIENT_ID: ${{ secrets.CODE_SIGNING_CLIENT_ID }}
+          CODE_SIGNING_CLIENT_SECRET: ${{ secrets.CODE_SIGNING_CLIENT_SECRET }}
+          CODE_SIGNING_CERTIFICATE_NAME: ${{ secrets.CODE_SIGNING_CERTIFICATE_NAME }}
+          CODE_SIGNING_TIMESTAMP_SERVER: ${{ vars.CODE_SIGNING_TIMESTAMP_SERVER }}
+        run: |
+          $dryRun = [System.Boolean]::Parse('${{ needs.validate.outputs.dry_run }}')
+          $requiredValues = @(
+            $env:CODE_SIGNING_KEYVAULT_URL,
+            $env:AZURE_TENANT_ID,
+            $env:CODE_SIGNING_CLIENT_ID,
+            $env:CODE_SIGNING_CLIENT_SECRET,
+            $env:CODE_SIGNING_CERTIFICATE_NAME,
+            $env:CODE_SIGNING_TIMESTAMP_SERVER
+          )
+
+          $hasSigningSecrets = $true
+          foreach ($value in $requiredValues) {
+            if ([string]::IsNullOrWhiteSpace($value)) {
+              $hasSigningSecrets = $false
+              break
+            }
+          }
+
+          if (-not $dryRun -and -not $hasSigningSecrets) {
+            throw 'Code signing secrets are required for non-dry-run release jobs.'
+          }
+
+          $shouldSign = $hasSigningSecrets
+          "should_sign=$($shouldSign.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          if ($shouldSign) {
+            Write-Host 'Windows binaries will be signed with Linux psign-tool.'
+          }
+          else {
+            Write-Host '::warning::Code signing secrets were not available. Dry-run Windows binaries will remain unsigned.'
+          }
+
+      - name: Install Linux psign-tool
+        if: steps.signing_mode.outputs.should_sign == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $toolRoot = Join-Path $env:RUNNER_TEMP 'psign-tool'
+          $extractRoot = Join-Path $toolRoot 'expanded'
+
+          if (Test-Path -Path $toolRoot) {
+            Remove-Item -Path $toolRoot -Recurse -Force
+          }
+
+          New-Item -Path $extractRoot -ItemType Directory -Force | Out-Null
+          gh release download --repo Devolutions/psign --pattern 'psign-tool-linux-x64.zip' --dir $toolRoot --clobber
+
+          $toolArchivePath = Join-Path $toolRoot 'psign-tool-linux-x64.zip'
+          if (-not (Test-Path -Path $toolArchivePath -PathType Leaf)) {
+            throw "psign-tool archive was not found at $toolArchivePath"
+          }
+
+          Expand-Archive -Path $toolArchivePath -DestinationPath $extractRoot -Force
+
+          $toolPath = Join-Path $extractRoot 'psign-tool'
+          if (-not (Test-Path -Path $toolPath -PathType Leaf)) {
+            throw "psign-tool executable was not found at $toolPath"
+          }
+
+          chmod +x $toolPath
+          $extractRoot | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $toolPath --version
+
+      - name: Code sign Windows executables
+        if: steps.signing_mode.outputs.should_sign == 'true'
+        shell: pwsh
+        env:
+          CODE_SIGNING_KEYVAULT_URL: ${{ secrets.CODE_SIGNING_KEYVAULT_URL }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          CODE_SIGNING_CLIENT_ID: ${{ secrets.CODE_SIGNING_CLIENT_ID }}
+          CODE_SIGNING_CLIENT_SECRET: ${{ secrets.CODE_SIGNING_CLIENT_SECRET }}
+          CODE_SIGNING_CERTIFICATE_NAME: ${{ secrets.CODE_SIGNING_CERTIFICATE_NAME }}
+          CODE_SIGNING_TIMESTAMP_SERVER: ${{ vars.CODE_SIGNING_TIMESTAMP_SERVER }}
+        run: |
+          $binaries = @(
+            @{ Rid = 'win-x64'; Path = 'work/win-x64/multi-pwsh.exe' },
+            @{ Rid = 'win-arm64'; Path = 'work/win-arm64/multi-pwsh.exe' }
+          )
+
+          foreach ($binary in $binaries) {
+            if (-not (Test-Path -Path $binary.Path -PathType Leaf)) {
+              throw "Windows binary not found: $($binary.Path)"
+            }
+
+            psign-tool --mode portable --verbose sign `
+              --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
+              --azure-key-vault-url "$env:CODE_SIGNING_KEYVAULT_URL" `
+              --azure-key-vault-client-id "$env:CODE_SIGNING_CLIENT_ID" `
+              --azure-key-vault-client-secret "$env:CODE_SIGNING_CLIENT_SECRET" `
+              --azure-key-vault-certificate "$env:CODE_SIGNING_CERTIFICATE_NAME" `
+              --timestamp-url "$env:CODE_SIGNING_TIMESTAMP_SERVER" `
+              --timestamp-digest sha256 `
+              --digest sha256 `
+              --exit-codes azure `
+              "$($binary.Path)"
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "psign-tool signing failed for $($binary.Rid) with exit code $LASTEXITCODE"
+            }
+          }
+
+      - name: Package signed Windows artifacts
+        shell: pwsh
+        run: |
+          $artifacts = @(
+            @{
+              Rid = 'win-x64'
+              WorkDir = 'work/win-x64'
+              Archive = 'multi-pwsh-windows-x64.zip'
+            },
+            @{
+              Rid = 'win-arm64'
+              WorkDir = 'work/win-arm64'
+              Archive = 'multi-pwsh-windows-arm64.zip'
+            }
+          )
+
+          foreach ($artifact in $artifacts) {
+            $binaryPath = Join-Path $artifact.WorkDir 'multi-pwsh.exe'
+            if (-not (Test-Path -Path $binaryPath -PathType Leaf)) {
+              throw "Windows binary not found: $binaryPath"
+            }
+
+            Compress-Archive -Path $binaryPath -DestinationPath $artifact.Archive -Force
+
+            $stageDir = Join-Path 'nuget-stage' $artifact.Rid
+            New-Item -Path $stageDir -ItemType Directory -Force | Out-Null
+            Copy-Item -Path $binaryPath -Destination (Join-Path $stageDir 'multi-pwsh.exe') -Force
+          }
+
+      - name: Upload signed Windows x64 archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-pwsh-windows-x64.zip
+          path: multi-pwsh-windows-x64.zip
+          if-no-files-found: error
+
+      - name: Upload signed Windows arm64 archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-pwsh-windows-arm64.zip
+          path: multi-pwsh-windows-arm64.zip
+          if-no-files-found: error
+
+      - name: Upload signed Windows x64 NuGet runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-pwsh-nuget-win-x64
+          path: nuget-stage/win-x64/*
+          if-no-files-found: error
+
+      - name: Upload signed Windows arm64 NuGet runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-pwsh-nuget-win-arm64
+          path: nuget-stage/win-arm64/*
           if-no-files-found: error
 
   publish:
@@ -205,10 +494,11 @@ jobs:
     needs:
       - validate
       - build
+      - sign-windows
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ needs.validate.outputs.checkout_ref }}
 
@@ -216,6 +506,56 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Arrange staged NuGet runtime artifacts
+        shell: pwsh
+        run: |
+          $Mappings = @(
+            @{ Artifact = 'multi-pwsh-nuget-win-x64'; Rid = 'win-x64'; Binary = 'multi-pwsh.exe' },
+            @{ Artifact = 'multi-pwsh-nuget-win-arm64'; Rid = 'win-arm64'; Binary = 'multi-pwsh.exe' },
+            @{ Artifact = 'multi-pwsh-nuget-linux-x64'; Rid = 'linux-x64'; Binary = 'multi-pwsh' },
+            @{ Artifact = 'multi-pwsh-nuget-linux-arm64'; Rid = 'linux-arm64'; Binary = 'multi-pwsh' },
+            @{ Artifact = 'multi-pwsh-nuget-osx-x64'; Rid = 'osx-x64'; Binary = 'multi-pwsh' },
+            @{ Artifact = 'multi-pwsh-nuget-osx-arm64'; Rid = 'osx-arm64'; Binary = 'multi-pwsh' }
+          )
+
+          foreach ($mapping in $Mappings) {
+            $source = Join-Path 'dist' $mapping.Artifact
+            if (-not (Test-Path -Path $source -PathType Container)) {
+              throw "Downloaded NuGet runtime artifact directory not found: $source"
+            }
+
+            $binaryPath = Join-Path $source $mapping.Binary
+            if (-not (Test-Path -Path $binaryPath -PathType Leaf)) {
+              throw "Runtime binary not found in artifact: $binaryPath"
+            }
+
+            $targetDir = Join-Path 'artifacts\cli\multi-pwsh' $mapping.Rid
+            New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
+            Copy-Item -Path $binaryPath -Destination (Join-Path $targetDir $mapping.Binary) -Force
+          }
+
+      - name: Pack CLI NuGet package
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: |
+          pwsh -NoLogo -NoProfile -File (Resolve-Path 'scripts\Build-CliNativeNuGetPackage.ps1') `
+            -Version $env:PACKAGE_VERSION `
+            -NoBuild `
+            -Clean:$false
+
+      - name: Upload CLI NuGet package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-nuget
+          path: artifacts/cli-nuget/*.nupkg
+          if-no-files-found: error
 
       - name: Generate checksums
         shell: pwsh
@@ -240,6 +580,7 @@ jobs:
           Get-Content -Path checksums.txt
 
       - name: Publish release assets
+        if: ${{ needs.validate.outputs.dry_run != 'true' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -251,15 +592,22 @@ jobs:
             Where-Object { $_.Name -like 'multi-pwsh-*.zip' } |
             Sort-Object Name |
             ForEach-Object { $_.FullName }
+          $nugetPackages = Get-ChildItem -Path artifacts/cli-nuget -Filter 'Devolutions.MultiPwsh.Cli.*.nupkg' |
+            Sort-Object Name |
+            ForEach-Object { $_.FullName }
 
           if (-not $zipFiles) {
             throw 'No release archives found under dist'
           }
 
+          if (-not $nugetPackages) {
+            throw 'No CLI NuGet package was produced.'
+          }
+
           gh release view "$env:RELEASE_TAG" *> $null
 
           if ($LASTEXITCODE -eq 0) {
-            gh release upload "$env:RELEASE_TAG" @zipFiles "dist/checksums.txt" "tools/install-multi-pwsh.ps1" "tools/install-multi-pwsh.sh" "tools/uninstall-multi-pwsh.ps1" "tools/uninstall-multi-pwsh.sh" --clobber
+            gh release upload "$env:RELEASE_TAG" @zipFiles @nugetPackages "dist/checksums.txt" "tools/install-multi-pwsh.ps1" "tools/install-multi-pwsh.sh" "tools/uninstall-multi-pwsh.ps1" "tools/uninstall-multi-pwsh.sh" --clobber
           }
           else {
             $createArgs = @(
@@ -267,6 +615,7 @@ jobs:
             )
 
             $createArgs += $zipFiles
+            $createArgs += $nugetPackages
             $createArgs += "dist/checksums.txt"
             $createArgs += "tools/install-multi-pwsh.ps1"
             $createArgs += "tools/install-multi-pwsh.sh"

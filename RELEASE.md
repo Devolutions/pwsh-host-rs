@@ -31,7 +31,11 @@ dotnet test dotnet\bindings\Devolutions.PowerShell.SDK.Bindings.csproj --no-buil
 
 ## 3. Publish the release
 
-Dispatch `.github/workflows/release.yml` from the branch or commit you want to release, with the matching tag value, for example `v0.9.0`.
+Dispatch `.github/workflows/release.yml` from the branch or commit you want to release.
+
+- For an actual publish, set `dry_run` to `false` and provide the matching `tag` value, for example `v0.9.0`.
+- For an inspection build, set `dry_run` to `true`. This builds and packs artifacts, uploads the `.nupkg` as a workflow artifact, and skips GitHub release publishing.
+- Set `github-env` to `auto` unless you need to force signing secrets from `publish-test` or `publish-prod`. In `auto`, runs from `master` use `publish-prod`; other branches use `publish-test`.
 
 You do **not** need to create the tag ahead of time. If the tag does not exist yet, the workflow creates it at the dispatched commit when it creates the GitHub release.
 
@@ -39,18 +43,39 @@ The workflow:
 
 - validates that the tag input matches both crate versions
 - builds artifacts from the commit you dispatched the workflow from
+- signs Windows executables on a Linux runner with Devolutions `psign` and the selected environment's Key Vault secrets
 - creates the tag at that commit if needed
-- uploads archives and `checksums.txt` to the GitHub release
+- uploads archives and `checksums.txt` to the GitHub release, with Windows archives containing signed executables
+- builds and uploads `Devolutions.MultiPwsh.Cli.<version>.nupkg` to the GitHub release, with signed Windows payloads under `runtimes\win-*\native`
 - uploads install/uninstall bootstrap scripts to the GitHub release so users do not need `raw.githubusercontent.com`
 
 If the release already exists, the workflow uploads the refreshed assets with `--clobber`.
+
+Non-dry-run releases fail if code-signing secrets are unavailable. Dry runs sign Windows executables when the selected environment exposes the signing secrets; otherwise the dry-run logs an explicit warning and produces unsigned Windows payloads for inspection only.
+
+### Dry-run artifact download
+
+When `dry_run` is `true`, download the `cli-nuget` artifact from the workflow run page to inspect `Devolutions.MultiPwsh.Cli.<version>.nupkg`.
 
 ## 4. Verify release assets
 
 Confirm the release contains:
 
 - all platform zip archives
+- `Devolutions.MultiPwsh.Cli.<version>.nupkg`
 - `checksums.txt`
 - `install-multi-pwsh.ps1` and `install-multi-pwsh.sh`
 - `uninstall-multi-pwsh.ps1` and `uninstall-multi-pwsh.sh`
 - generated release notes or any required manual edits
+
+## 5. Package consumption in .NET apps
+
+Reference the package and build your project:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.9.0" />
+</ItemGroup>
+```
+
+The package contributes `multi-pwsh` payloads under `runtimes/<rid>/native/` and copies them to build/publish output.
