@@ -35,6 +35,7 @@ Dispatch `.github/workflows/release.yml` from the branch or commit you want to r
 
 - For an actual publish, set `dry_run` to `false` and provide the matching `tag` value, for example `v0.9.0`.
 - For an inspection build, set `dry_run` to `true`. This builds and packs artifacts, uploads the `.nupkg` as a workflow artifact, and skips GitHub release publishing.
+- Set `github-env` to `auto` unless you need to force signing secrets from `publish-test` or `publish-prod`. In `auto`, runs from `master` use `publish-prod`; other branches use `publish-test`.
 
 You do **not** need to create the tag ahead of time. If the tag does not exist yet, the workflow creates it at the dispatched commit when it creates the GitHub release.
 
@@ -42,12 +43,15 @@ The workflow:
 
 - validates that the tag input matches both crate versions
 - builds artifacts from the commit you dispatched the workflow from
+- signs Windows executables on a Linux runner with Devolutions `psign` and the selected environment's Key Vault secrets
 - creates the tag at that commit if needed
-- uploads archives and `checksums.txt` to the GitHub release
-- builds and uploads `Devolutions.MultiPwsh.Cli.<version>.nupkg` to the GitHub release
+- uploads archives and `checksums.txt` to the GitHub release, with Windows archives containing signed executables
+- builds and uploads `Devolutions.MultiPwsh.Cli.<version>.nupkg` to the GitHub release, with signed Windows payloads under `runtimes\win-*\native`
 - uploads install/uninstall bootstrap scripts to the GitHub release so users do not need `raw.githubusercontent.com`
 
 If the release already exists, the workflow uploads the refreshed assets with `--clobber`.
+
+Non-dry-run releases fail if code-signing secrets are unavailable. Dry runs sign Windows executables when the selected environment exposes the signing secrets; otherwise the dry-run logs an explicit warning and produces unsigned Windows payloads for inspection only.
 
 ### Dry-run artifact download
 
