@@ -181,7 +181,7 @@ $binDir = Get-MultiPwshBinDir
 $targetExe = Join-Path $binDir 'multi-pwsh.exe'
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("multi-pwsh-install-" + [System.Guid]::NewGuid().ToString('N'))
-$archivePath = if ([string]::IsNullOrWhiteSpace($ArchivePath)) { Join-Path $tempRoot $assetName } else { $ArchivePath }
+$resolvedArchivePath = if ([string]::IsNullOrWhiteSpace($ArchivePath)) { Join-Path $tempRoot $assetName } else { $ArchivePath }
 $localChecksumPath = if ([string]::IsNullOrWhiteSpace($ChecksumPath)) { Join-Path $tempRoot 'checksums.txt' } else { $ChecksumPath }
 $extractDir = Join-Path $tempRoot 'extract'
 
@@ -193,8 +193,8 @@ try {
         $sourceArchive = Join-Path $versionDirectory $assetName
         $sourceChecksum = if ([string]::IsNullOrWhiteSpace($ChecksumPath)) { Join-Path $versionDirectory 'checksums.txt' } else { $ChecksumPath }
         Write-Host "Using offline $assetName from $sourceArchive"
-        if (-not [string]::Equals([System.IO.Path]::GetFullPath($sourceArchive), [System.IO.Path]::GetFullPath($archivePath), [System.StringComparison]::OrdinalIgnoreCase)) {
-            Copy-Item -LiteralPath $sourceArchive -Destination $archivePath -Force
+        if (-not [string]::Equals([System.IO.Path]::GetFullPath($sourceArchive), [System.IO.Path]::GetFullPath($resolvedArchivePath), [System.StringComparison]::OrdinalIgnoreCase)) {
+            Copy-Item -LiteralPath $sourceArchive -Destination $resolvedArchivePath -Force
         }
         if (-not [string]::Equals([System.IO.Path]::GetFullPath($sourceChecksum), [System.IO.Path]::GetFullPath($localChecksumPath), [System.StringComparison]::OrdinalIgnoreCase)) {
             Copy-Item -LiteralPath $sourceChecksum -Destination $localChecksumPath -Force
@@ -205,7 +205,7 @@ try {
 
         $invokeParams = @{
             Uri = $downloadUrl
-            OutFile = $archivePath
+            OutFile = $resolvedArchivePath
         }
 
         $checksumInvokeParams = @{
@@ -225,9 +225,9 @@ try {
         throw '-ChecksumPath is required when -ArchivePath is used without -OfflineCache'
     }
 
-    Assert-ArchiveChecksum -ArchivePath $archivePath -ChecksumPath $localChecksumPath -AssetName $assetName
+    Assert-ArchiveChecksum -ArchivePath $resolvedArchivePath -ChecksumPath $localChecksumPath -AssetName $assetName
 
-    Expand-Archive -Path $archivePath -DestinationPath $extractDir -Force
+    Expand-Archive -Path $resolvedArchivePath -DestinationPath $extractDir -Force
 
     $sourceExe = Join-Path $extractDir 'multi-pwsh.exe'
     if (-not (Test-Path -Path $sourceExe -PathType Leaf)) {

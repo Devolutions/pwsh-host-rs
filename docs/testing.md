@@ -1,5 +1,13 @@
 # Testing
 
+## Bootstrap installer tests
+
+Run the mocked Windows bootstrap installer harness:
+
+```powershell
+pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-BootstrapInstallerTest.ps1
+```
+
 ## Scoped install smoke tests
 
 Run the cross-platform scoped install smoke harness:
