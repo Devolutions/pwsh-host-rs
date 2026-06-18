@@ -464,7 +464,7 @@ fn is_option_like(arg: &OsStr) -> bool {
 fn parse_mcp_command_values(value: &OsStr) -> Vec<String> {
     value
         .to_string_lossy()
-        .split(|character| matches!(character, ',' | ';'))
+        .split([',', ';'])
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)

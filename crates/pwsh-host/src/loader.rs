@@ -4,7 +4,6 @@ use crate::error::Error;
 use crate::host_detect::pwsh_host_detect;
 use crate::host_exit_code::HostExitCode;
 use crate::host_exit_code::KnownHostExitCode;
-use crate::hostfxr::load_hostfxr;
 use crate::hostfxr::load_hostfxr_from_pwsh_dir;
 use crate::pdcstr;
 use crate::pdcstring::PdCString;
