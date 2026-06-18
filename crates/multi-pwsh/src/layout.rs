@@ -243,10 +243,7 @@ fn collect_versions_from_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_env_var<T>(key: &str, value: Option<&Path>, action: impl FnOnce() -> T) -> T {
         let previous = env::var_os(key);
@@ -273,7 +270,7 @@ mod tests {
         venv_dir: Option<&Path>,
         action: impl FnOnce() -> T,
     ) -> T {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
 
         with_env_var("MULTI_PWSH_HOME", home, || {
             with_env_var("MULTI_PWSH_BIN_DIR", bin_dir, || {

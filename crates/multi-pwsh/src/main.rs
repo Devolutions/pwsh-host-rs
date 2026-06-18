@@ -15,6 +15,8 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process;
+#[cfg(test)]
+use std::sync::Mutex;
 
 use semver::Version;
 
@@ -48,6 +50,9 @@ const MULTI_PWSH_OFFLINE_CACHE_ENV_VAR: &str = "MULTI_PWSH_OFFLINE_CACHE";
 const MULTI_PWSH_RELEASE_SOURCE_ENV_VAR: &str = "MULTI_PWSH_RELEASE_SOURCE";
 const VIRTUAL_ENVIRONMENT_FLAG: &str = "-virtualenvironment";
 const VIRTUAL_ENVIRONMENT_SHORT_FLAG: &str = "-venv";
+
+#[cfg(test)]
+static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
 const HELP_TOPICS: &[&str] = &[
     "install",
     "update",
@@ -296,6 +301,10 @@ impl Drop for ProcessEnvVarGuard {
             None => unsafe { env::remove_var(self.key) },
         }
     }
+}
+
+fn default_current_user_layout(os: HostOs) -> Result<InstallLayout> {
+    InstallLayout::new(os)
 }
 
 fn configure_virtual_environment_host_env(os: HostOs, venv_dir: &Path) -> Result<Vec<ProcessEnvVarGuard>> {
@@ -900,7 +909,7 @@ fn run_host_mode_with_layout(layout: InstallLayout, selector_input: &str, pwsh_a
 
 fn run_host_mode(selector_input: &str, pwsh_args: Vec<OsString>) -> Result<i32> {
     let os = HostOs::detect()?;
-    let layout = InstallLayout::new(os)?;
+    let layout = default_current_user_layout(os)?;
     run_host_mode_with_layout(layout, selector_input, pwsh_args)
 }
 
@@ -1591,10 +1600,15 @@ fn cache_multi_pwsh_artifact(
 
 fn run_cache_warm(selector_input: &str, options: CacheWarmOptions) -> Result<()> {
     let selector = parse_install_selector(selector_input)?;
+    let os = HostOs::detect().unwrap_or(HostOs::Windows);
     let output_root = options.output.unwrap_or_else(|| {
-        InstallLayout::new(HostOs::detect().unwrap_or(HostOs::Windows))
-            .map(|layout| layout.cache_dir())
-            .unwrap_or_else(|_| PathBuf::from("."))
+        env::var_os("MULTI_PWSH_CACHE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                default_current_user_layout(os)
+                    .map(|layout| layout.cache_dir())
+                    .unwrap_or_else(|_| PathBuf::from("."))
+            })
     });
     fs::create_dir_all(&output_root)?;
 
@@ -1823,7 +1837,7 @@ fn run_alias(args: &[String]) -> Result<()> {
     }
 
     let os = HostOs::detect()?;
-    let layout = InstallLayout::new(os)?;
+    let layout = default_current_user_layout(os)?;
     layout.ensure_base_dirs()?;
 
     match args[0].as_str() {
@@ -3206,7 +3220,7 @@ fn run_doctor(args: &[String]) -> Result<()> {
     }
 
     let os = HostOs::detect()?;
-    let layout = InstallLayout::new(os)?;
+    let layout = default_current_user_layout(os)?;
     layout.ensure_base_dirs()?;
 
     refresh_special_aliases(&layout, os)?;
@@ -3430,13 +3444,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     fn with_env_var<T>(key: &str, value: Option<&str>, action: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let previous = env::var_os(key);
 
         match value {
@@ -3452,6 +3463,81 @@ mod tests {
         }
 
         result
+    }
+
+    fn with_env_vars<T>(values: &[(&str, Option<&Path>)], action: impl FnOnce() -> T) -> T {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let previous: Vec<_> = values.iter().map(|(key, _)| (*key, env::var_os(key))).collect();
+
+        for (key, value) in values {
+            match value {
+                Some(value) => unsafe { env::set_var(*key, value) },
+                None => unsafe { env::remove_var(*key) },
+            }
+        }
+
+        let result = action();
+
+        for (key, value) in previous {
+            match value {
+                Some(value) => unsafe { env::set_var(key, value) },
+                None => unsafe { env::remove_var(key) },
+            }
+        }
+
+        result
+    }
+
+    #[test]
+    fn default_current_user_layout_uses_user_home_layout_on_windows() {
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path().join("multi-pwsh-home");
+        let venvs_dir = temp_dir.path().join("custom-venvs");
+
+        with_env_vars(
+            &[
+                ("MULTI_PWSH_HOME", Some(home.as_path())),
+                ("MULTI_PWSH_BIN_DIR", None),
+                ("MULTI_PWSH_CACHE_DIR", None),
+                ("MULTI_PWSH_VENV_DIR", Some(venvs_dir.as_path())),
+            ],
+            || {
+                let layout = default_current_user_layout(HostOs::Windows).unwrap();
+
+                assert_eq!(layout.home(), home.as_path());
+                assert_eq!(layout.bin_dir(), home.join("bin"));
+                assert_eq!(layout.cache_dir(), home.join("cache"));
+                assert_eq!(layout.venvs_dir(), venvs_dir);
+                assert_eq!(layout.versions_dir(), home.join("multi"));
+            },
+        );
+    }
+
+    #[test]
+    fn default_current_user_layout_honors_explicit_overrides_on_windows() {
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path().join("multi-pwsh-home");
+        let bin_dir = temp_dir.path().join("bin-root");
+        let cache_dir = temp_dir.path().join("cache-root");
+        let venv_dir = temp_dir.path().join("venv-root");
+
+        with_env_vars(
+            &[
+                ("MULTI_PWSH_HOME", Some(home.as_path())),
+                ("MULTI_PWSH_BIN_DIR", Some(bin_dir.as_path())),
+                ("MULTI_PWSH_CACHE_DIR", Some(cache_dir.as_path())),
+                ("MULTI_PWSH_VENV_DIR", Some(venv_dir.as_path())),
+            ],
+            || {
+                let layout = default_current_user_layout(HostOs::Windows).unwrap();
+
+                assert_eq!(layout.home(), home.as_path());
+                assert_eq!(layout.bin_dir(), bin_dir);
+                assert_eq!(layout.cache_dir(), cache_dir);
+                assert_eq!(layout.venvs_dir(), venv_dir);
+                assert_eq!(layout.versions_dir(), home.join("multi"));
+            },
+        );
     }
 
     #[test]
@@ -4167,7 +4253,7 @@ mod tests {
 
     #[test]
     fn configure_virtual_environment_host_env_sets_and_restores_windows_startup_hook_variables() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
         let forced_path = temp_dir.path().join("venv");
         fs::create_dir_all(&forced_path).unwrap();
@@ -4208,7 +4294,7 @@ mod tests {
 
     #[test]
     fn configure_virtual_environment_host_env_sets_and_restores_unix_startup_hook_variables() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
         let forced_path = temp_dir.path().join("venv");
         fs::create_dir_all(&forced_path).unwrap();

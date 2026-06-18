@@ -109,6 +109,8 @@ That means:
 Platform behavior:
 
 - Windows uses the GitHub ZIP archives with MSI-like install roots and selected installer-style integrations that still make sense for archive installs.
+- `user` installs default to `~/.pwsh` on every platform, with aliases in `~/.pwsh/bin`.
+- Windows `machine` installs default to `%ProgramFiles%\PowerShell` with aliases in `%ProgramFiles%\PowerShell\bin`.
 - macOS `machine` installs use the official `.tar.gz` archives under `/usr/local/microsoft/powershell` with aliases published to `/usr/local/bin`.
 - Linux `machine` installs use the official `.tar.gz` archives under `/opt/microsoft/powershell` with aliases published to `/usr/local/bin`.
 - Unix `machine` installs expect you to provide elevation yourself; `multi-pwsh` does not invoke `sudo`.

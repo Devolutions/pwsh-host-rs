@@ -7,7 +7,7 @@
 - `-VirtualEnvironment <name>` and `-venv <name>` are consumed by `multi-pwsh` before handing control to PowerShell and set `PSModulePath` to the selected venv module root for that launch.
 - `PSMODULE_VENV_PATH` can also be used as an explicit path-based venv selector for hosted launches. If it is already set in the environment, `multi-pwsh host` treats it as an intentional venv opt-in.
 - Alias lifecycle maintains native host shims as hard links to `multi-pwsh` during install, update, and `doctor --repair-aliases`.
-- On Windows, alias command paths are `pwsh-*.exe` host shims in `MULTI_PWSH_BIN_DIR` (default: `~/.pwsh/bin`).
+- On Windows, alias command paths are `pwsh-*.exe` host shims in the active install scope's `bin` directory. The default user scope uses `~/.pwsh/bin`, matching Linux/macOS.
 - On Linux/macOS, alias command paths (`pwsh-*`) are hard links to `multi-pwsh`.
 - `multi-pwsh doctor --repair-aliases` performs a shim health check and re-links broken hard links automatically.
 - Copying or renaming `multi-pwsh.exe` to an alias-like name such as `pwsh-7.4.exe` also enters implicit host mode.

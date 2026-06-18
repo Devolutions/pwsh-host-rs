@@ -260,31 +260,17 @@ pub fn package_layout(
     install_root: Option<PathBuf>,
 ) -> Result<InstallLayout> {
     match (os, scope, install_root) {
-        (HostOs::Windows, PackageScope::CurrentUser, None) => {
-            let root = default_install_root(os, PackageScope::CurrentUser, arch)?;
-            // Use the default layout's venvs_dir so that `multi-pwsh venv` commands and
-            // package install alias shims resolve venvs from the same directory.
-            let default_venvs_dir = InstallLayout::new(os)
-                .map(|l| l.venvs_dir())
-                .unwrap_or_else(|_| root.join("venv"));
-            InstallLayout::from_parts(
-                os,
-                root.clone(),
-                root.join("bin"),
-                root.join("cache"),
-                default_venvs_dir,
-                root,
-            )
+        (HostOs::Windows | HostOs::Macos | HostOs::Linux, PackageScope::CurrentUser, Some(root)) => {
+            InstallLayout::from_root(os, root)
         }
-        (HostOs::Windows, scope, install_root) => {
+        (HostOs::Windows | HostOs::Macos | HostOs::Linux, PackageScope::CurrentUser, None) => InstallLayout::new(os),
+        (HostOs::Windows, PackageScope::AllUsers, install_root) => {
             let root = match install_root {
                 Some(root) => root,
-                None => default_install_root(os, scope, arch)?,
+                None => default_install_root(os, PackageScope::AllUsers, arch)?,
             };
             InstallLayout::from_root_with_versions_dir(os, root.clone(), root)
         }
-        (HostOs::Macos | HostOs::Linux, PackageScope::CurrentUser, Some(root)) => InstallLayout::from_root(os, root),
-        (HostOs::Macos | HostOs::Linux, PackageScope::CurrentUser, None) => InstallLayout::new(os),
         (HostOs::Macos | HostOs::Linux, PackageScope::AllUsers, install_root) => {
             let root = match install_root {
                 Some(root) => root,
@@ -298,14 +284,13 @@ pub fn package_layout(
 
 pub fn default_install_root(os: HostOs, scope: PackageScope, arch: HostArch) -> Result<PathBuf> {
     match (os, scope) {
-        (HostOs::Windows, PackageScope::CurrentUser) => {
-            let base = env::var_os("LOCALAPPDATA").map(PathBuf::from).ok_or_else(|| {
+        (HostOs::Windows | HostOs::Macos | HostOs::Linux, PackageScope::CurrentUser) => Ok(home_dir()
+            .ok_or_else(|| {
                 MultiPwshError::InvalidArguments(
-                    "LOCALAPPDATA is not defined; unable to determine current-user package install root".to_string(),
+                    "home directory is not defined; unable to determine current-user package install root".to_string(),
                 )
-            })?;
-            Ok(base.join("PowerShell"))
-        }
+            })?
+            .join(".pwsh")),
         (HostOs::Windows, PackageScope::AllUsers) => {
             let key = if arch == HostArch::X86 {
                 "ProgramFiles(x86)"
@@ -324,13 +309,6 @@ pub fn default_install_root(os: HostOs, scope: PackageScope, arch: HostArch) -> 
                 })?;
             Ok(base.join("PowerShell"))
         }
-        (HostOs::Macos, PackageScope::CurrentUser) | (HostOs::Linux, PackageScope::CurrentUser) => Ok(home_dir()
-            .ok_or_else(|| {
-                MultiPwshError::InvalidArguments(
-                    "HOME is not defined; unable to determine current-user package install root".to_string(),
-                )
-            })?
-            .join(".pwsh")),
         (HostOs::Macos, PackageScope::AllUsers) => Ok(PathBuf::from("/usr/local/microsoft/powershell")),
         (HostOs::Linux, PackageScope::AllUsers) => Ok(PathBuf::from("/opt/microsoft/powershell")),
     }
@@ -902,10 +880,7 @@ fn remove_file_context_menu(scope: PackageScope) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_env_var<T>(key: &str, value: Option<&Path>, action: impl FnOnce() -> T) -> T {
         let previous = env::var_os(key);
@@ -1050,21 +1025,148 @@ mod tests {
     }
 
     #[test]
-    fn package_layout_windows_user_default_uses_default_venv_root() {
-        let _guard = ENV_LOCK.lock().unwrap();
+    fn package_layout_windows_user_default_uses_default_user_layout() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path().join("pwsh-home");
+        let venvs_dir = temp_dir.path().join("custom-venvs");
+
+        with_env_var("MULTI_PWSH_HOME", Some(&home), || {
+            with_env_var("MULTI_PWSH_BIN_DIR", None, || {
+                with_env_var("MULTI_PWSH_CACHE_DIR", None, || {
+                    with_env_var("MULTI_PWSH_VENV_DIR", Some(&venvs_dir), || {
+                        let layout =
+                            package_layout(HostOs::Windows, HostArch::X64, PackageScope::CurrentUser, None).unwrap();
+
+                        assert_eq!(layout.home(), home.as_path());
+                        assert_eq!(layout.bin_dir(), home.join("bin"));
+                        assert_eq!(layout.cache_dir(), home.join("cache"));
+                        assert_eq!(layout.versions_dir(), home.join("multi"));
+                        assert_eq!(layout.venvs_dir(), venvs_dir);
+                    })
+                })
+            })
+        });
+    }
+
+    #[test]
+    fn package_layout_windows_user_explicit_root_uses_user_layout_shape() {
+        let root = PathBuf::from(r"C:\Users\Me\.pwsh");
+        let layout = package_layout(
+            HostOs::Windows,
+            HostArch::X64,
+            PackageScope::CurrentUser,
+            Some(root.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(layout.home(), root.as_path());
+        assert_eq!(layout.bin_dir(), root.join("bin"));
+        assert_eq!(layout.cache_dir(), root.join("cache"));
+        assert_eq!(layout.versions_dir(), root.join("multi"));
+        assert_eq!(
+            layout.version_install_dir(&Version::parse("7.4.13").unwrap()),
+            root.join("multi").join("7.4.13")
+        );
+    }
+
+    #[test]
+    fn package_layout_windows_user_default_honors_explicit_overrides() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path().join("pwsh-home");
+        let bin_dir = temp_dir.path().join("custom-bin");
+        let cache_dir = temp_dir.path().join("custom-cache");
+        let venv_dir = temp_dir.path().join("custom-venv");
+
+        with_env_var("MULTI_PWSH_HOME", Some(&home), || {
+            with_env_var("MULTI_PWSH_BIN_DIR", Some(&bin_dir), || {
+                with_env_var("MULTI_PWSH_CACHE_DIR", Some(&cache_dir), || {
+                    with_env_var("MULTI_PWSH_VENV_DIR", Some(&venv_dir), || {
+                        let layout =
+                            package_layout(HostOs::Windows, HostArch::X64, PackageScope::CurrentUser, None).unwrap();
+
+                        assert_eq!(layout.home(), home.as_path());
+                        assert_eq!(layout.bin_dir(), bin_dir);
+                        assert_eq!(layout.cache_dir(), cache_dir);
+                        assert_eq!(layout.versions_dir(), home.join("multi"));
+                        assert_eq!(layout.venvs_dir(), venv_dir);
+                    })
+                })
+            })
+        });
+    }
+
+    #[test]
+    fn package_layout_windows_user_default_ignores_local_app_data() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let temp_dir = TempDir::new().unwrap();
         let local_app_data = temp_dir.path().join("local-app-data");
-        let default_home = temp_dir.path().join("pwsh-home");
+        let home = temp_dir.path().join("pwsh-home");
 
         with_env_var("LOCALAPPDATA", Some(&local_app_data), || {
-            with_env_var("MULTI_PWSH_HOME", Some(&default_home), || {
-                let layout = package_layout(HostOs::Windows, HostArch::X64, PackageScope::CurrentUser, None).unwrap();
+            with_env_var("MULTI_PWSH_HOME", Some(&home), || {
+                with_env_var("MULTI_PWSH_BIN_DIR", None, || {
+                    with_env_var("MULTI_PWSH_CACHE_DIR", None, || {
+                        with_env_var("MULTI_PWSH_VENV_DIR", None, || {
+                            let layout =
+                                package_layout(HostOs::Windows, HostArch::X64, PackageScope::CurrentUser, None)
+                                    .unwrap();
 
-                let expected_install_root = local_app_data.join("PowerShell");
-                assert_eq!(layout.home(), expected_install_root.as_path());
-                assert_eq!(layout.bin_dir(), expected_install_root.join("bin"));
-                assert_eq!(layout.versions_dir(), expected_install_root);
-                assert_eq!(layout.venvs_dir(), default_home.join("venv"));
+                            assert_eq!(layout.home(), home.as_path());
+                            assert_eq!(layout.bin_dir(), home.join("bin"));
+                            assert_eq!(layout.cache_dir(), home.join("cache"));
+                            assert_eq!(layout.versions_dir(), home.join("multi"));
+                        })
+                    })
+                })
+            })
+        });
+    }
+
+    #[test]
+    fn package_layout_windows_user_default_preserves_explicit_home_override() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path().join("pwsh-home");
+
+        with_env_var("MULTI_PWSH_HOME", Some(&home), || {
+            with_env_var("MULTI_PWSH_BIN_DIR", None, || {
+                with_env_var("MULTI_PWSH_CACHE_DIR", None, || {
+                    with_env_var("MULTI_PWSH_VENV_DIR", None, || {
+                        let layout =
+                            package_layout(HostOs::Windows, HostArch::X64, PackageScope::CurrentUser, None).unwrap();
+
+                        assert_eq!(layout.home(), home.as_path());
+                        assert_eq!(layout.bin_dir(), home.join("bin"));
+                        assert_eq!(layout.cache_dir(), home.join("cache"));
+                        assert_eq!(layout.venvs_dir(), home.join("venv"));
+                        assert_eq!(layout.versions_dir(), home.join("multi"));
+                    })
+                })
+            })
+        });
+    }
+
+    #[test]
+    fn package_layout_windows_user_default_uses_explicit_bin_and_cache_overrides() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path().join("pwsh-home");
+        let bin_dir = temp_dir.path().join("custom-bin");
+        let cache_dir = temp_dir.path().join("custom-cache");
+
+        with_env_var("MULTI_PWSH_HOME", Some(&home), || {
+            with_env_var("MULTI_PWSH_BIN_DIR", Some(&bin_dir), || {
+                with_env_var("MULTI_PWSH_CACHE_DIR", Some(&cache_dir), || {
+                    let layout =
+                        package_layout(HostOs::Windows, HostArch::X64, PackageScope::CurrentUser, None).unwrap();
+
+                    assert_eq!(layout.home(), home.as_path());
+                    assert_eq!(layout.bin_dir(), bin_dir);
+                    assert_eq!(layout.cache_dir(), cache_dir);
+                    assert_eq!(layout.versions_dir(), home.join("multi"));
+                })
             })
         });
     }
