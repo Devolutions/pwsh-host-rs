@@ -1052,6 +1052,7 @@ mod tests {
     #[test]
     fn package_layout_windows_user_explicit_root_uses_user_layout_shape() {
         let root = PathBuf::from(r"C:\Users\Me\.pwsh");
+        let expected = InstallLayout::from_root(HostOs::Windows, root.clone()).unwrap();
         let layout = package_layout(
             HostOs::Windows,
             HostArch::X64,
@@ -1061,12 +1062,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(layout.home(), root.as_path());
-        assert_eq!(layout.bin_dir(), root.join("bin"));
-        assert_eq!(layout.cache_dir(), root.join("cache"));
-        assert_eq!(layout.versions_dir(), root.join("multi"));
+        assert_eq!(layout.bin_dir(), expected.bin_dir());
+        assert_eq!(layout.cache_dir(), expected.cache_dir());
+        assert_eq!(layout.versions_dir(), expected.versions_dir());
         assert_eq!(
             layout.version_install_dir(&Version::parse("7.4.13").unwrap()),
-            root.join("multi").join("7.4.13")
+            expected.version_install_dir(&Version::parse("7.4.13").unwrap())
         );
     }
 
