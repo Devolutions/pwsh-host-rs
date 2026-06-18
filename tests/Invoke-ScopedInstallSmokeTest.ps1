@@ -94,12 +94,7 @@ function Invoke-PwshAlias {
 }
 
 function Get-UserScopeRoot {
-    if ($IsWindows) {
-        Join-Path $env:LOCALAPPDATA "PowerShell"
-    }
-    else {
-        Join-Path $HOME ".pwsh"
-    }
+    Join-Path $HOME ".pwsh"
 }
 
 function Get-UserScopeBin {

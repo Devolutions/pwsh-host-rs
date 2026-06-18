@@ -41,6 +41,12 @@ jobs:
         with:
           global-json-file: global.json
 
+      - name: Install PowerShell 7.4 for binding discovery
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/Install-PowerShell74ForCi.ps1
+
       - name: Install Rust toolchain
         shell: pwsh
         run: |

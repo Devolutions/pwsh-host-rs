@@ -25,6 +25,12 @@ jobs:
         with:
           global-json-file: global.json
 
+      - name: Install PowerShell 7.4 for binding discovery
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/Install-PowerShell74ForCi.ps1
+
       - name: Install Rust toolchain
         shell: pwsh
         run: |
@@ -62,6 +68,12 @@ jobs:
         with:
           global-json-file: global.json
 
+      - name: Install PowerShell 7.4 for binding discovery
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/Install-PowerShell74ForCi.ps1
+
       - name: Install Rust toolchain
         shell: pwsh
         run: |
@@ -88,9 +100,7 @@ jobs:
         run: |
           $multiPwshHome = if ($env:MULTI_PWSH_HOME) { $env:MULTI_PWSH_HOME } else { Join-Path $HOME '.pwsh' }
           $multiPwshBin = if ($env:MULTI_PWSH_BIN_DIR) { $env:MULTI_PWSH_BIN_DIR } else { Join-Path $multiPwshHome 'bin' }
-          $userAliasBin = Join-Path $env:LOCALAPPDATA 'PowerShell\bin'
           $multiPwshBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          $userAliasBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Add multi-pwsh alias bin to PATH (Unix)
         if: matrix.os != 'windows-latest'
@@ -152,11 +162,11 @@ jobs:
 
       - name: Build .NET project
         shell: pwsh
-        run: dotnet build dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj -p:PwshExePath="pwsh-7.4"
+        run: dotnet build dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj -p:PwshExePath="$env:PwshExePath"
 
       - name: Run .NET tests
         shell: pwsh
-        run: dotnet test dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj --no-build -p:PwshExePath="pwsh-7.4"
+        run: dotnet test dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj --no-build -p:PwshExePath="$env:PwshExePath"
 
   nuget-cli:
     name: NuGet CLI package smoke (Windows)
@@ -171,6 +181,12 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
+
+      - name: Install PowerShell 7.4 for binding discovery
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/Install-PowerShell74ForCi.ps1
 
       - name: Install Rust toolchain
         shell: pwsh
