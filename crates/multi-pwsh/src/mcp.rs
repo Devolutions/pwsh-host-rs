@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{LockResult, Mutex, MutexGuard};
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Implementation, JsonObject, ListToolsResult, PaginatedRequestParams,
@@ -123,11 +123,25 @@ struct ServerState {
 
 #[derive(Clone)]
 struct SharedPowerShell {
-    inner: Arc<Mutex<pwsh_host::PowerShell>>,
+    inner: Arc<PowerShellLock>,
 }
 
-unsafe impl Send for SharedPowerShell {}
-unsafe impl Sync for SharedPowerShell {}
+struct PowerShellLock(Mutex<pwsh_host::PowerShell>);
+
+// SAFETY: run_mcp_server drives the MCP host on a current-thread runtime, and
+// the mutex serializes all access across cloned handlers.
+unsafe impl Send for PowerShellLock {}
+unsafe impl Sync for PowerShellLock {}
+
+impl PowerShellLock {
+    fn new(powershell: pwsh_host::PowerShell) -> Self {
+        Self(Mutex::new(powershell))
+    }
+
+    fn lock(&self) -> LockResult<MutexGuard<'_, pwsh_host::PowerShell>> {
+        self.0.lock()
+    }
+}
 
 #[derive(Clone, Debug)]
 struct ExposedTool {
@@ -230,7 +244,7 @@ impl HostMcpServer {
 impl SharedPowerShell {
     fn new(pwsh_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
-            inner: Arc::new(Mutex::new(pwsh_host::PowerShell::new_for_pwsh_dir(pwsh_dir)?)),
+            inner: Arc::new(PowerShellLock::new(pwsh_host::PowerShell::new_for_pwsh_dir(pwsh_dir)?)),
         })
     }
 

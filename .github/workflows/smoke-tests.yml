@@ -34,12 +34,18 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install .NET SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
+
+      - name: Install PowerShell 7.4 for binding discovery
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/Install-PowerShell74ForCi.ps1
 
       - name: Install Rust toolchain
         shell: pwsh
@@ -48,10 +54,10 @@ jobs:
           rustup default stable
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2.8.2
+        uses: Swatinem/rust-cache@v2.9.1
 
       - name: Cache multi-pwsh downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ runner.temp }}/multi-pwsh-cache
           key: multi-pwsh-scope-smoke-${{ runner.os }}-${{ hashFiles('crates/multi-pwsh/Cargo.toml', '.github/workflows/smoke-tests.yml', 'tests/Invoke-ScopedInstallSmokeTest.ps1') }}
