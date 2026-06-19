@@ -52,13 +52,13 @@ Useful flags:
 
 Pester must be available in the host PowerShell session.
 
-## AppHost NuGet package smoke tests
+## CLI NuGet AppHost smoke tests
 
-Build the native NuGet packages first, then run the AppHost package smoke harness:
+Build the native NuGet package first, then run the AppHost smoke harness:
 
 ```powershell
-pwsh -NoLogo -NoProfile -File .\scripts\Build-NativeNuGetPackages.ps1 -RuntimeIdentifiers win-x64 -Packages AppHost -Clean
+pwsh -NoLogo -NoProfile -File .\scripts\Build-NativeNuGetPackages.ps1 -RuntimeIdentifiers win-x64 -Clean
 pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-AppHostNuGetPackageSmokeTest.ps1 -RuntimeIdentifier win-x64
 ```
 
-The smoke harness creates a temporary SDK-style sample project, restores `Devolutions.MultiPwsh.AppHost` from the local package source, validates build/publish output copying, and runs a renamed local apphost beside `pwsh.dll` and `pwsh.runtimeconfig.json` when a PowerShell payload is available.
+The smoke harness creates a temporary SDK-style sample project, restores `Devolutions.MultiPwsh.Cli` from the local package source, validates AppHost build/publish output copying, and runs a renamed local apphost beside `pwsh.dll` and `pwsh.runtimeconfig.json` when a PowerShell payload is available.

@@ -16,7 +16,7 @@ $readmePath = Join-Path $repoRoot 'README.md'
 $packageExamplePaths = @(
     $readmePath,
     (Join-Path $repoRoot 'docs\host-and-venv.md'),
-    (Join-Path $repoRoot 'nuget\Devolutions.MultiPwsh.AppHost\README.md')
+    (Join-Path $repoRoot 'nuget\Devolutions.MultiPwsh.Cli\README.md')
 )
 
 if (-not (Test-Path -Path $cratesRoot -PathType Container)) {
@@ -121,7 +121,7 @@ foreach ($packageExamplePath in $packageExamplePaths) {
     $content = [System.IO.File]::ReadAllText($packageExamplePath)
     $newContent = [System.Text.RegularExpressions.Regex]::Replace(
         $content,
-        '(?<prefix>PackageReference Include="Devolutions\.MultiPwsh\.AppHost" Version=")(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?<suffix>")',
+        '(?<prefix>PackageReference Include="Devolutions\.MultiPwsh\.Cli" Version=")(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?<suffix>")',
         [System.Text.RegularExpressions.MatchEvaluator] {
             param($packageMatch)
             $packageMatch.Groups['prefix'].Value + $Version + $packageMatch.Groups['suffix'].Value
@@ -160,6 +160,6 @@ if ($readmeUpdated) {
 }
 
 if ($packageExamplesUpdated.Count -gt 0) {
-    Write-Host "Updated AppHost package reference versions in:"
+    Write-Host "Updated NuGet package reference versions in:"
     $packageExamplesUpdated | ForEach-Object { Write-Host " - $_" }
 }

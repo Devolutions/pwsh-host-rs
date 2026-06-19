@@ -29,6 +29,4 @@ if (-not $forwardedParameters.ContainsKey('OutputRoot')) {
     $forwardedParameters['OutputRoot'] = Join-Path $repoRoot 'artifacts\cli-nuget'
 }
 
-$forwardedParameters['Packages'] = @('Cli')
-
 & (Join-Path $PSScriptRoot 'Build-NativeNuGetPackages.ps1') @forwardedParameters

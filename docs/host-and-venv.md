@@ -24,15 +24,15 @@ When this local payload probe succeeds, `multi-pwsh` bypasses the managed `pwsh`
 
 Hostfxr loading is app-local first. If `hostfxr` is not present beside the payload, `pwsh-host` falls back to the .NET hosting layer via `nethost`/global .NET roots, which supports framework-dependent SDK build output. Self-contained payloads still need their app-local hosting files such as `hostfxr` and `hostpolicy`.
 
-### AppHost NuGet package
+### CLI NuGet package AppHost mode
 
-`Devolutions.MultiPwsh.AppHost` is the reusable package form of local apphost replacement mode. It ships RID-specific `multi-pwsh` binaries and `buildTransitive` targets, but has no build side effects unless `MultiPwshAppHostEnabled` is set to `true`.
+`Devolutions.MultiPwsh.Cli` is the reusable package form of local apphost replacement mode. It ships RID-specific `multi-pwsh` binaries and `buildTransitive` AppHost targets; AppHost mode has no build side effects unless `MultiPwshAppHostEnabled` is set to `true`.
 
 Typical downstream vendored-SDK usage:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Devolutions.MultiPwsh.AppHost" Version="0.13.0" PrivateAssets="all" />
+  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.13.0" PrivateAssets="all" />
 </ItemGroup>
 
 <PropertyGroup>

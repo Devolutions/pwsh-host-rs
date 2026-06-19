@@ -10,8 +10,8 @@ param(
 
     [string[]]$RuntimeIdentifiers = @('win-x64', 'win-arm64', 'linux-x64', 'linux-arm64', 'osx-x64', 'osx-arm64'),
 
-    [ValidateSet('Cli', 'AppHost')]
-    [string[]]$Packages = @('Cli', 'AppHost'),
+    [ValidateSet('Cli')]
+    [string[]]$Packages = @('Cli'),
 
     [switch]$NoBuild,
 
@@ -93,16 +93,10 @@ function Resolve-PackageProject {
             @{
                 Id = 'Devolutions.MultiPwsh.Cli'
                 Project = Join-Path $repoRoot 'nuget\Devolutions.MultiPwsh.Cli\Devolutions.MultiPwsh.Cli.csproj'
-                FixedEntries = @('build/Devolutions.MultiPwsh.Cli.targets')
-            }
-        }
-        'AppHost' {
-            @{
-                Id = 'Devolutions.MultiPwsh.AppHost'
-                Project = Join-Path $repoRoot 'nuget\Devolutions.MultiPwsh.AppHost\Devolutions.MultiPwsh.AppHost.csproj'
                 FixedEntries = @(
-                    'buildTransitive/Devolutions.MultiPwsh.AppHost.props',
-                    'buildTransitive/Devolutions.MultiPwsh.AppHost.targets',
+                    'build/Devolutions.MultiPwsh.Cli.targets',
+                    'buildTransitive/Devolutions.MultiPwsh.Cli.props',
+                    'buildTransitive/Devolutions.MultiPwsh.Cli.targets',
                     'README.md'
                 )
             }
