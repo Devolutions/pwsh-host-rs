@@ -1,0 +1,7 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <MultiPwshAppHostEnabled Condition="'$(MultiPwshAppHostEnabled)' == ''">false</MultiPwshAppHostEnabled>
+    <MultiPwshAppHostCopyToOutput Condition="'$(MultiPwshAppHostCopyToOutput)' == ''">true</MultiPwshAppHostCopyToOutput>
+    <MultiPwshAppHostCopyToPublish Condition="'$(MultiPwshAppHostCopyToPublish)' == ''">true</MultiPwshAppHostCopyToPublish>
+  </PropertyGroup>
+</Project>

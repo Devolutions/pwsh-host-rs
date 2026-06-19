@@ -17,6 +17,7 @@ This matrix reflects the current command surface and known gaps for `multi-pwsh`
 | Virtual environments | `multi-pwsh venv create/delete/export/import/list` plus host `-VirtualEnvironment` / `-venv` | Provides a managed module root for hosted PowerShell launches. |
 | Doctor | `multi-pwsh doctor --repair-aliases` | Repairs host shims, alias files, and managed named alias policy resolutions. |
 | Package subcommand | `multi-pwsh package install/uninstall/list` | Advanced compatibility command for the scoped install backend; prefer top-level install, update, uninstall, and list. |
+| AppHost NuGet package | `Devolutions.MultiPwsh.AppHost` | Inert-by-default package with opt-in MSBuild targets that copy a RID-specific `multi-pwsh` binary as `multi-pwsh` or `pwsh`/`pwsh.exe` for downstream SDK outputs. |
 
 ## Version selectors and channels
 
@@ -75,6 +76,7 @@ Install, update, uninstall, and `doctor --repair-aliases` all reconcile aliases.
 | Native host launch | Yes | `multi-pwsh host` resolves selectors to installed executables and runs through `pwsh-host`. |
 | Implicit shim host mode | Yes | Alias shims detect their own name and layout, then run the matching selector. |
 | Local `pwsh` apphost replacement | Yes | Exact `pwsh`/`pwsh.exe` beside `pwsh.dll` and `pwsh.runtimeconfig.json` bypasses alias policy and hosts that adjacent payload directly. |
+| Reusable AppHost NuGet package | Yes | `Devolutions.MultiPwsh.AppHost` packages RID-specific binaries and opt-in `buildTransitive` targets for downstream apphost replacement. |
 | Virtual environment module path | Yes | Host mode sets startup-hook environment variables and bootstraps module cmdlet aliases for `-Command` and stdin `-File -` scenarios. |
 | Venv archive import/export | Yes | ZIP import rejects absolute paths and parent-directory traversal. |
 

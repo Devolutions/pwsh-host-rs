@@ -51,3 +51,14 @@ Useful flags:
 - `-ContinueOnFailure` keeps running after a failed alias.
 
 Pester must be available in the host PowerShell session.
+
+## AppHost NuGet package smoke tests
+
+Build the native NuGet packages first, then run the AppHost package smoke harness:
+
+```powershell
+pwsh -NoLogo -NoProfile -File .\scripts\Build-NativeNuGetPackages.ps1 -RuntimeIdentifiers win-x64 -Packages AppHost -Clean
+pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-AppHostNuGetPackageSmokeTest.ps1 -RuntimeIdentifier win-x64
+```
+
+The smoke harness creates a temporary SDK-style sample project, restores `Devolutions.MultiPwsh.AppHost` from the local package source, validates build/publish output copying, and runs a renamed local apphost beside `pwsh.dll` and `pwsh.runtimeconfig.json` when a PowerShell payload is available.

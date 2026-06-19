@@ -275,9 +275,27 @@ Advanced local replacement mode is also supported: if `multi-pwsh` is renamed to
 
 See [docs/host-and-venv.md](docs/host-and-venv.md) for host shims, local replacement mode, venv layout, import/export, managed paths, and current limitations.
 
+## Reusable AppHost NuGet package
+
+`Devolutions.MultiPwsh.AppHost` packages RID-specific `multi-pwsh` binaries and opt-in MSBuild targets for downstream packages that need to copy `multi-pwsh` as a replacement apphost. The package is inert by default.
+
+```xml
+<ItemGroup>
+  <PackageReference Include="Devolutions.MultiPwsh.AppHost" Version="0.13.0" PrivateAssets="all" />
+</ItemGroup>
+
+<PropertyGroup>
+  <MultiPwshAppHostEnabled>true</MultiPwshAppHostEnabled>
+  <MultiPwshAppHostOutputBaseName>pwsh</MultiPwshAppHostOutputBaseName>
+</PropertyGroup>
+```
+
+When enabled, the package resolves the RID from `MultiPwshAppHostRuntimeIdentifier`, `PowerShellSDKAppHostRuntimeIdentifier`, `RuntimeIdentifier`, then `NETCoreSdkRuntimeIdentifier`, copies the selected binary to build and publish output, and appends `.exe` for Windows RIDs. Set `MultiPwshAppHostOutputName` for a full explicit file name, or set `MultiPwshAppHostCopyToOutput` / `MultiPwshAppHostCopyToPublish` to `false` and consume `MultiPwshAppHostResolvedNativeBinary` / `@(MultiPwshAppHostNativeBinary)` from custom targets.
+
 ## Testing
 
 - Scoped install smoke tests: `pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-ScopedInstallSmokeTest.ps1`
 - Venv matrix tests: `pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-VenvTestMatrix.ps1`
+- AppHost NuGet package smoke test: `pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-AppHostNuGetPackageSmokeTest.ps1`
 
 See [docs/testing.md](docs/testing.md) for online test mode, alias-targeted runs, and troubleshooting flags.

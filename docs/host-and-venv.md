@@ -24,6 +24,25 @@ When this local payload probe succeeds, `multi-pwsh` bypasses the managed `pwsh`
 
 Hostfxr loading is app-local first. If `hostfxr` is not present beside the payload, `pwsh-host` falls back to the .NET hosting layer via `nethost`/global .NET roots, which supports framework-dependent SDK build output. Self-contained payloads still need their app-local hosting files such as `hostfxr` and `hostpolicy`.
 
+### AppHost NuGet package
+
+`Devolutions.MultiPwsh.AppHost` is the reusable package form of local apphost replacement mode. It ships RID-specific `multi-pwsh` binaries and `buildTransitive` targets, but has no build side effects unless `MultiPwshAppHostEnabled` is set to `true`.
+
+Typical downstream vendored-SDK usage:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="Devolutions.MultiPwsh.AppHost" Version="0.13.0" PrivateAssets="all" />
+</ItemGroup>
+
+<PropertyGroup>
+  <MultiPwshAppHostEnabled>true</MultiPwshAppHostEnabled>
+  <MultiPwshAppHostOutputBaseName>pwsh</MultiPwshAppHostOutputBaseName>
+</PropertyGroup>
+```
+
+The targets resolve the RID from `MultiPwshAppHostRuntimeIdentifier`, `PowerShellSDKAppHostRuntimeIdentifier`, `RuntimeIdentifier`, then `NETCoreSdkRuntimeIdentifier`. By default they copy `multi-pwsh` / `multi-pwsh.exe`; setting `MultiPwshAppHostOutputBaseName` to `pwsh` copies `pwsh` / `pwsh.exe`. Set `MultiPwshAppHostOutputName` for a full explicit file name. Downstream targets can also disable automatic copying with `MultiPwshAppHostCopyToOutput=false` and `MultiPwshAppHostCopyToPublish=false`, then consume `MultiPwshAppHostResolvedNativeBinary` or `@(MultiPwshAppHostNativeBinary)` directly.
+
 ## Virtual environments
 
 `multi-pwsh` virtual environments provide isolated PowerShell module roots for hosted launches.
