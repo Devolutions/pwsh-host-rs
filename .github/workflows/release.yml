@@ -12,6 +12,16 @@ on:
         required: false
         default: false
         type: boolean
+      publish_nuget:
+        description: Publish packages to NuGet.org
+        required: false
+        default: false
+        type: boolean
+      dry_run_nuget:
+        description: Dry-run NuGet publish (simulate push commands)
+        required: false
+        default: true
+        type: boolean
       github-env:
         description: GitHub environment for code signing secrets (auto, test, or prod).
         required: false
@@ -35,6 +45,8 @@ jobs:
       release_target: ${{ steps.validate.outputs.release_target }}
       release_version: ${{ steps.validate.outputs.release_version }}
       dry_run: ${{ steps.validate.outputs.dry_run }}
+      publish_nuget: ${{ steps.validate.outputs.publish_nuget }}
+      dry_run_nuget: ${{ steps.validate.outputs.dry_run_nuget }}
       publish_env: ${{ steps.validate.outputs.publish_env }}
 
     steps:
@@ -53,11 +65,23 @@ jobs:
           CHECKOUT_REF: ${{ github.ref }}
           SOURCE_BRANCH: ${{ github.ref_name }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
+          PUBLISH_NUGET: ${{ github.event.inputs.publish_nuget }}
+          DRY_RUN_NUGET: ${{ github.event.inputs.dry_run_nuget }}
           REQUESTED_ENVIRONMENT: ${{ inputs['github-env'] }}
         run: |
           dry_run="$(echo "${DRY_RUN}" | tr '[:upper:]' '[:lower:]')"
           if [[ "${dry_run}" != "true" && "${dry_run}" != "false" ]]; then
             dry_run="false"
+          fi
+
+          publish_nuget="$(echo "${PUBLISH_NUGET}" | tr '[:upper:]' '[:lower:]')"
+          if [[ "${publish_nuget}" != "true" && "${publish_nuget}" != "false" ]]; then
+            publish_nuget="false"
+          fi
+
+          dry_run_nuget="$(echo "${DRY_RUN_NUGET}" | tr '[:upper:]' '[:lower:]')"
+          if [[ "${dry_run_nuget}" != "true" && "${dry_run_nuget}" != "false" ]]; then
+            dry_run_nuget="true"
           fi
 
           requested_environment="$(echo "${REQUESTED_ENVIRONMENT:-auto}" | tr '[:upper:]' '[:lower:]')"
@@ -98,6 +122,10 @@ jobs:
 
           release_version="${multi_version}"
 
+          if [[ "${dry_run}" == "true" || "${SOURCE_BRANCH}" != "master" || "${publish_nuget}" != "true" ]]; then
+            dry_run_nuget="true"
+          fi
+
           if [[ "${dry_run}" != "true" ]]; then
             if [[ -z "${tag}" ]]; then
               echo "Release tag is required when dry_run is false." >&2
@@ -124,7 +152,12 @@ jobs:
           echo "release_target=${release_target}" >> "$GITHUB_OUTPUT"
           echo "release_version=${release_version}" >> "$GITHUB_OUTPUT"
           echo "dry_run=${dry_run}" >> "$GITHUB_OUTPUT"
+          echo "publish_nuget=${publish_nuget}" >> "$GITHUB_OUTPUT"
+          echo "dry_run_nuget=${dry_run_nuget}" >> "$GITHUB_OUTPUT"
           echo "publish_env=${publish_env}" >> "$GITHUB_OUTPUT"
+
+          echo "::notice::Publish NuGet: ${publish_nuget}"
+          echo "::notice::NuGet dry-run: ${dry_run_nuget}"
 
   build:
     name: Build ${{ matrix.name }}
@@ -640,4 +673,109 @@ jobs:
             $createArgs += "$env:RELEASE_TARGET"
 
             gh release create @createArgs
+          }
+
+  publish-nuget:
+    name: Publish NuGet packages
+    runs-on: ubuntu-latest
+    needs:
+      - validate
+      - publish
+    if: needs.validate.outputs.publish_nuget == 'true'
+    environment: ${{ needs.validate.outputs.publish_env }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.checkout_ref }}
+
+      - name: Resolve publish mode
+        id: publish_mode
+        shell: pwsh
+        env:
+          NUGET_BOT_USERNAME: ${{ secrets.NUGET_BOT_USERNAME }}
+        run: |
+          $dryRun = [System.Boolean]::Parse('${{ needs.validate.outputs.dry_run_nuget }}')
+          $hasLoginUser = -not [string]::IsNullOrWhiteSpace($env:NUGET_BOT_USERNAME)
+
+          "dry_run=$($dryRun.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "has_login_user=$($hasLoginUser.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          if (-not $dryRun -and -not $hasLoginUser) {
+            throw 'NUGET_BOT_USERNAME is required when dry_run_nuget is false.'
+          }
+
+          Write-Host "NuGet dry-run mode: $dryRun"
+
+      - name: Download native NuGet package artifacts
+        if: steps.publish_mode.outputs.dry_run == 'true' || steps.publish_mode.outputs.has_login_user == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: native-nuget
+          path: dist
+
+      - name: Install .NET SDK
+        if: steps.publish_mode.outputs.dry_run == 'true' || steps.publish_mode.outputs.has_login_user == 'true'
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: NuGet login (OIDC)
+        if: steps.publish_mode.outputs.dry_run != 'true' && steps.publish_mode.outputs.has_login_user == 'true'
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_BOT_USERNAME }}
+
+      - name: Publish to NuGet.org
+        if: steps.publish_mode.outputs.dry_run == 'true' || steps.publish_mode.outputs.has_login_user == 'true'
+        shell: pwsh
+        env:
+          NUGET_SOURCE: https://api.nuget.org/v3/index.json
+        run: |
+          $dryRun = [System.Boolean]::Parse('${{ steps.publish_mode.outputs.dry_run }}')
+          $apiKey = '${{ steps.nuget-login.outputs.NUGET_API_KEY }}'
+
+          if ($dryRun) {
+            $apiKey = 'dry-run-key'
+            Write-Host 'Dry Run: NuGet push commands will be printed but not executed.'
+          }
+          elseif ([string]::IsNullOrWhiteSpace($apiKey)) {
+            throw 'NuGet login did not return an API key.'
+          }
+
+          $packagePatterns = @(
+            'Devolutions.MultiPwsh.Cli.*.nupkg',
+            'Devolutions.MultiPwsh.AppHost.*.nupkg'
+          )
+
+          $packages = @()
+          foreach ($pattern in $packagePatterns) {
+            $matchingPackages = Get-ChildItem -Path dist -Recurse -File -Filter $pattern | Sort-Object Name
+            if (-not $matchingPackages) {
+              throw "Missing NuGet package artifact matching '$pattern'."
+            }
+
+            $packages += $matchingPackages
+          }
+
+          foreach ($package in $packages) {
+            $pushArgs = @(
+              'nuget', 'push', "$($package.FullName)",
+              '--api-key', "$apiKey",
+              '--source', "$env:NUGET_SOURCE",
+              '--skip-duplicate', '--no-symbols'
+            )
+
+            Write-Host "dotnet nuget push `"$($package.FullName)`" --api-key *** --source `"$env:NUGET_SOURCE`" --skip-duplicate --no-symbols"
+            if (-not $dryRun) {
+              & dotnet @pushArgs
+              if ($LASTEXITCODE -ne 0) {
+                throw "dotnet nuget push failed for $($package.Name) with exit code $LASTEXITCODE."
+              }
+            }
           }
