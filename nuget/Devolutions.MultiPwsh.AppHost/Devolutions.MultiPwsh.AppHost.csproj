@@ -29,16 +29,16 @@
       <PackagePath>runtimes\win-arm64\native\multi-pwsh.exe</PackagePath>
     </Content>
     <Content Include="$(MSBuildThisFileDirectory)..\..\artifacts\cli\multi-pwsh\linux-x64\multi-pwsh" Pack="true" Condition="Exists('$(MSBuildThisFileDirectory)..\..\artifacts\cli\multi-pwsh\linux-x64\multi-pwsh')">
-      <PackagePath>runtimes\linux-x64\native\multi-pwsh</PackagePath>
+      <PackagePath>runtimes\linux-x64\native</PackagePath>
     </Content>
     <Content Include="$(MSBuildThisFileDirectory)..\..\artifacts\cli\multi-pwsh\linux-arm64\multi-pwsh" Pack="true" Condition="Exists('$(MSBuildThisFileDirectory)..\..\artifacts\cli\multi-pwsh\linux-arm64\multi-pwsh')">
-      <PackagePath>runtimes\linux-arm64\native\multi-pwsh</PackagePath>
+      <PackagePath>runtimes\linux-arm64\native</PackagePath>
     </Content>
     <Content Include="$(MSBuildThisFileDirectory)..\..\artifacts\cli\multi-pwsh\osx-x64\multi-pwsh" Pack="true" Condition="Exists('$(MSBuildThisFileDirectory)..\..\artifacts\cli\multi-pwsh\osx-x64\multi-pwsh')">
-      <PackagePath>runtimes\osx-x64\native\multi-pwsh</PackagePath>
+      <PackagePath>runtimes\osx-x64\native</PackagePath>
     </Content>
     <Content Include="$(MSBuildThisFileDirectory)..\..\artifacts\cli\multi-pwsh\osx-arm64\multi-pwsh" Pack="true" Condition="Exists('$(MSBuildThisFileDirectory)..\..\artifacts\cli\multi-pwsh\osx-arm64\multi-pwsh')">
-      <PackagePath>runtimes\osx-arm64\native\multi-pwsh</PackagePath>
+      <PackagePath>runtimes\osx-arm64\native</PackagePath>
     </Content>
     <Content Include="Devolutions.MultiPwsh.AppHost.props" PackagePath="buildTransitive\Devolutions.MultiPwsh.AppHost.props" Pack="true" />
     <Content Include="Devolutions.MultiPwsh.AppHost.targets" PackagePath="buildTransitive\Devolutions.MultiPwsh.AppHost.targets" Pack="true" />
