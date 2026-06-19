@@ -10,7 +10,6 @@ using System.Threading;
 public static partial class StartupHook
 {
     private const string ModuleVenvPathProperty = "PSMODULE_VENV_PATH";
-    private const string LegacyForceModulePathProperty = "PWSH_STARTUP_HOOK_FORCE_PSMODULEPATH";
     private const string LogPathProperty = "PWSH_STARTUP_HOOK_LOG_PATH";
     private const string StrategyProperty = "PWSH_STARTUP_HOOK_STRATEGY";
     private const string ImportModuleCmdletHelperName = "Import-PWSHHostModule";
@@ -92,14 +91,12 @@ public static partial class StartupHook
 
     public static void Initialize()
     {
-        s_moduleVenvPath = ReadConfigurationValue(ModuleVenvPathProperty)
-            ?? ReadConfigurationValue(LegacyForceModulePathProperty);
+        s_moduleVenvPath = ReadConfigurationValue(ModuleVenvPathProperty);
         s_logPath = ReadConfigurationValue(LogPathProperty);
         s_strategy = ReadConfigurationValue(StrategyProperty);
 
         Environment.SetEnvironmentVariable("DOTNET_STARTUP_HOOKS", null);
         Environment.SetEnvironmentVariable("PSMODULE_VENV_PATH", null);
-        Environment.SetEnvironmentVariable("PWSH_STARTUP_HOOK_FORCE_PSMODULEPATH", null);
         Environment.SetEnvironmentVariable("PWSH_STARTUP_HOOK_LOG_PATH", null);
         Environment.SetEnvironmentVariable("PWSH_STARTUP_HOOK_STRATEGY", null);
 

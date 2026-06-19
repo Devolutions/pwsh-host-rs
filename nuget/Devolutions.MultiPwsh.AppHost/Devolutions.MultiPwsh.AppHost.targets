@@ -1,0 +1,88 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Target Name="ResolveMultiPwshAppHost" Condition="'$(MultiPwshAppHostEnabled)' == 'true'">
+    <PropertyGroup>
+      <_MultiPwshAppHostResolvedRuntimeIdentifier Condition="'$(MultiPwshAppHostRuntimeIdentifier)' != ''">$(MultiPwshAppHostRuntimeIdentifier)</_MultiPwshAppHostResolvedRuntimeIdentifier>
+      <_MultiPwshAppHostResolvedRuntimeIdentifier Condition="'$(_MultiPwshAppHostResolvedRuntimeIdentifier)' == '' And '$(PowerShellSDKAppHostRuntimeIdentifier)' != ''">$(PowerShellSDKAppHostRuntimeIdentifier)</_MultiPwshAppHostResolvedRuntimeIdentifier>
+      <_MultiPwshAppHostResolvedRuntimeIdentifier Condition="'$(_MultiPwshAppHostResolvedRuntimeIdentifier)' == '' And '$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</_MultiPwshAppHostResolvedRuntimeIdentifier>
+      <_MultiPwshAppHostResolvedRuntimeIdentifier Condition="'$(_MultiPwshAppHostResolvedRuntimeIdentifier)' == '' And '$(NETCoreSdkRuntimeIdentifier)' != ''">$(NETCoreSdkRuntimeIdentifier)</_MultiPwshAppHostResolvedRuntimeIdentifier>
+    </PropertyGroup>
+
+    <Error Condition="'$(_MultiPwshAppHostResolvedRuntimeIdentifier)' == ''"
+           Text="Devolutions.MultiPwsh.AppHost is enabled, but no runtime identifier could be determined. Set MultiPwshAppHostRuntimeIdentifier, PowerShellSDKAppHostRuntimeIdentifier, or RuntimeIdentifier." />
+
+    <PropertyGroup>
+      <_MultiPwshAppHostExeSuffix Condition="'$(_MultiPwshAppHostResolvedRuntimeIdentifier)' == 'win-x64' Or '$(_MultiPwshAppHostResolvedRuntimeIdentifier)' == 'win-arm64' Or '$(_MultiPwshAppHostResolvedRuntimeIdentifier)' == 'win-x86'">.exe</_MultiPwshAppHostExeSuffix>
+      <_MultiPwshAppHostExeSuffix Condition="'$(_MultiPwshAppHostExeSuffix)' == ''"></_MultiPwshAppHostExeSuffix>
+      <_MultiPwshAppHostNativeFileName>multi-pwsh$(_MultiPwshAppHostExeSuffix)</_MultiPwshAppHostNativeFileName>
+      <_MultiPwshAppHostOutputBaseName Condition="'$(MultiPwshAppHostOutputBaseName)' != ''">$(MultiPwshAppHostOutputBaseName)</_MultiPwshAppHostOutputBaseName>
+      <_MultiPwshAppHostOutputBaseName Condition="'$(_MultiPwshAppHostOutputBaseName)' == ''">multi-pwsh</_MultiPwshAppHostOutputBaseName>
+      <_MultiPwshAppHostOutputName Condition="'$(MultiPwshAppHostOutputName)' != ''">$(MultiPwshAppHostOutputName)</_MultiPwshAppHostOutputName>
+      <_MultiPwshAppHostOutputName Condition="'$(_MultiPwshAppHostOutputName)' == ''">$(_MultiPwshAppHostOutputBaseName)$(_MultiPwshAppHostExeSuffix)</_MultiPwshAppHostOutputName>
+      <MultiPwshAppHostResolvedNativeBinary>$(MSBuildThisFileDirectory)..\runtimes\$(_MultiPwshAppHostResolvedRuntimeIdentifier)\native\$(_MultiPwshAppHostNativeFileName)</MultiPwshAppHostResolvedNativeBinary>
+    </PropertyGroup>
+
+    <Error Condition="!Exists('$(MultiPwshAppHostResolvedNativeBinary)')"
+           Text="Devolutions.MultiPwsh.AppHost does not contain a native binary for runtime identifier '$(_MultiPwshAppHostResolvedRuntimeIdentifier)' at '$(MultiPwshAppHostResolvedNativeBinary)'. Supported RIDs are win-x64, win-arm64, linux-x64, linux-arm64, osx-x64, and osx-arm64." />
+
+    <ItemGroup>
+      <MultiPwshAppHostNativeBinary Include="$(MultiPwshAppHostResolvedNativeBinary)">
+        <RuntimeIdentifier>$(_MultiPwshAppHostResolvedRuntimeIdentifier)</RuntimeIdentifier>
+        <OutputName>$(_MultiPwshAppHostOutputName)</OutputName>
+      </MultiPwshAppHostNativeBinary>
+    </ItemGroup>
+  </Target>
+
+  <Target Name="CopyMultiPwshAppHostToOutput"
+          AfterTargets="CopyFilesToOutputDirectory"
+          DependsOnTargets="ResolveMultiPwshAppHost"
+          Condition="'$(MultiPwshAppHostEnabled)' == 'true' And '$(MultiPwshAppHostCopyToOutput)' == 'true'">
+    <PropertyGroup>
+      <_MultiPwshAppHostBuildDestinationDirectory Condition="'$(MultiPwshAppHostDestinationDirectory)' != ''">$(MultiPwshAppHostDestinationDirectory)</_MultiPwshAppHostBuildDestinationDirectory>
+      <_MultiPwshAppHostBuildDestinationDirectory Condition="'$(_MultiPwshAppHostBuildDestinationDirectory)' == ''">$(OutDir)</_MultiPwshAppHostBuildDestinationDirectory>
+    </PropertyGroup>
+
+    <Error Condition="'$(_MultiPwshAppHostBuildDestinationDirectory)' == ''"
+           Text="Devolutions.MultiPwsh.AppHost could not determine the build output directory. Set MultiPwshAppHostDestinationDirectory or build with a valid OutDir." />
+
+    <PropertyGroup>
+      <_MultiPwshAppHostBuildOutputPath>$([System.IO.Path]::Combine('$(_MultiPwshAppHostBuildDestinationDirectory)', '$(_MultiPwshAppHostOutputName)'))</_MultiPwshAppHostBuildOutputPath>
+    </PropertyGroup>
+
+    <MakeDir Directories="$(_MultiPwshAppHostBuildDestinationDirectory)" />
+    <Copy SourceFiles="$(MultiPwshAppHostResolvedNativeBinary)"
+          DestinationFiles="$(_MultiPwshAppHostBuildOutputPath)"
+          SkipUnchangedFiles="true" />
+    <Exec Command="chmod +x &quot;$(_MultiPwshAppHostBuildOutputPath)&quot;"
+          Condition="'$(OS)' != 'Windows_NT' And '$(_MultiPwshAppHostExeSuffix)' == ''" />
+    <ItemGroup>
+      <FileWrites Include="$(_MultiPwshAppHostBuildOutputPath)" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="CopyMultiPwshAppHostToPublish"
+          AfterTargets="Publish"
+          DependsOnTargets="ResolveMultiPwshAppHost"
+          Condition="'$(MultiPwshAppHostEnabled)' == 'true' And '$(MultiPwshAppHostCopyToPublish)' == 'true'">
+    <PropertyGroup>
+      <_MultiPwshAppHostPublishDestinationDirectory Condition="'$(MultiPwshAppHostPublishDestinationDirectory)' != ''">$(MultiPwshAppHostPublishDestinationDirectory)</_MultiPwshAppHostPublishDestinationDirectory>
+      <_MultiPwshAppHostPublishDestinationDirectory Condition="'$(_MultiPwshAppHostPublishDestinationDirectory)' == ''">$(PublishDir)</_MultiPwshAppHostPublishDestinationDirectory>
+    </PropertyGroup>
+
+    <Error Condition="'$(_MultiPwshAppHostPublishDestinationDirectory)' == ''"
+           Text="Devolutions.MultiPwsh.AppHost could not determine the publish output directory. Set MultiPwshAppHostPublishDestinationDirectory or publish with a valid PublishDir." />
+
+    <PropertyGroup>
+      <_MultiPwshAppHostPublishOutputPath>$([System.IO.Path]::Combine('$(_MultiPwshAppHostPublishDestinationDirectory)', '$(_MultiPwshAppHostOutputName)'))</_MultiPwshAppHostPublishOutputPath>
+    </PropertyGroup>
+
+    <MakeDir Directories="$(_MultiPwshAppHostPublishDestinationDirectory)" />
+    <Copy SourceFiles="$(MultiPwshAppHostResolvedNativeBinary)"
+          DestinationFiles="$(_MultiPwshAppHostPublishOutputPath)"
+          SkipUnchangedFiles="true" />
+    <Exec Command="chmod +x &quot;$(_MultiPwshAppHostPublishOutputPath)&quot;"
+          Condition="'$(OS)' != 'Windows_NT' And '$(_MultiPwshAppHostExeSuffix)' == ''" />
+    <ItemGroup>
+      <FileWrites Include="$(_MultiPwshAppHostPublishOutputPath)" />
+    </ItemGroup>
+  </Target>
+</Project>

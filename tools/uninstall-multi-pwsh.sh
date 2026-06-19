@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-install_home="${MULTI_PWSH_HOME:-${HOME}/.pwsh}"
-bin_dir="${MULTI_PWSH_BIN_DIR:-${install_home}/bin}"
+path_env_or_default() {
+  local name="$1"
+  local default_value="$2"
+  local value="${!name:-}"
+  if [[ -n "${value//[[:space:]]/}" ]]; then
+    printf '%s' "${value}"
+  else
+    printf '%s' "${default_value}"
+  fi
+}
+
+install_home="$(path_env_or_default MULTI_PWSH_HOME "${HOME}/.pwsh")"
+bin_dir="$(path_env_or_default MULTI_PWSH_BIN_DIR "${install_home}/bin")"
 binary_path="${bin_dir}/multi-pwsh"
 
 remove_profile_entries() {

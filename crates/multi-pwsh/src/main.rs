@@ -28,7 +28,7 @@ use aliases::{
 };
 use error::{MultiPwshError, Result};
 use install::{copy_asset_to_path, ensure_installed, validate_archive_checksum, ChecksumSource};
-use layout::InstallLayout;
+use layout::{path_env_var, InstallLayout};
 use package::{
     load_package_metadata, package_layout, persist_installed_version_registration, persist_installer_properties,
     reconcile_shared_integrations, remove_installed_version_registration, run_install_time_actions,
@@ -47,7 +47,6 @@ use versions::{
 const POWERSHELL_UPDATECHECK_ENV_VAR: &str = "POWERSHELL_UPDATECHECK";
 const POWERSHELL_UPDATECHECK_OFF: &str = "Off";
 const MULTI_PWSH_OFFLINE_CACHE_ENV_VAR: &str = "MULTI_PWSH_OFFLINE_CACHE";
-const MULTI_PWSH_RELEASE_SOURCE_ENV_VAR: &str = "MULTI_PWSH_RELEASE_SOURCE";
 const VIRTUAL_ENVIRONMENT_FLAG: &str = "-virtualenvironment";
 const VIRTUAL_ENVIRONMENT_SHORT_FLAG: &str = "-venv";
 
@@ -63,12 +62,11 @@ const HELP_TOPICS: &[&str] = &[
     "host",
     "doctor",
     "cache",
-    "package",
     "version",
 ];
 
 fn usage_text() -> &'static str {
-    "Usage:\n  multi-pwsh --version\n  multi-pwsh -V\n  multi-pwsh --help\n  multi-pwsh help [command]\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease] [--offline-cache <path>]\n  multi-pwsh package install <selector> [options]\n  multi-pwsh package uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh package list [--scope <user|machine>] [--root <path>]\n  multi-pwsh cache warm <selector> [--os <windows|linux|macos|all>] [--arch <x64|x86|arm64|arm32|all>] [--include-prerelease] [--output <path>] [--product <powershell|multi-pwsh|all>]\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh doctor --repair-aliases\n\nCommands:\n  install, update, uninstall, list, package, cache, venv, alias, host, doctor, version"
+    "Usage:\n  multi-pwsh --version\n  multi-pwsh -V\n  multi-pwsh --help\n  multi-pwsh help [command]\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease] [--offline-cache <path>]\n  multi-pwsh cache warm <selector> [--os <windows|linux|macos|all>] [--arch <x64|x86|arm64|arm32|all>] [--include-prerelease] [--output <path>] [--product <powershell|multi-pwsh|all>]\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh doctor --repair-aliases\n\nCommands:\n  install, update, uninstall, list, cache, venv, alias, host, doctor, version"
 }
 
 fn print_usage() {
@@ -90,32 +88,34 @@ fn is_help_flag(value: &str) -> bool {
 fn help_topic_text(topic: &str) -> Option<&'static str> {
     match topic {
         "install" => Some(
-            "Usage:\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --arch <auto|x64|x86|arm64|arm32>\n  --include-prerelease\n  --offline-cache <path>\n  --add-path | --no-add-path\n  --register-manifest | --no-register-manifest\n  --enable-psremoting\n  --disable-telemetry\n  --add-explorer-context-menu\n  --add-file-context-menu\n  --skip-hash-verification\n  --hash-file <url-or-path>",
+            "Usage:\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --arch <auto|x64|x86|arm64|arm32>\n  --include-prerelease\n  --offline-cache <path>\n  --add-path | --no-add-path\n  --register-manifest | --no-register-manifest\n  --enable-psremoting\n  --disable-telemetry\n  --add-explorer-context-menu\n  --add-file-context-menu\n  --skip-hash-verification\n  --hash-file <url-or-path>\n\nNotes:\n  User scope is the default when --scope is omitted.\n  MULTI_PWSH_* path env vars affect only the default user layout.\n  Machine scope uses platform defaults unless --root overrides the install root.\n  --root requires --scope <user|machine> and does not mix in MULTI_PWSH_* child-dir overrides.\n  On Windows, --add-path updates persistent User/Machine PATH; machine scope may require elevation for install roots, registry integrations, and Machine PATH updates.\n  On macOS/Linux, --add-path is unsupported, --no-add-path is a no-op, and shell/profile PATH updates are manual.",
         ),
         "update" => Some(
-            "Usage:\n  multi-pwsh update <stable|preview|lts|major.minor> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --arch <auto|x64|x86|arm64|arm32>\n  --include-prerelease\n  --offline-cache <path>\n  --add-path | --no-add-path\n  --register-manifest | --no-register-manifest\n  --enable-psremoting\n  --disable-telemetry\n  --add-explorer-context-menu\n  --add-file-context-menu\n  --skip-hash-verification\n  --hash-file <url-or-path>",
+            "Usage:\n  multi-pwsh update <stable|preview|lts|major.minor> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --arch <auto|x64|x86|arm64|arm32>\n  --include-prerelease\n  --offline-cache <path>\n  --add-path | --no-add-path\n  --register-manifest | --no-register-manifest\n  --enable-psremoting\n  --disable-telemetry\n  --add-explorer-context-menu\n  --add-file-context-menu\n  --skip-hash-verification\n  --hash-file <url-or-path>\n\nNotes:\n  User scope is the default when --scope is omitted.\n  MULTI_PWSH_* path env vars affect only the default user layout.\n  Machine scope uses platform defaults unless --root overrides the install root.\n  --root requires --scope <user|machine> and does not mix in MULTI_PWSH_* child-dir overrides.\n  On Windows, --add-path updates persistent User/Machine PATH; machine scope may require elevation for install roots, registry integrations, and Machine PATH updates.\n  On macOS/Linux, --add-path is unsupported, --no-add-path is a no-op, and shell/profile PATH updates are manual.",
         ),
         "uninstall" => Some(
-            "Usage:\n  multi-pwsh uninstall <version> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --force",
+            "Usage:\n  multi-pwsh uninstall <version> [options]\n\nOptions:\n  --scope <user|machine>\n  --root <path>\n  --force\n\nNotes:\n  User scope is the default when --scope is omitted.\n  --root requires --scope <user|machine>.",
         ),
         "list" => Some(
-            "Usage:\n  multi-pwsh list [options]\n\nOptions:\n  --scope <user|machine|all>\n  --root <path>\n  --available\n  --include-prerelease\n  --offline-cache <path>",
+            "Usage:\n  multi-pwsh list [options]\n\nOptions:\n  --scope <user|machine|all>\n  --root <path>\n  --available\n  --include-prerelease\n  --offline-cache <path>\n\nNotes:\n  User scope is the default when --scope is omitted.\n  --root requires --scope <user|machine>.\n  Installed listings include prerelease versions; --include-prerelease only changes --available listings.",
         ),
         "venv" => Some(
-            "Usage:\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list",
+            "Usage:\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list\n\nNotes:\n  Virtual environments live in the default user layout.",
         ),
         "alias" => Some(
-            "Usage:\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>",
+            "Usage:\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n\nNotes:\n  Direct alias commands operate on the default user layout; machine-scope aliases are normally entered through generated machine-scope shims.",
         ),
         "host" => Some(
-            "Usage:\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh host <version|major|major.minor|pwsh-alias> -mcp -McpCommands <command> [command ...] [-VirtualEnvironment <name>|-venv <name>]",
+            "Usage:\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh host <version|major|major.minor|pwsh-alias> -mcp -McpCommands <command> [command ...] [-VirtualEnvironment <name>|-venv <name>]\n\nNotes:\n  Direct host commands resolve against the default user layout; generated machine-scope shims carry their own layout hints.",
         ),
-        "doctor" => Some("Usage:\n  multi-pwsh doctor --repair-aliases"),
+        "doctor" => Some(
+            "Usage:\n  multi-pwsh doctor --repair-aliases\n\nNotes:\n  Direct doctor commands repair the default user layout; generated machine-scope shims carry their own layout hints.",
+        ),
         "cache" => Some(
-            "Usage:\n  multi-pwsh cache warm <selector> [options]\n\nOptions:\n  --os <windows|linux|macos|all>\n  --arch <x64|x86|arm64|arm32|all>\n  --include-prerelease\n  --output <path>\n  --product <powershell|multi-pwsh|all>",
+            "Usage:\n  multi-pwsh cache warm <selector> [options]\n\nOptions:\n  --os <windows|linux|macos|all>\n  --arch <x64|x86|arm64|arm32|all>\n  --include-prerelease\n  --output <path>\n  --product <powershell|multi-pwsh|all>\n\nNotes:\n  If --output is omitted, cache warm writes to MULTI_PWSH_CACHE_DIR or the default user cache directory.",
         ),
         "package" => Some(
-            "Usage:\n  multi-pwsh package install <selector> [options]\n  multi-pwsh package uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh package list [--scope <user|machine>] [--root <path>]",
+            "Usage:\n  multi-pwsh package install <stable|preview|lts|version|major|major.minor|major.minor.x> [options]\n  multi-pwsh package uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh package list [--scope <user|machine>] [--root <path>]\n\nAdvanced compatibility command; prefer the top-level install, update, uninstall, and list commands.\n\nNotes:\n  MULTI_PWSH_* path env vars affect only the default user layout.\n  Machine scope uses platform defaults unless --root overrides the install root.\n  --root requires --scope <user|machine>.",
         ),
         "version" => Some("Usage:\n  multi-pwsh --version\n  multi-pwsh -V\n  multi-pwsh version"),
         _ => None,
@@ -148,6 +148,7 @@ fn run_help(args: &[String]) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 struct ReleaseSelectionOptions {
     arch: Option<HostArch>,
     include_prerelease: bool,
@@ -178,8 +179,8 @@ enum WindowsListScope {
 impl WindowsListScope {
     fn parse(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().as_str() {
-            "currentuser" | "current-user" | "user" => Some(WindowsListScope::CurrentUser),
-            "allusers" | "all-users" | "machine" | "system" => Some(WindowsListScope::AllUsers),
+            "user" => Some(WindowsListScope::CurrentUser),
+            "machine" => Some(WindowsListScope::AllUsers),
             "all" => Some(WindowsListScope::All),
             _ => None,
         }
@@ -858,11 +859,13 @@ fn import_virtual_environment_from_archive(venv_dir: &Path, archive_path: &Path)
     Ok(())
 }
 
-fn run_host_mode_with_layout(layout: InstallLayout, selector_input: &str, pwsh_args: Vec<OsString>) -> Result<i32> {
+fn run_known_host_executable(
+    executable: &Path,
+    layout: Option<&InstallLayout>,
+    selector_input: &str,
+    pwsh_args: Vec<OsString>,
+) -> Result<i32> {
     let os = HostOs::detect()?;
-    layout.ensure_base_dirs()?;
-
-    let (_version, executable) = resolve_host_executable(&layout, selector_input)?;
     let HostDispatchOptions { launch, mcp } = preprocess_host_args(pwsh_args)?;
     let HostLaunchOptions {
         pwsh_args,
@@ -872,7 +875,12 @@ fn run_host_mode_with_layout(layout: InstallLayout, selector_input: &str, pwsh_a
 
     let _virtual_environment_guards = virtual_environment
         .as_deref()
-        .map(|name| resolve_virtual_environment_dir(&layout, name))
+        .map(|name| {
+            let layout = layout.ok_or_else(|| {
+                MultiPwshError::InvalidArguments("-VirtualEnvironment requires a multi-pwsh layout".to_string())
+            })?;
+            resolve_virtual_environment_dir(layout, name)
+        })
         .transpose()?
         .map(|venv_dir| configure_virtual_environment_host_env(os, &venv_dir))
         .transpose()?;
@@ -885,7 +893,7 @@ fn run_host_mode_with_layout(layout: InstallLayout, selector_input: &str, pwsh_a
             ));
         }
 
-        return mcp::run_stdio_mcp_server(&executable, &mcp.commands).map_err(|error| {
+        return mcp::run_stdio_mcp_server(executable, &mcp.commands).map_err(|error| {
             MultiPwshError::Host(format!(
                 "failed to start MCP host for selector '{}': {}",
                 selector_input, error
@@ -899,12 +907,19 @@ fn run_host_mode_with_layout(layout: InstallLayout, selector_input: &str, pwsh_a
         (pwsh_args, None)
     };
 
-    pwsh_host::run_pwsh_command_line_for_pwsh_exe(&executable, pwsh_args).map_err(|error| {
+    pwsh_host::run_pwsh_command_line_for_pwsh_exe(executable, pwsh_args).map_err(|error| {
         MultiPwshError::Host(format!(
             "failed to start native host for selector '{}': {}",
             selector_input, error
         ))
     })
+}
+
+fn run_host_mode_with_layout(layout: InstallLayout, selector_input: &str, pwsh_args: Vec<OsString>) -> Result<i32> {
+    layout.ensure_base_dirs()?;
+
+    let (_version, executable) = resolve_host_executable(&layout, selector_input)?;
+    run_known_host_executable(&executable, Some(&layout), selector_input, pwsh_args)
 }
 
 fn run_host_mode(selector_input: &str, pwsh_args: Vec<OsString>) -> Result<i32> {
@@ -961,6 +976,24 @@ fn detect_implicit_host_selector(bin_dir: &Path, executable_path: &Path) -> Opti
     Some(selector)
 }
 
+fn is_exact_pwsh_executable_name(executable_path: &Path) -> bool {
+    executable_selector_name(executable_path)
+        .map(|selector| selector.eq_ignore_ascii_case("pwsh"))
+        .unwrap_or(false)
+}
+
+fn is_local_pwsh_apphost(executable_path: &Path) -> bool {
+    if !is_exact_pwsh_executable_name(executable_path) {
+        return false;
+    }
+
+    let Some(executable_dir) = executable_path.parent() else {
+        return false;
+    };
+
+    executable_dir.join("pwsh.dll").is_file() && executable_dir.join("pwsh.runtimeconfig.json").is_file()
+}
+
 fn infer_layout_from_host_shim(os: HostOs, executable_path: &Path) -> Option<InstallLayout> {
     let selector = executable_selector_name(executable_path)?;
     if selector.eq_ignore_ascii_case("multi-pwsh") || !is_supported_alias_command(&selector) {
@@ -997,6 +1030,14 @@ fn infer_layout_from_host_shim(os: HostOs, executable_path: &Path) -> Option<Ins
 fn run_implicit_host_mode_if_needed() -> Result<Option<i32>> {
     let executable_path = env::current_exe()?;
 
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
+    if is_local_pwsh_apphost(&executable_path) {
+        let os = HostOs::detect()?;
+        let venv_layout = default_current_user_layout(os)?;
+        let exit_code = run_known_host_executable(&executable_path, Some(&venv_layout), "local pwsh apphost", args)?;
+        return Ok(Some(exit_code));
+    }
+
     let selector_name = match executable_selector_name(&executable_path) {
         Some(selector_name) => selector_name,
         None => return Ok(None),
@@ -1011,7 +1052,6 @@ fn run_implicit_host_mode_if_needed() -> Result<Option<i32>> {
     };
     let selector = selector_name;
 
-    let args: Vec<OsString> = env::args_os().skip(1).collect();
     let exit_code = run_host_mode_with_layout(layout, &selector, args)?;
     Ok(Some(exit_code))
 }
@@ -1206,28 +1246,17 @@ fn parse_update_selector(value: &str) -> Result<VersionSelector> {
         "stable" => Ok(VersionSelector::Stable),
         "preview" => Ok(VersionSelector::Preview),
         "lts" => Ok(VersionSelector::Lts),
-        _ => parse_major_minor_selector(value).map(VersionSelector::MajorMinor),
+        _ => parse_major_minor_selector(value).map(VersionSelector::MajorMinor).map_err(|_| {
+            MultiPwshError::InvalidArguments(format!(
+                "update accepts stable, preview, lts, or a major.minor selector; use `multi-pwsh install {}` for exact versions, major selectors, or wildcard selectors",
+                value
+            ))
+        }),
     }
 }
 
 fn offline_cache_from_env() -> Option<PathBuf> {
-    if let Some(path) = env::var_os(MULTI_PWSH_OFFLINE_CACHE_ENV_VAR) {
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-
-    let value = env::var_os(MULTI_PWSH_RELEASE_SOURCE_ENV_VAR)?;
-    if value.is_empty() {
-        return None;
-    }
-
-    let text = value.to_string_lossy();
-    if text.eq_ignore_ascii_case("github") || text.eq_ignore_ascii_case("online") {
-        return None;
-    }
-
-    Some(PathBuf::from(value))
+    path_env_var(MULTI_PWSH_OFFLINE_CACHE_ENV_VAR)
 }
 
 fn effective_offline_cache(cli_value: Option<PathBuf>) -> Option<PathBuf> {
@@ -1602,13 +1631,11 @@ fn run_cache_warm(selector_input: &str, options: CacheWarmOptions) -> Result<()>
     let selector = parse_install_selector(selector_input)?;
     let os = HostOs::detect().unwrap_or(HostOs::Windows);
     let output_root = options.output.unwrap_or_else(|| {
-        env::var_os("MULTI_PWSH_CACHE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                default_current_user_layout(os)
-                    .map(|layout| layout.cache_dir())
-                    .unwrap_or_else(|_| PathBuf::from("."))
-            })
+        path_env_var("MULTI_PWSH_CACHE_DIR").unwrap_or_else(|| {
+            default_current_user_layout(os)
+                .map(|layout| layout.cache_dir())
+                .unwrap_or_else(|_| PathBuf::from("."))
+        })
     });
     fs::create_dir_all(&output_root)?;
 
@@ -1931,6 +1958,7 @@ fn run_alias(args: &[String]) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 fn parse_release_selection_options(args: &[String]) -> Result<ReleaseSelectionOptions> {
     let mut arch = None;
     let mut arch_specified = false;
@@ -2113,15 +2141,33 @@ fn parse_package_layout_options(args: &[String]) -> Result<PackageLayoutOptions>
         }
     }
 
+    if root.is_some() && !scope_specified {
+        return Err(MultiPwshError::InvalidArguments(
+            "--root requires --scope <user|machine>".to_string(),
+        ));
+    }
+
     Ok(PackageLayoutOptions { scope, root })
 }
 
 fn parse_package_install_options(args: &[String]) -> Result<InstallCommandOptions> {
     let os = HostOs::detect()?;
+    parse_package_install_options_for_os(args, os)
+}
+
+fn parse_package_install_options_for_os(args: &[String], os: HostOs) -> Result<InstallCommandOptions> {
     let mut options = PackageInstallOptions::with_platform_defaults(PackageScope::CurrentUser, os);
     let mut scope_specified = false;
     let mut root_specified = false;
     let mut arch_specified = false;
+    let mut add_path_specified = false;
+    let mut register_manifest_specified = false;
+    let mut enable_psremoting_specified = false;
+    let mut disable_telemetry_specified = false;
+    let mut add_explorer_context_menu_specified = false;
+    let mut add_file_context_menu_specified = false;
+    let mut use_mu_specified = false;
+    let mut enable_mu_specified = false;
     let mut checksum_source = ChecksumSource::ReleaseAsset;
     let mut checksum_source_specified = false;
     let mut offline_cache = None;
@@ -2160,13 +2206,35 @@ fn parse_package_install_options(args: &[String]) -> Result<InstallCommandOption
                         args[index + 1]
                     ))
                 })?;
-                let arch = options.arch;
-                let include_prerelease = options.include_prerelease;
-                let install_root = options.install_root.clone();
+                let previous = options.clone();
                 options = PackageInstallOptions::with_platform_defaults(scope, os);
-                options.arch = arch;
-                options.include_prerelease = include_prerelease;
-                options.install_root = install_root;
+                options.arch = previous.arch;
+                options.include_prerelease = previous.include_prerelease;
+                options.install_root = previous.install_root;
+                if add_path_specified {
+                    options.add_path = previous.add_path;
+                }
+                if register_manifest_specified {
+                    options.register_manifest = previous.register_manifest;
+                }
+                if enable_psremoting_specified {
+                    options.enable_psremoting = previous.enable_psremoting;
+                }
+                if disable_telemetry_specified {
+                    options.disable_telemetry = previous.disable_telemetry;
+                }
+                if add_explorer_context_menu_specified {
+                    options.add_explorer_context_menu = previous.add_explorer_context_menu;
+                }
+                if add_file_context_menu_specified {
+                    options.add_file_context_menu = previous.add_file_context_menu;
+                }
+                if use_mu_specified {
+                    options.use_mu = previous.use_mu;
+                }
+                if enable_mu_specified {
+                    options.enable_mu = previous.enable_mu;
+                }
                 scope_specified = true;
                 index += 2;
             }
@@ -2218,51 +2286,69 @@ fn parse_package_install_options(args: &[String]) -> Result<InstallCommandOption
                 index += 1;
             }
             "--add-path" => {
+                if os != HostOs::Windows {
+                    return Err(MultiPwshError::InvalidArguments(
+                        "--add-path is supported only on Windows; add the alias bin directory to PATH manually on macOS/Linux"
+                            .to_string(),
+                    ));
+                }
                 options.add_path = true;
+                add_path_specified = true;
                 index += 1;
             }
             "--no-add-path" => {
                 options.add_path = false;
+                add_path_specified = true;
                 index += 1;
             }
             "--register-manifest" => {
                 options.register_manifest = true;
+                register_manifest_specified = true;
                 index += 1;
             }
             "--no-register-manifest" => {
                 options.register_manifest = false;
+                register_manifest_specified = true;
                 index += 1;
             }
             "--enable-psremoting" => {
                 options.enable_psremoting = true;
+                enable_psremoting_specified = true;
                 index += 1;
             }
             "--disable-telemetry" => {
                 options.disable_telemetry = true;
+                disable_telemetry_specified = true;
                 index += 1;
             }
             "--add-explorer-context-menu" => {
                 options.add_explorer_context_menu = true;
+                add_explorer_context_menu_specified = true;
                 index += 1;
             }
             "--add-file-context-menu" => {
                 options.add_file_context_menu = true;
+                add_file_context_menu_specified = true;
                 index += 1;
             }
             "--use-mu" => {
                 options.use_mu = true;
+                use_mu_specified = true;
                 index += 1;
             }
             "--no-use-mu" => {
                 options.use_mu = false;
+                use_mu_specified = true;
                 index += 1;
             }
             "--enable-mu" => {
                 options.enable_mu = true;
+                enable_mu_specified = true;
                 index += 1;
             }
             "--no-enable-mu" => {
                 options.enable_mu = false;
+                enable_mu_specified = true;
                 index += 1;
             }
             _ => {
@@ -2274,33 +2360,17 @@ fn parse_package_install_options(args: &[String]) -> Result<InstallCommandOption
         }
     }
 
+    if root_specified && !scope_specified {
+        return Err(MultiPwshError::InvalidArguments(
+            "--root requires --scope <user|machine> for install and update".to_string(),
+        ));
+    }
+
     options.validate(os)?;
     Ok(InstallCommandOptions {
         package: options,
         checksum_source,
         offline_cache,
-    })
-}
-
-fn requires_scoped_install_backend(args: &[String]) -> bool {
-    args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "--scope"
-                | "--root"
-                | "--add-path"
-                | "--no-add-path"
-                | "--register-manifest"
-                | "--no-register-manifest"
-                | "--enable-psremoting"
-                | "--disable-telemetry"
-                | "--add-explorer-context-menu"
-                | "--add-file-context-menu"
-                | "--use-mu"
-                | "--no-use-mu"
-                | "--enable-mu"
-                | "--no-enable-mu"
-        )
     })
 }
 
@@ -2361,6 +2431,12 @@ fn parse_package_uninstall_options(args: &[String]) -> Result<(PackageLayoutOpti
                 ));
             }
         }
+    }
+
+    if root.is_some() && !scope_specified {
+        return Err(MultiPwshError::InvalidArguments(
+            "--root requires --scope <user|machine>".to_string(),
+        ));
     }
 
     Ok((PackageLayoutOptions { scope, root }, force))
@@ -2512,7 +2588,24 @@ fn run_package_install(selector_input: &str, install_options: InstallCommandOpti
     refresh_special_aliases(&layout, os)?;
 
     println!("Alias bin: {}", layout.bin_dir().display());
-    println!("Add to PATH once for this scope: {}", layout.bin_dir().display());
+    match os {
+        HostOs::Windows if options.add_path => {
+            println!(
+                "PATH entry updated for scope {}: {}",
+                options.scope.display_name(),
+                layout.bin_dir().display()
+            );
+        }
+        HostOs::Windows => {
+            println!(
+                "PATH update skipped; add manually if needed: {}",
+                layout.bin_dir().display()
+            );
+        }
+        HostOs::Linux | HostOs::Macos => {
+            println!("Add to PATH manually for this scope: {}", layout.bin_dir().display());
+        }
+    }
 
     Ok(())
 }
@@ -2578,15 +2671,13 @@ fn run_package_list(layout_options: PackageLayoutOptions) -> Result<()> {
         println!("  - {}", record.version);
         println!("    path: {}", record.record.install_dir);
         println!(
-            "    options: add_path={}, register_manifest={}, enable_psremoting={}, disable_telemetry={}, add_explorer_context_menu={}, add_file_context_menu={}, use_mu={}, enable_mu={}",
+            "    options: add_path={}, register_manifest={}, enable_psremoting={}, disable_telemetry={}, add_explorer_context_menu={}, add_file_context_menu={}",
             record.record.add_path,
             record.record.register_manifest,
             record.record.enable_psremoting,
             record.record.disable_telemetry,
             record.record.add_explorer_context_menu,
-            record.record.add_file_context_menu,
-            record.record.use_mu,
-            record.record.enable_mu
+            record.record.add_file_context_menu
         );
     }
 
@@ -2595,67 +2686,43 @@ fn run_package_list(layout_options: PackageLayoutOptions) -> Result<()> {
     Ok(())
 }
 
-fn package_scope_has_version(scope: PackageScope, version: &Version) -> Result<bool> {
-    let os = HostOs::detect()?;
-    let arch = HostArch::detect();
-    let layout = package_layout(os, arch, scope, None)?;
-    let metadata = load_package_metadata(&layout)?;
-    let in_metadata = metadata
-        .resolved_records()?
-        .into_iter()
-        .any(|record| record.version == *version);
-    Ok(in_metadata || layout.version_executable(version).exists())
-}
-
-fn resolve_scoped_uninstall_scope(
-    current_user_installed: bool,
-    all_users_installed: bool,
-) -> Result<Option<PackageScope>> {
-    match (current_user_installed, all_users_installed) {
-        (true, true) => Err(MultiPwshError::InvalidArguments(
-            "the requested version is installed in both user and machine scopes; rerun with --scope <user|machine>"
-                .to_string(),
-        )),
-        (true, false) => Ok(Some(PackageScope::CurrentUser)),
-        (false, true) => Ok(Some(PackageScope::AllUsers)),
-        (false, false) => Ok(None),
+fn package_version_present(layout: &InstallLayout, version: &Version) -> Result<bool> {
+    if layout.version_dir(version).exists() {
+        return Ok(true);
     }
+
+    let metadata = load_package_metadata(layout)?;
+    Ok(metadata
+        .resolved_records()?
+        .iter()
+        .any(|record| record.version == *version))
 }
 
 fn run_scoped_uninstall(version_input: &str, options: WindowsUninstallOptions) -> Result<()> {
-    let version = parse_exact_version(version_input)?;
-    let os = HostOs::detect()?;
-
     if options.root.is_some() && options.scope.is_none() {
         return Err(MultiPwshError::InvalidArguments(
             "--root requires --scope <user|machine> for uninstall".to_string(),
         ));
     }
 
-    let Some(scope) = (match options.scope {
-        Some(scope) => Some(scope),
-        None => resolve_scoped_uninstall_scope(
-            package_scope_has_version(PackageScope::CurrentUser, &version)?,
-            package_scope_has_version(PackageScope::AllUsers, &version)?,
-        )?,
-    }) else {
-        if options.force {
-            println!(
-                "PowerShell {} is not installed in user or machine scopes; continuing because --force was provided",
-                version
-            );
-            return Ok(());
+    if options.scope.is_none() && options.root.is_none() {
+        let version = parse_exact_version(version_input)?;
+        let os = HostOs::detect()?;
+        let arch = HostArch::detect();
+        let user_layout = package_layout(os, arch, PackageScope::CurrentUser, None)?;
+
+        if !package_version_present(&user_layout, &version)? {
+            let machine_layout = package_layout(os, arch, PackageScope::AllUsers, None)?;
+            if package_version_present(&machine_layout, &version)? {
+                return Err(MultiPwshError::InvalidArguments(format!(
+                    "version {} is not installed in scope user but is installed in scope machine; rerun with --scope machine to uninstall it",
+                    version
+                )));
+            }
         }
-
-        return Err(MultiPwshError::InvalidArguments(format!(
-            "version {} is not installed in user or machine scopes (use --force to ignore)",
-            version
-        )));
-    };
-
-    if os != HostOs::Windows && scope == PackageScope::CurrentUser && options.root.is_none() {
-        return run_uninstall(version_input, options.force);
     }
+
+    let scope = options.scope.unwrap_or(PackageScope::CurrentUser);
 
     run_package_uninstall(
         version_input,
@@ -2665,34 +2732,6 @@ fn run_scoped_uninstall(version_input: &str, options: WindowsUninstallOptions) -
         },
         options.force,
     )
-}
-
-fn run_current_user_list(os: HostOs, root: Option<PathBuf>) -> Result<()> {
-    let layout = match root {
-        Some(root) => package_layout(os, HostArch::detect(), PackageScope::CurrentUser, Some(root))?,
-        None => InstallLayout::new(os)?,
-    };
-    let versions = layout.installed_versions()?;
-
-    println!("Home: {}", layout.home().display());
-    println!("Alias bin: {}", layout.bin_dir().display());
-    println!("Versions dir: {}", layout.versions_dir().display());
-    println!("Venv dir: {}", layout.venvs_dir().display());
-    println!("Cache dir: {}", layout.cache_dir().display());
-    println!();
-
-    if versions.is_empty() {
-        println!("Installed versions: (none)");
-    } else {
-        println!("Installed versions:");
-        for version in versions {
-            println!("  - {}", version);
-        }
-    }
-
-    print_alias_metadata(&layout)?;
-
-    Ok(())
 }
 
 fn format_special_alias_policy_line(alias_name: &str, policy_text: &str, aliases: &HashMap<String, String>) -> String {
@@ -2746,30 +2785,25 @@ fn print_alias_metadata(layout: &InstallLayout) -> Result<()> {
     Ok(())
 }
 
-fn run_scoped_list_scope(os: HostOs, scope: PackageScope, root: Option<PathBuf>) -> Result<()> {
-    if os != HostOs::Windows && scope == PackageScope::CurrentUser {
-        return run_current_user_list(os, root);
-    }
-
+fn run_scoped_list_scope(scope: PackageScope, root: Option<PathBuf>) -> Result<()> {
     run_package_list(PackageLayoutOptions { scope, root })
 }
 
 fn run_scoped_list(scope: Option<WindowsListScope>, root: Option<PathBuf>) -> Result<()> {
-    let os = HostOs::detect()?;
-
-    match scope.unwrap_or(WindowsListScope::CurrentUser) {
-        WindowsListScope::CurrentUser => run_scoped_list_scope(os, PackageScope::CurrentUser, root),
-        WindowsListScope::AllUsers => run_scoped_list_scope(os, PackageScope::AllUsers, root),
-        WindowsListScope::All => {
+    match scope {
+        None => run_scoped_list_scope(PackageScope::CurrentUser, root),
+        Some(WindowsListScope::CurrentUser) => run_scoped_list_scope(PackageScope::CurrentUser, root),
+        Some(WindowsListScope::AllUsers) => run_scoped_list_scope(PackageScope::AllUsers, root),
+        Some(WindowsListScope::All) => {
             if root.is_some() {
                 return Err(MultiPwshError::InvalidArguments(
                     "--root cannot be used with --scope all".to_string(),
                 ));
             }
 
-            run_scoped_list_scope(os, PackageScope::CurrentUser, None)?;
+            run_scoped_list_scope(PackageScope::CurrentUser, None)?;
             println!();
-            run_scoped_list_scope(os, PackageScope::AllUsers, None)
+            run_scoped_list_scope(PackageScope::AllUsers, None)
         }
     }
 }
@@ -2785,7 +2819,7 @@ fn run_package(args: &[String]) -> Result<()> {
         "install" => {
             if args.len() < 2 {
                 return Err(MultiPwshError::InvalidArguments(
-                    "package install requires <version|major|major.minor|major.minor.x>".to_string(),
+                    "package install requires <stable|preview|lts|version|major|major.minor|major.minor.x>".to_string(),
                 ));
             }
 
@@ -2810,137 +2844,6 @@ fn run_package(args: &[String]) -> Result<()> {
             "package requires: install <selector>, uninstall <version>, or list".to_string(),
         )),
     }
-}
-
-fn run_install(
-    selector_input: &str,
-    arch: Option<HostArch>,
-    include_prerelease: bool,
-    checksum_source: ChecksumSource,
-    offline_cache: Option<PathBuf>,
-) -> Result<()> {
-    let selector = parse_install_selector(selector_input)?;
-    let os = HostOs::detect()?;
-    let arch = arch.unwrap_or_else(HostArch::detect);
-
-    let layout = InstallLayout::new(os)?;
-    layout.ensure_base_dirs()?;
-
-    let release_resolver = ReleaseResolver::new(offline_cache)?;
-    let releases = match selector.clone() {
-        VersionSelector::MajorMinorWildcard(line) => {
-            release_resolver.resolve_all_in_line(line, os, arch, include_prerelease)?
-        }
-        _ => vec![release_resolver.resolve_selector(selector.clone(), os, arch, include_prerelease)?],
-    };
-
-    let mut touched_lines: Vec<MajorMinor> = Vec::new();
-    let mut touched_majors: Vec<u64> = Vec::new();
-
-    for release in releases {
-        let executable_path =
-            ensure_installed(&layout, release_resolver.http_client(), os, &release, &checksum_source)?;
-        let patch_alias = create_or_update_patch_alias(&layout, os, &release.version, &executable_path)?;
-        let version_path = executable_path.parent().unwrap_or_else(|| Path::new(""));
-
-        println!("Installed PowerShell {}", release.version);
-        println!("Version path: {}", version_path.display());
-        println!("Updated patch alias: {}", patch_alias.display());
-
-        let line = release.version_line();
-        if !touched_lines.contains(&line) {
-            touched_lines.push(line);
-        }
-        if !touched_majors.contains(&release.version.major) {
-            touched_majors.push(release.version.major);
-        }
-    }
-
-    touched_lines.sort();
-    touched_majors.sort();
-
-    for line in touched_lines {
-        let pinned = read_minor_pin(&layout, line)?;
-        let alias_path = sync_minor_alias(&layout, os, line)?;
-        match alias_path {
-            Some(path) => println!("Updated alias: {}", path.display()),
-            None if pinned.is_some() => {
-                println!(
-                    "Alias pwsh-{}.{} remains pinned but unresolved (target is not installed)",
-                    line.major, line.minor
-                );
-            }
-            None => {}
-        }
-    }
-
-    for major in touched_majors {
-        let major_alias_path = latest_installed_in_major(&layout, major)?
-            .map(|version| {
-                let target = layout.version_executable(&version);
-                create_or_update_major_alias(&layout, os, version.major, &version, &target)
-            })
-            .transpose()?;
-
-        if let Some(path) = major_alias_path {
-            println!("Updated major alias: {}", path.display());
-        }
-    }
-
-    ensure_default_special_policy(&layout, &selector)?;
-    refresh_special_aliases(&layout, os)?;
-
-    println!("Add to PATH once: {}", layout.bin_dir().display());
-
-    Ok(())
-}
-
-fn run_update(
-    line_input: &str,
-    arch: Option<HostArch>,
-    include_prerelease: bool,
-    checksum_source: ChecksumSource,
-    offline_cache: Option<PathBuf>,
-) -> Result<()> {
-    let line = parse_major_minor_selector(line_input)?;
-    let os = HostOs::detect()?;
-    let arch = arch.unwrap_or_else(HostArch::detect);
-
-    let layout = InstallLayout::new(os)?;
-    layout.ensure_base_dirs()?;
-
-    let release_resolver = ReleaseResolver::new(offline_cache)?;
-    let release = release_resolver.resolve_selector(VersionSelector::MajorMinor(line), os, arch, include_prerelease)?;
-    let executable_path = ensure_installed(&layout, release_resolver.http_client(), os, &release, &checksum_source)?;
-    let patch_alias_path = create_or_update_patch_alias(&layout, os, &release.version, &executable_path)?;
-    let version_path = executable_path.parent().unwrap_or_else(|| Path::new(""));
-
-    let alias_path = sync_minor_alias(&layout, os, line)?;
-    let major_alias_path = latest_installed_in_major(&layout, release.version.major)?
-        .map(|version| {
-            let target = layout.version_executable(&version);
-            create_or_update_major_alias(&layout, os, version.major, &version, &target)
-        })
-        .transpose()?;
-
-    println!("Updated line {} to {}", line, release.version);
-    println!("Version path: {}", version_path.display());
-    println!("Updated patch alias: {}", patch_alias_path.display());
-    if let Some(path) = alias_path {
-        println!("Updated alias: {}", path.display());
-    } else if read_minor_pin(&layout, line)?.is_some() {
-        println!(
-            "Alias pwsh-{}.{} remains pinned but unresolved (target is not installed)",
-            line.major, line.minor
-        );
-    }
-    if let Some(path) = major_alias_path {
-        println!("Updated major alias: {}", path.display());
-    }
-    refresh_special_aliases(&layout, os)?;
-    println!("Add to PATH once: {}", layout.bin_dir().display());
-
-    Ok(())
 }
 
 fn cleanup_aliases_for_removed_version(layout: &InstallLayout, os: HostOs, version: &Version) -> Result<()> {
@@ -3114,12 +3017,6 @@ fn parse_list_option(args: &[String]) -> Result<ListOption> {
         }
     }
 
-    if include_prerelease && !available {
-        return Err(MultiPwshError::InvalidArguments(
-            "--include-prerelease requires --available".to_string(),
-        ));
-    }
-
     if available {
         if scope.is_some() || root.is_some() {
             return Err(MultiPwshError::InvalidArguments(
@@ -3139,30 +3036,6 @@ fn parse_list_option(args: &[String]) -> Result<ListOption> {
     }
 
     Ok(ListOption::Installed { scope, root })
-}
-
-fn run_uninstall(version_input: &str, force: bool) -> Result<()> {
-    let version = parse_exact_version(version_input)?;
-    let os = HostOs::detect()?;
-
-    let layout = InstallLayout::new(os)?;
-    layout.ensure_base_dirs()?;
-
-    if layout.remove_version_dirs(&version)? {
-        println!("Removed PowerShell {}", version);
-    } else if force {
-        println!(
-            "PowerShell {} is not installed; continuing because --force was provided",
-            version
-        );
-    } else {
-        return Err(MultiPwshError::InvalidArguments(format!(
-            "version {} is not installed (use --force to ignore)",
-            version
-        )));
-    }
-
-    cleanup_aliases_for_removed_version(&layout, os, &version)
 }
 
 fn run_list(option: ListOption) -> Result<()> {
@@ -3343,8 +3216,6 @@ fn run() -> Result<()> {
         return print_help_topic(&args[0]);
     }
 
-    let os = HostOs::detect()?;
-
     match args[0].as_str() {
         "install" => {
             if args.len() < 2 {
@@ -3352,19 +3223,9 @@ fn run() -> Result<()> {
                     "install requires <stable|preview|lts|version|major|major.minor|major.minor.x>".to_string(),
                 ));
             }
-            if os == HostOs::Windows || requires_scoped_install_backend(&args[2..]) {
-                let options = parse_package_install_options(&args[2..])?;
-                run_package_install(&args[1], options)
-            } else {
-                let options = parse_release_selection_options(&args[2..])?;
-                run_install(
-                    &args[1],
-                    options.arch,
-                    options.include_prerelease,
-                    options.checksum_source,
-                    options.offline_cache,
-                )
-            }
+
+            let options = parse_package_install_options(&args[2..])?;
+            run_package_install(&args[1], options)
         }
         "update" => {
             if args.len() < 2 {
@@ -3372,30 +3233,9 @@ fn run() -> Result<()> {
                     "update requires <major.minor|stable|preview|lts>".to_string(),
                 ));
             }
-            let update_selector = parse_update_selector(&args[1])?;
-
-            if os == HostOs::Windows || requires_scoped_install_backend(&args[2..]) {
-                let options = parse_package_install_options(&args[2..])?;
-                run_package_install(&args[1], options)
-            } else if matches!(update_selector, VersionSelector::MajorMinor(_)) {
-                let options = parse_release_selection_options(&args[2..])?;
-                run_update(
-                    &args[1],
-                    options.arch,
-                    options.include_prerelease,
-                    options.checksum_source,
-                    options.offline_cache,
-                )
-            } else {
-                let options = parse_release_selection_options(&args[2..])?;
-                run_install(
-                    &args[1],
-                    options.arch,
-                    options.include_prerelease,
-                    options.checksum_source,
-                    options.offline_cache,
-                )
-            }
+            parse_update_selector(&args[1])?;
+            let options = parse_package_install_options(&args[2..])?;
+            run_package_install(&args[1], options)
         }
         "uninstall" => {
             if args.len() < 2 {
@@ -3420,7 +3260,7 @@ fn run() -> Result<()> {
         }
         "doctor" => run_doctor(&args[1..]),
         command => Err(MultiPwshError::InvalidArguments(format!(
-            "unknown command '{}'. expected: install, update, uninstall, list, cache, venv, alias, host, doctor, package, version",
+            "unknown command '{}'. expected: install, update, uninstall, list, cache, venv, alias, host, doctor, version",
             command
         ))),
     }
@@ -3466,6 +3306,29 @@ mod tests {
     }
 
     fn with_env_vars<T>(values: &[(&str, Option<&Path>)], action: impl FnOnce() -> T) -> T {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let previous: Vec<_> = values.iter().map(|(key, _)| (*key, env::var_os(key))).collect();
+
+        for (key, value) in values {
+            match value {
+                Some(value) => unsafe { env::set_var(*key, value) },
+                None => unsafe { env::remove_var(*key) },
+            }
+        }
+
+        let result = action();
+
+        for (key, value) in previous {
+            match value {
+                Some(value) => unsafe { env::set_var(key, value) },
+                None => unsafe { env::remove_var(key) },
+            }
+        }
+
+        result
+    }
+
+    fn with_env_var_texts<T>(values: &[(&str, Option<&str>)], action: impl FnOnce() -> T) -> T {
         let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let previous: Vec<_> = values.iter().map(|(key, _)| (*key, env::var_os(key))).collect();
 
@@ -3623,9 +3486,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_list_option_rejects_prerelease_without_available() {
+    fn parse_list_option_accepts_prerelease_for_installed_listing() {
         let args = vec!["--include-prerelease".to_string()];
-        assert!(parse_list_option(&args).is_err());
+        assert!(matches!(
+            parse_list_option(&args).unwrap(),
+            ListOption::Installed {
+                scope: None,
+                root: None
+            }
+        ));
     }
 
     #[test]
@@ -3638,6 +3507,14 @@ mod tests {
                 root: None
             }
         ));
+    }
+
+    #[test]
+    fn parse_list_option_rejects_scope_aliases() {
+        for alias in ["current-user", "all-users", "system"] {
+            let args = vec!["--scope".to_string(), alias.to_string()];
+            assert!(parse_list_option(&args).is_err(), "expected {} to be rejected", alias);
+        }
     }
 
     #[test]
@@ -3678,6 +3555,177 @@ mod tests {
     }
 
     #[test]
+    fn parse_package_install_options_rejects_scope_aliases() {
+        for alias in ["current-user", "all-users", "system"] {
+            let args = vec!["--scope".to_string(), alias.to_string()];
+            assert!(
+                parse_package_install_options_for_os(&args, HostOs::Windows).is_err(),
+                "expected {} to be rejected",
+                alias
+            );
+        }
+    }
+
+    #[test]
+    fn parse_package_install_options_rejects_add_path_on_unix() {
+        let args = vec!["--add-path".to_string()];
+        let error = parse_package_install_options_for_os(&args, HostOs::Linux).unwrap_err();
+        assert!(error.to_string().contains("supported only on Windows"));
+    }
+
+    #[test]
+    fn parse_package_install_options_accepts_no_add_path_on_unix() {
+        let args = vec!["--no-add-path".to_string()];
+        let options = parse_package_install_options_for_os(&args, HostOs::Linux).unwrap();
+
+        assert!(!options.package.add_path);
+    }
+
+    #[test]
+    fn parse_package_install_options_requires_scope_with_root() {
+        let args = vec!["--root".to_string(), "C:\\PowerShell".to_string()];
+        let error = parse_package_install_options_for_os(&args, HostOs::Windows).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("--root requires --scope <user|machine> for install and update"));
+
+        let args = vec![
+            "--scope".to_string(),
+            "user".to_string(),
+            "--root".to_string(),
+            "C:\\PowerShell".to_string(),
+        ];
+        assert!(parse_package_install_options_for_os(&args, HostOs::Windows).is_ok());
+    }
+
+    #[test]
+    fn parse_package_install_options_preserves_flags_before_scope() {
+        let args = vec![
+            "--no-add-path".to_string(),
+            "--disable-telemetry".to_string(),
+            "--scope".to_string(),
+            "machine".to_string(),
+        ];
+        let options = parse_package_install_options_for_os(&args, HostOs::Windows).unwrap();
+
+        assert_eq!(options.package.scope, PackageScope::AllUsers);
+        assert!(!options.package.add_path);
+        assert!(options.package.disable_telemetry);
+        assert!(options.package.register_manifest);
+    }
+
+    #[test]
+    fn parse_package_install_options_applies_scope_defaults_when_flags_are_not_specified() {
+        let args = vec!["--scope".to_string(), "machine".to_string()];
+        let options = parse_package_install_options_for_os(&args, HostOs::Windows).unwrap();
+
+        assert!(options.package.add_path);
+        assert!(options.package.register_manifest);
+    }
+
+    #[test]
+    fn parse_package_layout_options_requires_scope_with_root() {
+        let args = vec!["--root".to_string(), "C:\\PowerShell".to_string()];
+        let error = parse_package_layout_options(&args).unwrap_err();
+        assert!(error.to_string().contains("--root requires --scope <user|machine>"));
+
+        let args = vec![
+            "--scope".to_string(),
+            "machine".to_string(),
+            "--root".to_string(),
+            "C:\\PowerShell".to_string(),
+        ];
+        assert!(parse_package_layout_options(&args).is_ok());
+    }
+
+    #[test]
+    fn parse_package_uninstall_options_requires_scope_with_root() {
+        let args = vec!["--root".to_string(), "C:\\PowerShell".to_string()];
+        let error = parse_package_uninstall_options(&args).unwrap_err();
+        assert!(error.to_string().contains("--root requires --scope <user|machine>"));
+
+        let args = vec![
+            "--scope".to_string(),
+            "machine".to_string(),
+            "--root".to_string(),
+            "C:\\PowerShell".to_string(),
+        ];
+        assert!(parse_package_uninstall_options(&args).is_ok());
+    }
+
+    #[test]
+    fn parse_package_install_options_defaults_add_path_by_platform() {
+        let args: Vec<String> = Vec::new();
+
+        assert!(
+            parse_package_install_options_for_os(&args, HostOs::Windows)
+                .unwrap()
+                .package
+                .add_path
+        );
+        assert!(
+            !parse_package_install_options_for_os(&args, HostOs::Linux)
+                .unwrap()
+                .package
+                .add_path
+        );
+    }
+
+    #[test]
+    fn parse_update_selector_reports_actionable_error_for_exact_versions() {
+        let error = parse_update_selector("7.4.13").unwrap_err();
+        assert!(error.to_string().contains("update accepts stable, preview, lts"));
+        assert!(error.to_string().contains("multi-pwsh install 7.4.13"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn default_uninstall_reports_machine_scope_when_user_scope_is_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let user_home = temp_dir.path().join("user-home");
+        let program_files = temp_dir.path().join("program-files");
+        let machine_version_dir = program_files.join("PowerShell").join("7.4.13");
+        fs::create_dir_all(&machine_version_dir).unwrap();
+
+        with_env_vars(
+            &[
+                ("MULTI_PWSH_HOME", Some(user_home.as_path())),
+                ("ProgramFiles", Some(program_files.as_path())),
+                ("ProgramFiles(x86)", None),
+            ],
+            || {
+                let error = run_scoped_uninstall(
+                    "7.4.13",
+                    WindowsUninstallOptions {
+                        scope: None,
+                        root: None,
+                        force: false,
+                    },
+                )
+                .unwrap_err();
+                let message = error.to_string();
+                assert!(message.contains("not installed in scope user"));
+                assert!(message.contains("installed in scope machine"));
+                assert!(message.contains("--scope machine"));
+            },
+        );
+    }
+
+    #[test]
+    fn offline_cache_from_env_ignores_empty_and_whitespace_values() {
+        with_env_var_texts(&[(MULTI_PWSH_OFFLINE_CACHE_ENV_VAR, Some(" \t "))], || {
+            assert_eq!(offline_cache_from_env(), None);
+        });
+    }
+
+    #[test]
+    fn offline_cache_from_env_reads_offline_cache_value() {
+        with_env_var_texts(&[(MULTI_PWSH_OFFLINE_CACHE_ENV_VAR, Some("C:\\offline-cache"))], || {
+            assert_eq!(offline_cache_from_env(), Some(PathBuf::from("C:\\offline-cache")));
+        });
+    }
+
+    #[test]
     fn parse_cache_warm_options_accepts_cross_platform_all_products() {
         let args = vec![
             "--os".to_string(),
@@ -3697,24 +3745,6 @@ mod tests {
         assert_eq!(options.output, Some(PathBuf::from("C:\\cache")));
         assert!(options.os_wildcard);
         assert!(options.arch_wildcard);
-    }
-
-    #[test]
-    fn resolve_scoped_uninstall_scope_prefers_unambiguous_scope() {
-        assert_eq!(
-            resolve_scoped_uninstall_scope(true, false).unwrap(),
-            Some(PackageScope::CurrentUser)
-        );
-        assert_eq!(
-            resolve_scoped_uninstall_scope(false, true).unwrap(),
-            Some(PackageScope::AllUsers)
-        );
-        assert_eq!(resolve_scoped_uninstall_scope(false, false).unwrap(), None);
-    }
-
-    #[test]
-    fn resolve_scoped_uninstall_scope_rejects_ambiguous_version() {
-        assert!(resolve_scoped_uninstall_scope(true, true).is_err());
     }
 
     #[test]
@@ -3844,6 +3874,55 @@ mod tests {
 
         let selector = detect_implicit_host_selector(&bin_dir, &PathBuf::from("C:/Users/test/other/pwsh-7.4.exe"));
         assert!(selector.is_none());
+    }
+
+    #[test]
+    fn is_local_pwsh_apphost_accepts_exact_pwsh_with_adjacent_sdk_payload() {
+        let temp_dir = TempDir::new().unwrap();
+        let executable_path = temp_dir.path().join("pwsh.exe");
+        fs::write(&executable_path, "").unwrap();
+        fs::write(temp_dir.path().join("pwsh.dll"), "").unwrap();
+        fs::write(temp_dir.path().join("pwsh.runtimeconfig.json"), "{}").unwrap();
+
+        assert!(is_local_pwsh_apphost(&executable_path));
+    }
+
+    #[test]
+    fn is_local_pwsh_apphost_accepts_exact_pwsh_without_optional_payload_signals() {
+        let temp_dir = TempDir::new().unwrap();
+        let executable_path = temp_dir.path().join("pwsh");
+        fs::write(&executable_path, "").unwrap();
+        fs::write(temp_dir.path().join("pwsh.dll"), "").unwrap();
+        fs::write(temp_dir.path().join("pwsh.runtimeconfig.json"), "{}").unwrap();
+
+        assert!(is_local_pwsh_apphost(&executable_path));
+    }
+
+    #[test]
+    fn is_local_pwsh_apphost_rejects_alias_name_with_adjacent_payload() {
+        let temp_dir = TempDir::new().unwrap();
+        let executable_path = temp_dir.path().join("pwsh-preview.exe");
+        fs::write(&executable_path, "").unwrap();
+        fs::write(temp_dir.path().join("pwsh.dll"), "").unwrap();
+        fs::write(temp_dir.path().join("pwsh.runtimeconfig.json"), "{}").unwrap();
+
+        assert!(!is_local_pwsh_apphost(&executable_path));
+    }
+
+    #[test]
+    fn is_local_pwsh_apphost_rejects_missing_required_payload_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let executable_path = temp_dir.path().join("pwsh.exe");
+        fs::write(&executable_path, "").unwrap();
+
+        assert!(!is_local_pwsh_apphost(&executable_path));
+
+        fs::write(temp_dir.path().join("pwsh.dll"), "").unwrap();
+        assert!(!is_local_pwsh_apphost(&executable_path));
+
+        fs::remove_file(temp_dir.path().join("pwsh.dll")).unwrap();
+        fs::write(temp_dir.path().join("pwsh.runtimeconfig.json"), "{}").unwrap();
+        assert!(!is_local_pwsh_apphost(&executable_path));
     }
 
     #[test]

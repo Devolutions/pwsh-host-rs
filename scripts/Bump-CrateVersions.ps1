@@ -13,6 +13,11 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $cratesRoot = Join-Path $repoRoot 'crates'
 $readmePath = Join-Path $repoRoot 'README.md'
+$packageExamplePaths = @(
+    $readmePath,
+    (Join-Path $repoRoot 'docs\host-and-venv.md'),
+    (Join-Path $repoRoot 'nuget\Devolutions.MultiPwsh.AppHost\README.md')
+)
 
 if (-not (Test-Path -Path $cratesRoot -PathType Container)) {
     throw "Crates directory not found: $cratesRoot"
@@ -29,6 +34,7 @@ if (-not $cargoFiles) {
 $encoding = New-Object System.Text.UTF8Encoding($false)
 $updated = @()
 $readmeUpdated = $false
+$packageExamplesUpdated = @()
 
 foreach ($cargoFile in $cargoFiles) {
     $content = [System.IO.File]::ReadAllText($cargoFile)
@@ -80,6 +86,7 @@ if (Test-Path -Path $readmePath -PathType Leaf) {
     $newReadmeContent = $readmeContent
     $readmePatterns = @(
         '(?m)(?<prefix>Install a specific tag \(example `v)(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?<suffix>`\):)',
+        '(?m)(?<prefix>releases/download/v)(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?<suffix>/install-multi-pwsh\.(?:sh|ps1))',
         '(?m)(?<prefix>bash -s -- v)(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)',
         '(?m)(?<prefix>-Version v)(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)'
     )
@@ -106,7 +113,33 @@ if (Test-Path -Path $readmePath -PathType Leaf) {
     }
 }
 
-if ($updated.Count -eq 0 -and -not $readmeUpdated) {
+foreach ($packageExamplePath in $packageExamplePaths) {
+    if (-not (Test-Path -Path $packageExamplePath -PathType Leaf)) {
+        continue
+    }
+
+    $content = [System.IO.File]::ReadAllText($packageExamplePath)
+    $newContent = [System.Text.RegularExpressions.Regex]::Replace(
+        $content,
+        '(?<prefix>PackageReference Include="Devolutions\.MultiPwsh\.AppHost" Version=")(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?<suffix>")',
+        [System.Text.RegularExpressions.MatchEvaluator] {
+            param($packageMatch)
+            $packageMatch.Groups['prefix'].Value + $Version + $packageMatch.Groups['suffix'].Value
+        },
+        [System.Text.RegularExpressions.RegexOptions]::None,
+        [System.TimeSpan]::FromSeconds(5)
+    )
+
+    if ($newContent -ne $content) {
+        if (-not $DryRun) {
+            [System.IO.File]::WriteAllText($packageExamplePath, $newContent, $encoding)
+        }
+
+        $packageExamplesUpdated += $packageExamplePath
+    }
+}
+
+if ($updated.Count -eq 0 -and -not $readmeUpdated -and $packageExamplesUpdated.Count -eq 0) {
     Write-Host "All crate package versions are already $Version"
     if (Test-Path -Path $readmePath -PathType Leaf) {
         Write-Host "No README release example tag needed updating"
@@ -124,4 +157,9 @@ if ($updated.Count -gt 0) {
 
 if ($readmeUpdated) {
     Write-Host "Updated README release example tag in: $readmePath"
+}
+
+if ($packageExamplesUpdated.Count -gt 0) {
+    Write-Host "Updated AppHost package reference versions in:"
+    $packageExamplesUpdated | ForEach-Object { Write-Host " - $_" }
 }

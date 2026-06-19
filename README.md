@@ -16,14 +16,14 @@ curl -fsSL https://github.com/Devolutions/multi-pwsh/releases/latest/download/in
 irm https://github.com/Devolutions/multi-pwsh/releases/latest/download/install-multi-pwsh.ps1 | iex
 ```
 
-Install a specific tag (example `v0.11.0`):
+Install a specific tag (example `v0.13.0`):
 
 ```bash
-curl -fsSL https://github.com/Devolutions/multi-pwsh/releases/download/v0.11.0/install-multi-pwsh.sh | bash -s -- v0.11.0
+curl -fsSL https://github.com/Devolutions/multi-pwsh/releases/download/v0.13.0/install-multi-pwsh.sh | bash -s -- v0.13.0
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/Devolutions/multi-pwsh/releases/download/v0.11.0/install-multi-pwsh.ps1))) -Version v0.11.0
+& ([scriptblock]::Create((irm https://github.com/Devolutions/multi-pwsh/releases/download/v0.13.0/install-multi-pwsh.ps1))) -Version v0.13.0
 ```
 
 Uninstall bootstrap scripts:
@@ -58,7 +58,7 @@ pwsh-7.4 --version
 
 GitHub remains the default source, but you can prefetch release artifacts on a connected machine and use them from a disconnected machine.
 
-On a connected machine, warm an offline bundle into the same directory shape used by the download cache:
+On a connected machine, warm an offline release bundle:
 
 ```powershell
 multi-pwsh cache warm stable --os windows --arch x64 --output \\fileserver\multi-pwsh-cache
@@ -74,7 +74,9 @@ multi-pwsh install stable
 multi-pwsh update 7.4
 ```
 
-You can also pass `--offline-cache <path>` to `install`, `update`, `package install`, and `list --available`. Offline mode uses only the local manifest/artifacts and fails instead of falling back to GitHub when something is missing.
+You can also pass `--offline-cache <path>` to `install`, `update`, and `list --available`. Offline mode uses only the local manifest/artifacts and fails instead of falling back to GitHub when something is missing.
+
+`MULTI_PWSH_OFFLINE_CACHE` selects a warmed offline release bundle. `MULTI_PWSH_CACHE_DIR` is separate: it is the user-scope archive/download cache and the default output location for `cache warm` when `--output` is omitted. Empty or whitespace-only path environment variable values are treated as unset.
 
 Disconnected bootstrap uses the same bundle:
 
@@ -105,6 +107,10 @@ That means:
 - aliases continue to live in one stable bin directory
 - PATH only needs one entry per scope
 - `user` is the default scope when `--scope` is omitted
+- machine installs and removals require explicit `--scope machine`
+- `MULTI_PWSH_*` path environment variables affect only the default `user` layout
+- `machine` scope uses fixed platform machine paths and does not read `MULTI_PWSH_*` path overrides
+- `--root` is an explicit install-root override, requires `--scope <user|machine>`, and does not mix in `MULTI_PWSH_*` child-directory overrides
 
 Platform behavior:
 
@@ -113,7 +119,10 @@ Platform behavior:
 - Windows `machine` installs default to `%ProgramFiles%\PowerShell` with aliases in `%ProgramFiles%\PowerShell\bin`.
 - macOS `machine` installs use the official `.tar.gz` archives under `/usr/local/microsoft/powershell` with aliases published to `/usr/local/bin`.
 - Linux `machine` installs use the official `.tar.gz` archives under `/opt/microsoft/powershell` with aliases published to `/usr/local/bin`.
+- Windows `machine` installs may require elevation for `%ProgramFiles%`, registry integrations, and Machine `PATH` updates; use `--no-add-path` if you want to skip the PATH update.
 - Unix `machine` installs expect you to provide elevation yourself; `multi-pwsh` does not invoke `sudo`.
+- On Windows, `--add-path` / `--no-add-path` controls persistent User or Machine `PATH` updates. On macOS/Linux, `--add-path` is unsupported, `--no-add-path` is accepted as a no-op, and shell/profile PATH updates are manual.
+- New scoped installs are metadata-backed. Older non-Windows filesystem-only installs that predate scoped metadata may need to be reinstalled or migrated before scoped `list` / `uninstall` can manage them.
 
 Examples:
 
@@ -147,7 +156,8 @@ On macOS and Linux, scoped installs support:
 - `--root <path>`
 - `--arch <auto|x64|x86|arm64|arm32>`
 - `--include-prerelease`
-- `--add-path` / `--no-add-path`
+- `--no-add-path` as a cross-platform no-op
+- shell/profile `PATH` updates are manual on Unix; `--add-path` is Windows-only
 
 The Windows-only integration flags above currently return an error on macOS/Linux.
 
@@ -229,7 +239,9 @@ multi-pwsh doctor --repair-aliases
 
 Use `multi-pwsh <command> --help` or `multi-pwsh help <command>` for focused command usage, for example `multi-pwsh install --help`.
 
-The Windows integration flags in the `install` and `update` forms are limited to archive-friendly behaviors; on macOS/Linux, use `--scope`, `--root`, `--arch`, `--include-prerelease`, and `--add-path` controls. Legacy scope aliases such as `current-user` and `all-users` are still accepted for compatibility.
+The Windows integration flags in the `install` and `update` forms are limited to archive-friendly behaviors; on macOS/Linux, use `--scope`, `--root`, `--arch`, `--include-prerelease`, `--no-add-path`, and manual PATH management for the printed alias bin directory. Whenever `--root` is used with install, update, list, or uninstall, pass `--scope <user|machine>` as well.
+
+`multi-pwsh package ...` remains available as an advanced compatibility command for the scoped install backend, but the top-level commands above are the primary interface.
 
 ## Selector behavior
 
@@ -259,11 +271,31 @@ The current LTS line is encoded in the tool; at the moment that is `7.6`.
 - Use `-venv <name>` or `-VirtualEnvironment <name>` to select a managed module root for hosted launches.
 - Use `multi-pwsh doctor --repair-aliases` to repair host shims and named aliases.
 
-See [docs/host-and-venv.md](docs/host-and-venv.md) for host shims, venv layout, import/export, managed paths, and current limitations.
+Advanced local replacement mode is also supported: if `multi-pwsh` is renamed to `pwsh`/`pwsh.exe` and placed beside `pwsh.dll` plus `pwsh.runtimeconfig.json`, it runs that adjacent payload directly from the executable directory instead of resolving the managed `pwsh` alias or searching `PATH`.
+
+See [docs/host-and-venv.md](docs/host-and-venv.md) for host shims, local replacement mode, venv layout, import/export, managed paths, and current limitations.
+
+## Reusable AppHost NuGet package
+
+`Devolutions.MultiPwsh.AppHost` packages RID-specific `multi-pwsh` binaries and opt-in MSBuild targets for downstream packages that need to copy `multi-pwsh` as a replacement apphost. The package is inert by default.
+
+```xml
+<ItemGroup>
+  <PackageReference Include="Devolutions.MultiPwsh.AppHost" Version="0.13.0" PrivateAssets="all" />
+</ItemGroup>
+
+<PropertyGroup>
+  <MultiPwshAppHostEnabled>true</MultiPwshAppHostEnabled>
+  <MultiPwshAppHostOutputBaseName>pwsh</MultiPwshAppHostOutputBaseName>
+</PropertyGroup>
+```
+
+When enabled, the package resolves the RID from `MultiPwshAppHostRuntimeIdentifier`, `PowerShellSDKAppHostRuntimeIdentifier`, `RuntimeIdentifier`, then `NETCoreSdkRuntimeIdentifier`, copies the selected binary to build and publish output, and appends `.exe` for Windows RIDs. Set `MultiPwshAppHostOutputName` for a full explicit file name, or set `MultiPwshAppHostCopyToOutput` / `MultiPwshAppHostCopyToPublish` to `false` and consume `MultiPwshAppHostResolvedNativeBinary` / `@(MultiPwshAppHostNativeBinary)` from custom targets.
 
 ## Testing
 
 - Scoped install smoke tests: `pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-ScopedInstallSmokeTest.ps1`
 - Venv matrix tests: `pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-VenvTestMatrix.ps1`
+- AppHost NuGet package smoke test: `pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-AppHostNuGetPackageSmokeTest.ps1`
 
 See [docs/testing.md](docs/testing.md) for online test mode, alias-targeted runs, and troubleshooting flags.

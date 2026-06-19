@@ -8,15 +8,16 @@ This matrix reflects the current command surface and known gaps for `multi-pwsh`
 | --- | --- | --- |
 | Version info | `multi-pwsh --version`, `multi-pwsh -V`, `multi-pwsh version` | Prints the `multi-pwsh` package version without inspecting local install state. Extra arguments are rejected. |
 | Help | `multi-pwsh --help`, `multi-pwsh -h`, `multi-pwsh help [command]`, `multi-pwsh <command> --help` | Focused command help is available without platform detection or local install state. |
-| Install | `multi-pwsh install <stable\|preview\|lts\|version\|major\|major.minor\|major.minor.x>` | `stable`, `preview`, and `lts` resolve against GitHub PowerShell releases. `major.minor.x` installs every available patch release in that line. |
-| Update | `multi-pwsh update <stable\|preview\|lts\|major.minor>` | Channel updates behave like installing the newest matching channel. Line updates refresh line, major, and managed named alias policies after installing the newest patch. |
-| Uninstall | `multi-pwsh uninstall <version> [--scope <user\|machine>] [--root <path>] [--force]` | Removes managed files and updates aliases that referenced the removed version. |
-| List | `multi-pwsh list [--scope <user\|machine\|all>] [--root <path>] [--available] [--include-prerelease]` | Installed listing shows paths, resolved aliases, named alias policies, and minor pins. Available listing queries GitHub releases. |
+| Install | `multi-pwsh install <stable\|preview\|lts\|version\|major\|major.minor\|major.minor.x>` | `stable`, `preview`, and `lts` resolve against GitHub PowerShell releases. `major.minor.x` installs every available patch release in that line. `--root` requires explicit `--scope <user\|machine>`. |
+| Update | `multi-pwsh update <stable\|preview\|lts\|major.minor>` | Channel updates behave like installing the newest matching channel. Line updates refresh line, major, and managed named alias policies after installing the newest patch. `--root` requires explicit `--scope <user\|machine>`. |
+| Uninstall | `multi-pwsh uninstall <version> [--scope <user\|machine>] [--root <path>] [--force]` | Removes managed files and updates aliases that referenced the removed version. User scope is the default; machine removals require explicit `--scope machine`. |
+| List | `multi-pwsh list [--scope <user\|machine\|all>] [--root <path>] [--available] [--include-prerelease]` | Installed listing shows paths, resolved aliases, named alias policies, and minor pins. Available listing queries GitHub releases; installed listings include prerelease versions automatically. |
 | Alias | `multi-pwsh alias set/unset` for `major.minor`, `pwsh`, `pwsh-preview`, and `pwsh-lts` | Minor aliases can be pinned or follow latest in line. Named aliases store policies and resolve only to installed versions. |
-| Host | `multi-pwsh host <version\|major\|major.minor\|pwsh-alias> [pwsh arguments...]` | Runs through the native host. Alias shims can also invoke host mode implicitly when `pwsh-*` names are used from the managed bin directory. |
+| Host | `multi-pwsh host <version\|major\|major.minor\|pwsh-alias> [pwsh arguments...]` | Runs through the native host. Alias shims can invoke host mode implicitly from the managed bin directory; a renamed local `pwsh`/`pwsh.exe` can also host an adjacent `pwsh.dll` plus `pwsh.runtimeconfig.json` SDK payload. |
 | Virtual environments | `multi-pwsh venv create/delete/export/import/list` plus host `-VirtualEnvironment` / `-venv` | Provides a managed module root for hosted PowerShell launches. |
 | Doctor | `multi-pwsh doctor --repair-aliases` | Repairs host shims, alias files, and managed named alias policy resolutions. |
-| Package subcommand | `multi-pwsh package install/uninstall/list` | Lower-level scoped install backend retained for explicit package-style operations. |
+| Package subcommand | `multi-pwsh package install/uninstall/list` | Advanced compatibility command for the scoped install backend; prefer top-level install, update, uninstall, and list. |
+| AppHost NuGet package | `Devolutions.MultiPwsh.AppHost` | Inert-by-default package with opt-in MSBuild targets that copy a RID-specific `multi-pwsh` binary as `multi-pwsh` or `pwsh`/`pwsh.exe` for downstream SDK outputs. |
 
 ## Version selectors and channels
 
@@ -74,6 +75,8 @@ Install, update, uninstall, and `doctor --repair-aliases` all reconcile aliases.
 | --- | --- | --- |
 | Native host launch | Yes | `multi-pwsh host` resolves selectors to installed executables and runs through `pwsh-host`. |
 | Implicit shim host mode | Yes | Alias shims detect their own name and layout, then run the matching selector. |
+| Local `pwsh` apphost replacement | Yes | Exact `pwsh`/`pwsh.exe` beside `pwsh.dll` and `pwsh.runtimeconfig.json` bypasses alias policy and hosts that adjacent payload directly. |
+| Reusable AppHost NuGet package | Yes | `Devolutions.MultiPwsh.AppHost` packages RID-specific binaries and opt-in `buildTransitive` targets for downstream apphost replacement. |
 | Virtual environment module path | Yes | Host mode sets startup-hook environment variables and bootstraps module cmdlet aliases for `-Command` and stdin `-File -` scenarios. |
 | Venv archive import/export | Yes | ZIP import rejects absolute paths and parent-directory traversal. |
 

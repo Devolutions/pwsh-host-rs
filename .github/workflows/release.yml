@@ -546,21 +546,21 @@ jobs:
             Copy-Item -Path $binaryPath -Destination (Join-Path $targetDir $mapping.Binary) -Force
           }
 
-      - name: Pack CLI NuGet package
+      - name: Pack native NuGet packages
         shell: pwsh
         env:
           PACKAGE_VERSION: ${{ needs.validate.outputs.release_version }}
         run: |
-          pwsh -NoLogo -NoProfile -File (Resolve-Path 'scripts\Build-CliNativeNuGetPackage.ps1') `
+          pwsh -NoLogo -NoProfile -File (Resolve-Path 'scripts\Build-NativeNuGetPackages.ps1') `
             -Version $env:PACKAGE_VERSION `
             -NoBuild `
             -Clean:$false
 
-      - name: Upload CLI NuGet package artifact
+      - name: Upload native NuGet package artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: cli-nuget
-          path: artifacts/cli-nuget/*.nupkg
+          name: native-nuget
+          path: artifacts/native-nuget/*.nupkg
           if-no-files-found: error
 
       - name: Generate checksums
@@ -598,16 +598,24 @@ jobs:
             Where-Object { $_.Name -like 'multi-pwsh-*.zip' } |
             Sort-Object Name |
             ForEach-Object { $_.FullName }
-          $nugetPackages = Get-ChildItem -Path artifacts/cli-nuget -Filter 'Devolutions.MultiPwsh.Cli.*.nupkg' |
+          $cliNugetPackages = Get-ChildItem -Path artifacts/native-nuget -Filter 'Devolutions.MultiPwsh.Cli.*.nupkg' |
             Sort-Object Name |
             ForEach-Object { $_.FullName }
+          $appHostNugetPackages = Get-ChildItem -Path artifacts/native-nuget -Filter 'Devolutions.MultiPwsh.AppHost.*.nupkg' |
+            Sort-Object Name |
+            ForEach-Object { $_.FullName }
+          $nugetPackages = @($cliNugetPackages) + @($appHostNugetPackages)
 
           if (-not $zipFiles) {
             throw 'No release archives found under dist'
           }
 
-          if (-not $nugetPackages) {
+          if (-not $cliNugetPackages) {
             throw 'No CLI NuGet package was produced.'
+          }
+
+          if (-not $appHostNugetPackages) {
+            throw 'No AppHost NuGet package was produced.'
           }
 
           gh release view "$env:RELEASE_TAG" *> $null

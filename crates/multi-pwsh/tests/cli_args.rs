@@ -95,8 +95,8 @@ fn top_level_help_prints_usage() {
         );
         assert!(stdout.contains("multi-pwsh -V"), "unexpected stdout: {}", stdout);
         assert!(
-            stdout.contains("multi-pwsh package install <selector> [options]"),
-            "unexpected stdout: {}",
+            !stdout.contains("multi-pwsh package install"),
+            "package command should stay hidden from top-level help: {}",
             stdout
         );
         assert!(
@@ -134,7 +134,64 @@ fn subcommand_help_prints_focused_usage() {
             "unexpected stdout: {}",
             stdout
         );
+        assert!(
+            stdout.contains("--root requires --scope <user|machine>"),
+            "unexpected stdout: {}",
+            stdout
+        );
     }
+}
+
+#[test]
+fn focused_help_documents_user_layout_and_cache_defaults() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    for (args, expected) in [
+        (&["help", "host"][..], "default user layout"),
+        (&["help", "alias"][..], "default user layout"),
+        (&["help", "doctor"][..], "default user layout"),
+        (&["help", "venv"][..], "default user layout"),
+        (&["help", "cache"][..], "MULTI_PWSH_CACHE_DIR"),
+    ] {
+        let output = run_multi_pwsh(args, temp_dir.path());
+
+        assert!(
+            output.status.success(),
+            "expected {:?} to succeed: {}",
+            args,
+            normalize_output(&output.stderr)
+        );
+        let stdout = normalize_output(&output.stdout);
+        assert!(
+            stdout.contains(expected),
+            "expected {:?} help to contain {:?}, got: {}",
+            args,
+            expected,
+            stdout
+        );
+    }
+}
+
+#[test]
+fn package_help_remains_available_as_advanced_command() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let output = run_multi_pwsh(&["help", "package"], temp_dir.path());
+
+    assert!(
+        output.status.success(),
+        "expected package help to succeed: {}",
+        normalize_output(&output.stderr)
+    );
+    let stdout = normalize_output(&output.stdout);
+    assert!(
+        stdout.contains("multi-pwsh package install"),
+        "unexpected stdout: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Advanced compatibility command"),
+        "unexpected stdout: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -623,8 +680,13 @@ fn update_accepts_include_prerelease_flag() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("not a major.minor selector"),
+        stderr.contains("update accepts stable, preview, lts"),
         "expected selector parse error, got stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("multi-pwsh install not-a-line"),
+        "expected install suggestion, got stderr: {}",
         stderr
     );
 }
@@ -1257,6 +1319,125 @@ fn list_reports_named_alias_policy_resolution() {
         stdout.contains("  - pwsh follows stable -> unresolved"),
         "expected unresolved pwsh stable policy: {}",
         stdout
+    );
+}
+
+#[test]
+fn list_without_scope_uses_user_package_listing() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let output = run_multi_pwsh(&["list"], temp_dir.path());
+
+    assert!(
+        output.status.success(),
+        "expected default list to succeed: {}",
+        normalize_output(&output.stderr)
+    );
+
+    let stdout = normalize_output(&output.stdout);
+    assert!(stdout.contains("Scope: user"), "unexpected stdout: {}", stdout);
+    assert!(stdout.contains("Metadata file:"), "unexpected stdout: {}", stdout);
+}
+
+#[test]
+fn list_include_prerelease_without_available_uses_installed_listing() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let output = run_multi_pwsh(&["list", "--include-prerelease"], temp_dir.path());
+
+    assert!(
+        output.status.success(),
+        "expected installed list to succeed: {}",
+        normalize_output(&output.stderr)
+    );
+
+    let stdout = normalize_output(&output.stdout);
+    assert!(stdout.contains("Scope: user"), "unexpected stdout: {}", stdout);
+}
+
+#[test]
+fn list_rejects_scope_aliases() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    for alias in ["current-user", "all-users", "system"] {
+        let output = run_multi_pwsh(&["list", "--scope", alias], temp_dir.path());
+
+        assert!(!output.status.success(), "expected {} to be rejected", alias);
+        let stderr = normalize_output(&output.stderr);
+        assert!(
+            stderr.contains("expected one of: user, machine, all"),
+            "unexpected stderr for {alias}: {}",
+            stderr
+        );
+    }
+}
+
+#[test]
+fn uninstall_without_scope_targets_user_scope_only() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let output = run_multi_pwsh(&["uninstall", "7.4.13"], temp_dir.path());
+
+    assert!(!output.status.success(), "expected missing install to fail");
+    let stderr = normalize_output(&output.stderr);
+    assert!(
+        stderr.contains("version 7.4.13 is not installed in scope user"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn uninstall_root_requires_explicit_scope() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let root = temp_dir.path().join("machine-root");
+    let root_text = root.display().to_string();
+    let output = run_multi_pwsh(&["uninstall", "7.4.13", "--root", &root_text], temp_dir.path());
+
+    assert!(!output.status.success(), "expected --root without scope to fail");
+    let stderr = normalize_output(&output.stderr);
+    assert!(
+        stderr.contains("--root requires --scope <user|machine> for uninstall"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn install_and_update_root_require_explicit_scope() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let root = temp_dir.path().join("custom-root");
+    let root_text = root.display().to_string();
+
+    for args in [
+        &["install", "7.4", "--root", &root_text][..],
+        &["update", "7.4", "--root", &root_text][..],
+    ] {
+        let output = run_multi_pwsh(args, temp_dir.path());
+
+        assert!(!output.status.success(), "expected {:?} to fail", args);
+        let stderr = normalize_output(&output.stderr);
+        assert!(
+            stderr.contains("--root requires --scope <user|machine> for install and update"),
+            "unexpected stderr for {:?}: {}",
+            args,
+            stderr
+        );
+    }
+}
+
+#[test]
+fn update_exact_version_error_suggests_install() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let output = run_multi_pwsh(&["update", "7.4.13"], temp_dir.path());
+
+    assert!(!output.status.success(), "expected exact update selector to fail");
+    let stderr = normalize_output(&output.stderr);
+    assert!(
+        stderr.contains("update accepts stable, preview, lts"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("multi-pwsh install 7.4.13"),
+        "unexpected stderr: {}",
+        stderr
     );
 }
 

@@ -169,7 +169,7 @@ jobs:
         run: dotnet test dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj --no-build -p:PwshExePath="$env:PwshExePath"
 
   nuget-cli:
-    name: NuGet CLI package smoke (Windows)
+    name: NuGet package smoke (Windows)
     runs-on: windows-latest
     needs: test
 
@@ -194,17 +194,17 @@ jobs:
           rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc
           rustup default stable
 
-      - name: Build and pack CLI NuGet package
+      - name: Build and pack native NuGet packages
         shell: pwsh
         run: |
-          pwsh -NoLogo -NoProfile -File (Resolve-Path 'scripts\Build-CliNativeNuGetPackage.ps1') `
+          pwsh -NoLogo -NoProfile -File (Resolve-Path 'scripts\Build-NativeNuGetPackages.ps1') `
             -RuntimeIdentifiers 'win-x64' `
             -Clean
 
       - name: Smoke test PackageReference copy targets
         shell: pwsh
         run: |
-          $packageSource = (Resolve-Path 'artifacts\cli-nuget').Path
+          $packageSource = (Resolve-Path 'artifacts\native-nuget').Path
           $smokeRoot = Join-Path $env:RUNNER_TEMP 'multi-pwsh-cli-package-smoke'
           $env:NUGET_PACKAGES = Join-Path $env:RUNNER_TEMP 'multi-pwsh-cli-package-smoke-nuget-cache'
           New-Item -Path $smokeRoot -ItemType Directory -Force | Out-Null
@@ -249,3 +249,51 @@ jobs:
           if (-not (Test-Path -Path $expected -PathType Leaf)) {
             throw "Expected smoke output file was not found: $expected"
           }
+
+      - name: Smoke test AppHost package targets
+        shell: pwsh
+        run: |
+          pwsh -NoLogo -NoProfile -File (Resolve-Path 'tests\Invoke-AppHostNuGetPackageSmokeTest.ps1') `
+            -PackageSource (Resolve-Path 'artifacts\native-nuget') `
+            -RuntimeIdentifier 'win-x64'
+
+  nuget-apphost-linux:
+    name: NuGet AppHost smoke (Linux)
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Install PowerShell 7.4 for binding discovery
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/Install-PowerShell74ForCi.ps1
+
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --target x86_64-unknown-linux-gnu
+          rustup default stable
+
+      - name: Build and pack AppHost NuGet package
+        shell: pwsh
+        run: |
+          pwsh -NoLogo -NoProfile -File (Resolve-Path 'scripts/Build-NativeNuGetPackages.ps1') `
+            -RuntimeIdentifiers 'linux-x64' `
+            -Packages 'AppHost' `
+            -Clean
+
+      - name: Smoke test AppHost package targets
+        shell: pwsh
+        run: |
+          pwsh -NoLogo -NoProfile -File (Resolve-Path 'tests/Invoke-AppHostNuGetPackageSmokeTest.ps1') `
+            -PackageSource (Resolve-Path 'artifacts/native-nuget') `
+            -RuntimeIdentifier 'linux-x64'
