@@ -11,7 +11,6 @@ use crate::startup_hook::{STARTUP_HOOK_ASSEMBLY_NAME, STARTUP_HOOK_DLL};
 
 const STARTUP_HOOKS_ENV_VAR: &str = "PWSH_HOST_STARTUP_HOOKS";
 const MODULE_VENV_PATH_ENV_VAR: &str = "PSMODULE_VENV_PATH";
-const LEGACY_FORCE_MODULE_PATH_ENV_VAR: &str = "PWSH_STARTUP_HOOK_FORCE_PSMODULEPATH";
 const LOG_PATH_ENV_VAR: &str = "PWSH_STARTUP_HOOK_LOG_PATH";
 const STRATEGY_ENV_VAR: &str = "PWSH_STARTUP_HOOK_STRATEGY";
 
@@ -51,8 +50,7 @@ pub(crate) fn configure_startup_hooks_for_context<I>(
     context: &HostfxrContext<'_, I>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let startup_hooks = take_env_var(STARTUP_HOOKS_ENV_VAR);
-    let module_venv_path =
-        take_env_var(MODULE_VENV_PATH_ENV_VAR).or_else(|| take_env_var(LEGACY_FORCE_MODULE_PATH_ENV_VAR));
+    let module_venv_path = take_env_var(MODULE_VENV_PATH_ENV_VAR);
     let log_path = take_env_var(LOG_PATH_ENV_VAR);
     let strategy = take_env_var(STRATEGY_ENV_VAR);
     let startup_hooks = resolve_startup_hooks(

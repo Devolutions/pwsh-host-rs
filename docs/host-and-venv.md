@@ -10,8 +10,19 @@
 - On Windows, alias command paths are `pwsh-*.exe` host shims in the active install scope's `bin` directory. The default user scope uses `~/.pwsh/bin`, matching Linux/macOS.
 - On Linux/macOS, alias command paths (`pwsh-*`) are hard links to `multi-pwsh`.
 - `multi-pwsh doctor --repair-aliases` performs a shim health check and re-links broken hard links automatically.
+- Direct `multi-pwsh host`, `alias`, `doctor`, and `venv` commands operate on the default user layout. Machine-scope aliases are normally entered through the generated machine-scope shims, which carry layout hints.
 - Copying or renaming `multi-pwsh.exe` to an alias-like name such as `pwsh-7.4.exe` also enters implicit host mode.
 - `-NamedPipeCommand <pipeName>` is supported in host mode on Windows.
+
+### Local `pwsh` apphost replacement mode
+
+As an advanced replacement workflow, `multi-pwsh` can be renamed to `pwsh`/`pwsh.exe` and placed directly in a PowerShell SDK/apphost output directory. This mode is intentionally separate from managed alias-shim mode.
+
+Detection uses the executable path reported by the OS, not the current working directory and not `PATH`. It activates only when the executable name is exactly `pwsh` or `pwsh.exe` and the same directory contains both `pwsh.dll` and `pwsh.runtimeconfig.json`. Additional files such as `System.Management.Automation.dll`, `Microsoft.PowerShell.ConsoleHost.dll`, and `Modules/` are expected in complete PowerShell payloads but are not required as marker files.
+
+When this local payload probe succeeds, `multi-pwsh` bypasses the managed `pwsh` alias policy and layout-shim inference, then hosts the adjacent `pwsh.dll` directly. Host-side preprocessing still applies, including `-venv` / `-VirtualEnvironment`, `-NamedPipeCommand`, stdin command rewriting, MCP mode, startup-hook setup, and PowerShell update-check suppression.
+
+Hostfxr loading is app-local first. If `hostfxr` is not present beside the payload, `pwsh-host` falls back to the .NET hosting layer via `nethost`/global .NET roots, which supports framework-dependent SDK build output. Self-contained payloads still need their app-local hosting files such as `hostfxr` and `hostpolicy`.
 
 ## Virtual environments
 
@@ -70,16 +81,22 @@ Import is intentionally conservative: importing into an existing destination ven
 
 - Venv selection changes module discovery and import precedence for hosted launches.
 - `Install-Module` and `Install-PSResource` use the venv `Modules` directory during hosted launches.
-- PowerShell may still include some built-in or default module paths in the effective `PSModulePath`; the venv is a selected module root, not a full process sandbox.
-- The feature applies to `multi-pwsh host ...` and implicit host shims such as `pwsh-7.4.exe`, not to arbitrary external `pwsh` processes.
+- The effective `PSModulePath` is the venv `Modules` directory plus the bundled PSHOME `Modules` directory when present; the venv is a selected module root, not a full process sandbox.
+- The feature applies to `multi-pwsh host ...`, implicit host shims such as `pwsh-7.4.exe`, and local `pwsh` apphost replacement mode, not to arbitrary external `pwsh` processes.
 
 ## Managed paths
 
-- `MULTI_PWSH_HOME`: override the multi-pwsh home directory.
-- `MULTI_PWSH_BIN_DIR`: override the shim and launcher directory.
-- `MULTI_PWSH_CACHE_DIR`: override the archive cache directory.
-- `MULTI_PWSH_VENV_DIR`: override the virtual-environment root directory.
+- `MULTI_PWSH_HOME`: override the default user-scope multi-pwsh home directory.
+- `MULTI_PWSH_BIN_DIR`: override the default user-scope shim and launcher directory.
+- `MULTI_PWSH_CACHE_DIR`: override the default user-scope archive/download cache directory.
+- `MULTI_PWSH_VENV_DIR`: override the default user-scope virtual-environment root directory.
 - `MULTI_PWSH_CACHE_KEEP`: keep downloaded archives after extraction when set to a truthy value.
+
+These `MULTI_PWSH_*` path variables affect only the default `user` layout. `machine` scope uses platform machine paths, and `--root` is an explicit install-root override that requires `--scope <user|machine>` and does not mix in child-directory overrides from the environment. Empty or whitespace-only path values are treated as unset.
+
+Offline release bundles are separate from the archive/download cache. Use `MULTI_PWSH_OFFLINE_CACHE` or `--offline-cache <path>` to read releases from a warmed bundle.
+
+New scoped installs are metadata-backed. Older non-Windows filesystem-only installs that predate scoped metadata may need to be reinstalled or migrated before scoped `list` / `uninstall` can manage them.
 
 CI cache example:
 

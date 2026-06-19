@@ -19,18 +19,10 @@ pub struct InstallLayout {
 impl InstallLayout {
     pub fn new(os: HostOs) -> Result<Self> {
         let user_home = home::home_dir().ok_or(MultiPwshError::HomeDirectoryNotFound)?;
-        let home = env::var_os("MULTI_PWSH_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| user_home.join(".pwsh"));
-        let bin_dir = env::var_os("MULTI_PWSH_BIN_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| join_layout_path(&home, "bin"));
-        let cache_dir = env::var_os("MULTI_PWSH_CACHE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| join_layout_path(&home, "cache"));
-        let venvs_dir = env::var_os("MULTI_PWSH_VENV_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| join_layout_path(&home, "venv"));
+        let home = path_env_var("MULTI_PWSH_HOME").unwrap_or_else(|| user_home.join(".pwsh"));
+        let bin_dir = path_env_var("MULTI_PWSH_BIN_DIR").unwrap_or_else(|| join_layout_path(&home, "bin"));
+        let cache_dir = path_env_var("MULTI_PWSH_CACHE_DIR").unwrap_or_else(|| join_layout_path(&home, "cache"));
+        let venvs_dir = path_env_var("MULTI_PWSH_VENV_DIR").unwrap_or_else(|| join_layout_path(&home, "venv"));
         let versions_dir = join_layout_path(&home, "multi");
 
         Ok(InstallLayout {
@@ -183,6 +175,15 @@ impl InstallLayout {
     }
 }
 
+pub(crate) fn path_env_var(name: &str) -> Option<PathBuf> {
+    let value = env::var_os(name)?;
+    if value.to_string_lossy().trim().is_empty() {
+        return None;
+    }
+
+    Some(PathBuf::from(value))
+}
+
 fn join_layout_path(base: &Path, child: &str) -> PathBuf {
     let base_text = base.to_string_lossy();
     if !looks_like_windows_path(base_text.as_ref()) {
@@ -246,6 +247,24 @@ mod tests {
     use tempfile::TempDir;
 
     fn with_env_var<T>(key: &str, value: Option<&Path>, action: impl FnOnce() -> T) -> T {
+        let previous = env::var_os(key);
+
+        match value {
+            Some(value) => unsafe { env::set_var(key, value) },
+            None => unsafe { env::remove_var(key) },
+        }
+
+        let result = action();
+
+        match previous {
+            Some(value) => unsafe { env::set_var(key, value) },
+            None => unsafe { env::remove_var(key) },
+        }
+
+        result
+    }
+
+    fn with_env_var_text<T>(key: &str, value: Option<&str>, action: impl FnOnce() -> T) -> T {
         let previous = env::var_os(key);
 
         match value {
@@ -333,6 +352,42 @@ mod tests {
             assert_eq!(layout.venvs_dir(), expected_venv);
             assert_eq!(layout.venv_dir("msgraph"), expected_venv.join("msgraph"));
             assert_eq!(layout.versions_dir(), expected_home.join("multi"));
+        });
+    }
+
+    #[test]
+    fn path_env_var_ignores_empty_and_whitespace_values() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+
+        with_env_var_text("MULTI_PWSH_HOME", Some(""), || {
+            assert_eq!(path_env_var("MULTI_PWSH_HOME"), None);
+        });
+
+        with_env_var_text("MULTI_PWSH_HOME", Some(" \t "), || {
+            assert_eq!(path_env_var("MULTI_PWSH_HOME"), None);
+        });
+    }
+
+    #[test]
+    fn layout_ignores_empty_child_overrides() {
+        let temp_dir = TempDir::new().unwrap();
+        let expected_home = temp_dir.path().join("pwsh-home");
+
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        with_env_var("MULTI_PWSH_HOME", Some(&expected_home), || {
+            with_env_var_text("MULTI_PWSH_BIN_DIR", Some(""), || {
+                with_env_var_text("MULTI_PWSH_CACHE_DIR", Some("   "), || {
+                    with_env_var_text("MULTI_PWSH_VENV_DIR", Some("\t"), || {
+                        let layout = InstallLayout::new(HostOs::Linux).unwrap();
+
+                        assert_eq!(layout.home(), expected_home.as_path());
+                        assert_eq!(layout.bin_dir(), expected_home.join("bin"));
+                        assert_eq!(layout.cache_dir(), expected_home.join("cache"));
+                        assert_eq!(layout.venvs_dir(), expected_home.join("venv"));
+                        assert_eq!(layout.versions_dir(), expected_home.join("multi"));
+                    })
+                })
+            })
         });
     }
 

@@ -80,6 +80,7 @@ if (Test-Path -Path $readmePath -PathType Leaf) {
     $newReadmeContent = $readmeContent
     $readmePatterns = @(
         '(?m)(?<prefix>Install a specific tag \(example `v)(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?<suffix>`\):)',
+        '(?m)(?<prefix>releases/download/v)(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?<suffix>/install-multi-pwsh\.(?:sh|ps1))',
         '(?m)(?<prefix>bash -s -- v)(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)',
         '(?m)(?<prefix>-Version v)(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)'
     )

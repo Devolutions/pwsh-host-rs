@@ -24,8 +24,8 @@ pub enum PackageScope {
 impl PackageScope {
     pub fn parse(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().as_str() {
-            "current-user" | "currentuser" | "user" => Some(PackageScope::CurrentUser),
-            "all-users" | "allusers" | "machine" | "system" => Some(PackageScope::AllUsers),
+            "user" => Some(PackageScope::CurrentUser),
+            "machine" => Some(PackageScope::AllUsers),
             _ => None,
         }
     }
@@ -104,14 +104,15 @@ impl PackageInstallOptions {
     }
 
     pub fn with_platform_defaults(scope: PackageScope, os: HostOs) -> Self {
-        let privileged_defaults = os == HostOs::Windows && scope == PackageScope::AllUsers;
+        let windows = os == HostOs::Windows;
+        let privileged_defaults = windows && scope == PackageScope::AllUsers;
 
         Self {
             scope,
             arch: None,
             include_prerelease: false,
             install_root: None,
-            add_path: true,
+            add_path: windows,
             register_manifest: privileged_defaults,
             enable_psremoting: false,
             disable_telemetry: false,
@@ -901,17 +902,18 @@ mod tests {
     }
 
     #[test]
-    fn package_scope_parses_aliases() {
-        assert_eq!(PackageScope::parse("current-user"), Some(PackageScope::CurrentUser));
-        assert_eq!(PackageScope::parse("CurrentUser"), Some(PackageScope::CurrentUser));
-        assert_eq!(PackageScope::parse("all-users"), Some(PackageScope::AllUsers));
-        assert_eq!(PackageScope::parse("AllUsers"), Some(PackageScope::AllUsers));
+    fn package_scope_parses_canonical_values() {
+        assert_eq!(PackageScope::parse("user"), Some(PackageScope::CurrentUser));
         assert_eq!(PackageScope::parse("machine"), Some(PackageScope::AllUsers));
+        assert_eq!(PackageScope::parse("current-user"), None);
+        assert_eq!(PackageScope::parse("all-users"), None);
+        assert_eq!(PackageScope::parse("system"), None);
     }
 
     #[test]
     fn current_user_defaults_disable_machine_actions() {
         let options = PackageInstallOptions::with_defaults(PackageScope::CurrentUser);
+        assert!(options.add_path);
         assert!(!options.register_manifest);
         assert!(!options.use_mu);
         assert!(!options.enable_mu);
@@ -931,9 +933,16 @@ mod tests {
     #[test]
     fn all_users_unix_defaults_disable_windows_integrations() {
         let options = PackageInstallOptions::with_platform_defaults(PackageScope::AllUsers, HostOs::Linux);
+        assert!(!options.add_path);
         assert!(!options.register_manifest);
         assert!(!options.use_mu);
         assert!(!options.enable_mu);
+    }
+
+    #[test]
+    fn current_user_unix_defaults_do_not_record_path_integration() {
+        let options = PackageInstallOptions::with_platform_defaults(PackageScope::CurrentUser, HostOs::Linux);
+        assert!(!options.add_path);
     }
 
     #[test]
@@ -1072,6 +1081,39 @@ mod tests {
     }
 
     #[test]
+    fn package_layout_user_explicit_root_ignores_multi_pwsh_env_overrides() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let root = temp_dir.path().join("explicit-root");
+        let ignored_home = temp_dir.path().join("ignored-home");
+        let ignored_bin = temp_dir.path().join("ignored-bin");
+        let ignored_cache = temp_dir.path().join("ignored-cache");
+        let ignored_venv = temp_dir.path().join("ignored-venv");
+
+        with_env_var("MULTI_PWSH_HOME", Some(&ignored_home), || {
+            with_env_var("MULTI_PWSH_BIN_DIR", Some(&ignored_bin), || {
+                with_env_var("MULTI_PWSH_CACHE_DIR", Some(&ignored_cache), || {
+                    with_env_var("MULTI_PWSH_VENV_DIR", Some(&ignored_venv), || {
+                        let layout = package_layout(
+                            HostOs::Linux,
+                            HostArch::X64,
+                            PackageScope::CurrentUser,
+                            Some(root.clone()),
+                        )
+                        .unwrap();
+
+                        assert_eq!(layout.home(), root.as_path());
+                        assert_eq!(layout.bin_dir(), root.join("bin"));
+                        assert_eq!(layout.cache_dir(), root.join("cache"));
+                        assert_eq!(layout.venvs_dir(), root.join("venv"));
+                        assert_eq!(layout.versions_dir(), root.join("multi"));
+                    })
+                })
+            })
+        });
+    }
+
+    #[test]
     fn package_layout_windows_user_default_honors_explicit_overrides() {
         let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let temp_dir = TempDir::new().unwrap();
@@ -1188,5 +1230,36 @@ mod tests {
         assert_eq!(layout.home(), Path::new("/opt/microsoft/powershell"));
         assert_eq!(layout.bin_dir(), PathBuf::from("/usr/local/bin"));
         assert_eq!(layout.versions_dir(), PathBuf::from("/opt/microsoft/powershell"));
+    }
+
+    #[test]
+    fn package_layout_windows_machine_default_ignores_multi_pwsh_env_overrides() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let program_files = temp_dir.path().join("ProgramFiles");
+        let ignored_home = temp_dir.path().join("ignored-home");
+        let ignored_bin = temp_dir.path().join("ignored-bin");
+        let ignored_cache = temp_dir.path().join("ignored-cache");
+        let ignored_venv = temp_dir.path().join("ignored-venv");
+
+        with_env_var("ProgramFiles", Some(&program_files), || {
+            with_env_var("MULTI_PWSH_HOME", Some(&ignored_home), || {
+                with_env_var("MULTI_PWSH_BIN_DIR", Some(&ignored_bin), || {
+                    with_env_var("MULTI_PWSH_CACHE_DIR", Some(&ignored_cache), || {
+                        with_env_var("MULTI_PWSH_VENV_DIR", Some(&ignored_venv), || {
+                            let layout =
+                                package_layout(HostOs::Windows, HostArch::X64, PackageScope::AllUsers, None).unwrap();
+                            let root = program_files.join("PowerShell");
+
+                            assert_eq!(layout.home(), root.as_path());
+                            assert_eq!(layout.bin_dir(), root.join("bin"));
+                            assert_eq!(layout.cache_dir(), root.join("cache"));
+                            assert_eq!(layout.venvs_dir(), root.join("venv"));
+                            assert_eq!(layout.versions_dir(), root);
+                        })
+                    })
+                })
+            })
+        });
     }
 }

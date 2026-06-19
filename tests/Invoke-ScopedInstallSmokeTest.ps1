@@ -35,6 +35,23 @@ function Assert-Contains {
     }
 }
 
+function Assert-NotContains {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Unexpected,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Context
+    )
+
+    if ($Text.Contains($Unexpected)) {
+        throw "Expected $Context not to contain '$Unexpected'.`nActual output:`n$Text"
+    }
+}
+
 function Invoke-MultiPwsh {
     param(
         [Parameter(Mandatory = $true)]
@@ -242,10 +259,22 @@ foreach ($scope in @("user", "machine")) {
 }
 
 $ambiguousVersion = $resolvedVersions["user-7.4"]
-$ambiguousUninstall = Invoke-MultiPwsh -Arguments @("uninstall", $ambiguousVersion) -AllowedExitCodes @(1)
+$defaultUninstall = Invoke-MultiPwsh -Arguments @("uninstall", $ambiguousVersion)
 Assert-Contains `
-    -Text $ambiguousUninstall.Output `
-    -Expected "installed in both user and machine scopes" `
-    -Context "ambiguous uninstall output"
+    -Text $defaultUninstall.Output `
+    -Expected "Scope: user" `
+    -Context "default uninstall output"
+
+$userListAfterDefaultUninstall = Invoke-MultiPwsh -Arguments @("list", "--scope", "user")
+$machineListAfterDefaultUninstall = Invoke-MultiPwsh -Arguments @("list", "--scope", "machine") -UseMachinePrivileges:(-not $IsWindows)
+
+Assert-NotContains `
+    -Text $userListAfterDefaultUninstall.Output `
+    -Unexpected $ambiguousVersion `
+    -Context "user scope list after default uninstall"
+Assert-Contains `
+    -Text $machineListAfterDefaultUninstall.Output `
+    -Expected $ambiguousVersion `
+    -Context "machine scope list after default uninstall"
 
 Write-Host "Scoped install smoke test completed successfully."
