@@ -35,7 +35,7 @@ Dispatch `.github/workflows/release.yml` from the branch or commit you want to r
 
 - For an actual publish, set `dry_run` to `false` and provide the matching `tag` value, for example `v0.9.0`.
 - For an inspection build, set `dry_run` to `true`. This builds and packs artifacts, uploads the `.nupkg` as a workflow artifact, and skips GitHub release publishing.
-- To publish packages to NuGet.org, set `publish_nuget` to `true` and `dry_run_nuget` to `false`. NuGet publishing uses trusted publishing through the selected GitHub environment's `NUGET_BOT_USERNAME` secret.
+- To publish the package to NuGet.org, set `publish_nuget` to `true` and `dry_run_nuget` to `false`. NuGet publishing uses trusted publishing through the selected GitHub environment's `NUGET_BOT_USERNAME` secret.
 - Set `github-env` to `auto` unless you need to force signing and NuGet publishing secrets from `publish-test` or `publish-prod`. In `auto`, runs from `master` use `publish-prod`; other branches use `publish-test`.
 
 You do **not** need to create the tag ahead of time. If the tag does not exist yet, the workflow creates it at the dispatched commit when it creates the GitHub release.
@@ -49,8 +49,8 @@ The workflow:
 - signs Windows executables on a Linux runner with Devolutions `psign` and the selected environment's Key Vault secrets
 - creates the tag at that commit if needed
 - uploads archives and `checksums.txt` to the GitHub release, with Windows archives containing signed executables
-- builds and uploads `Devolutions.MultiPwsh.Cli.<version>.nupkg` and `Devolutions.MultiPwsh.AppHost.<version>.nupkg` to the GitHub release, with signed Windows payloads under `runtimes\win-*\native`
-- optionally publishes `Devolutions.MultiPwsh.Cli.<version>.nupkg` and `Devolutions.MultiPwsh.AppHost.<version>.nupkg` to NuGet.org
+- builds and uploads `Devolutions.MultiPwsh.Cli.<version>.nupkg` to the GitHub release, with signed Windows payloads under `runtimes\win-*\native` and opt-in AppHost targets
+- optionally publishes `Devolutions.MultiPwsh.Cli.<version>.nupkg` to NuGet.org
 - uploads install/uninstall bootstrap scripts to the GitHub release so users do not need `raw.githubusercontent.com`
 
 If the release already exists, the workflow uploads the refreshed assets with `--clobber`.
@@ -59,7 +59,7 @@ Non-dry-run releases fail if code-signing secrets are unavailable. Dry runs sign
 
 ### Dry-run artifact download
 
-When `dry_run` is `true`, download the `native-nuget` artifact from the workflow run page to inspect the `.nupkg` files.
+When `dry_run` is `true`, download the `native-nuget` artifact from the workflow run page to inspect the `.nupkg` file.
 
 ## 4. Verify release assets
 
@@ -67,7 +67,6 @@ Confirm the release contains:
 
 - all platform zip archives
 - `Devolutions.MultiPwsh.Cli.<version>.nupkg`
-- `Devolutions.MultiPwsh.AppHost.<version>.nupkg`
 - `checksums.txt`
 - `install-multi-pwsh.ps1` and `install-multi-pwsh.sh`
 - `uninstall-multi-pwsh.ps1` and `uninstall-multi-pwsh.sh`
@@ -83,4 +82,4 @@ Reference the package and build your project:
 </ItemGroup>
 ```
 
-The package contributes `multi-pwsh` payloads under `runtimes/<rid>/native/` and copies them to build/publish output.
+The package contributes `multi-pwsh` payloads under `runtimes/<rid>/native/`, copies them to build/publish output, and includes opt-in AppHost targets via `MultiPwshAppHostEnabled=true`.

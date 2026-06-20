@@ -19,6 +19,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$packageId = 'Devolutions.MultiPwsh.Cli'
 if ([string]::IsNullOrWhiteSpace($PackageSource)) {
     $PackageSource = Join-Path $repoRoot 'artifacts\native-nuget'
 }
@@ -107,21 +108,21 @@ if ([string]::IsNullOrWhiteSpace($RuntimeIdentifier)) {
 
 $packageSource = (Resolve-Path $PackageSource).Path
 $package = if ([string]::IsNullOrWhiteSpace($PackageVersion)) {
-    Get-ChildItem -Path $packageSource -Filter 'Devolutions.MultiPwsh.AppHost.*.nupkg' |
+    Get-ChildItem -Path $packageSource -Filter "$packageId.*.nupkg" |
         Sort-Object Name -Descending |
         Select-Object -First 1
 }
 else {
-    Get-ChildItem -Path $packageSource -Filter "Devolutions.MultiPwsh.AppHost.$PackageVersion.nupkg" |
+    Get-ChildItem -Path $packageSource -Filter "$packageId.$PackageVersion.nupkg" |
         Select-Object -First 1
 }
 
 if ($null -eq $package) {
-    throw "Devolutions.MultiPwsh.AppHost package was not found in $packageSource"
+    throw "$packageId package was not found in $packageSource"
 }
 
 if ([string]::IsNullOrWhiteSpace($PackageVersion)) {
-    $PackageVersion = $package.BaseName.Substring('Devolutions.MultiPwsh.AppHost.'.Length)
+    $PackageVersion = $package.BaseName.Substring("$packageId.".Length)
 }
 
 $workspace = Join-Path ([System.IO.Path]::GetTempPath()) "multi-pwsh-apphost-package-smoke-$([guid]::NewGuid().ToString('N'))"
@@ -152,7 +153,7 @@ try {
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Devolutions.MultiPwsh.AppHost" Version="$PackageVersion" PrivateAssets="all" />
+    <PackageReference Include="$packageId" Version="$PackageVersion" PrivateAssets="all" />
   </ItemGroup>
 
   <Target Name="ValidateResolvedAppHostMetadata" AfterTargets="ResolveMultiPwshAppHost">
@@ -186,7 +187,7 @@ try {
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Devolutions.MultiPwsh.AppHost" Version="$PackageVersion" PrivateAssets="all" />
+    <PackageReference Include="$packageId" Version="$PackageVersion" PrivateAssets="all" />
   </ItemGroup>
 </Project>
 "@ | Set-Content -Path $inertProjectPath -Encoding utf8
@@ -198,7 +199,7 @@ try {
     foreach ($unexpectedName in @('multi-pwsh.exe', 'multi-pwsh', 'pwsh.exe', 'pwsh')) {
         $unexpectedPath = Join-Path $inertOutputDir $unexpectedName
         if (Test-Path -Path $unexpectedPath -PathType Leaf) {
-            throw "AppHost package should be inert by default, but found unexpected output: $unexpectedPath"
+            throw "AppHost targets should be inert by default, but found unexpected output: $unexpectedPath"
         }
     }
 

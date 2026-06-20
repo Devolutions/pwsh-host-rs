@@ -8,7 +8,7 @@
     </PropertyGroup>
 
     <Error Condition="'$(_MultiPwshAppHostResolvedRuntimeIdentifier)' == ''"
-           Text="Devolutions.MultiPwsh.AppHost is enabled, but no runtime identifier could be determined. Set MultiPwshAppHostRuntimeIdentifier, PowerShellSDKAppHostRuntimeIdentifier, or RuntimeIdentifier." />
+           Text="Devolutions.MultiPwsh.Cli apphost mode is enabled, but no runtime identifier could be determined. Set MultiPwshAppHostRuntimeIdentifier, PowerShellSDKAppHostRuntimeIdentifier, or RuntimeIdentifier." />
 
     <PropertyGroup>
       <_MultiPwshAppHostExeSuffix Condition="'$(_MultiPwshAppHostResolvedRuntimeIdentifier)' == 'win-x64' Or '$(_MultiPwshAppHostResolvedRuntimeIdentifier)' == 'win-arm64' Or '$(_MultiPwshAppHostResolvedRuntimeIdentifier)' == 'win-x86'">.exe</_MultiPwshAppHostExeSuffix>
@@ -22,7 +22,7 @@
     </PropertyGroup>
 
     <Error Condition="!Exists('$(MultiPwshAppHostResolvedNativeBinary)')"
-           Text="Devolutions.MultiPwsh.AppHost does not contain a native binary for runtime identifier '$(_MultiPwshAppHostResolvedRuntimeIdentifier)' at '$(MultiPwshAppHostResolvedNativeBinary)'. Supported RIDs are win-x64, win-arm64, linux-x64, linux-arm64, osx-x64, and osx-arm64." />
+           Text="Devolutions.MultiPwsh.Cli does not contain a native binary for runtime identifier '$(_MultiPwshAppHostResolvedRuntimeIdentifier)' at '$(MultiPwshAppHostResolvedNativeBinary)'. Supported RIDs are win-x64, win-arm64, linux-x64, linux-arm64, osx-x64, and osx-arm64." />
 
     <ItemGroup>
       <MultiPwshAppHostNativeBinary Include="$(MultiPwshAppHostResolvedNativeBinary)">
@@ -42,7 +42,7 @@
     </PropertyGroup>
 
     <Error Condition="'$(_MultiPwshAppHostBuildDestinationDirectory)' == ''"
-           Text="Devolutions.MultiPwsh.AppHost could not determine the build output directory. Set MultiPwshAppHostDestinationDirectory or build with a valid OutDir." />
+           Text="Devolutions.MultiPwsh.Cli apphost mode could not determine the build output directory. Set MultiPwshAppHostDestinationDirectory or build with a valid OutDir." />
 
     <PropertyGroup>
       <_MultiPwshAppHostBuildOutputPath>$([System.IO.Path]::Combine('$(_MultiPwshAppHostBuildDestinationDirectory)', '$(_MultiPwshAppHostOutputName)'))</_MultiPwshAppHostBuildOutputPath>
@@ -69,7 +69,7 @@
     </PropertyGroup>
 
     <Error Condition="'$(_MultiPwshAppHostPublishDestinationDirectory)' == ''"
-           Text="Devolutions.MultiPwsh.AppHost could not determine the publish output directory. Set MultiPwshAppHostPublishDestinationDirectory or publish with a valid PublishDir." />
+           Text="Devolutions.MultiPwsh.Cli apphost mode could not determine the publish output directory. Set MultiPwshAppHostPublishDestinationDirectory or publish with a valid PublishDir." />
 
     <PropertyGroup>
       <_MultiPwshAppHostPublishOutputPath>$([System.IO.Path]::Combine('$(_MultiPwshAppHostPublishDestinationDirectory)', '$(_MultiPwshAppHostOutputName)'))</_MultiPwshAppHostPublishOutputPath>

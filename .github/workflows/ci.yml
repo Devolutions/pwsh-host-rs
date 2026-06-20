@@ -194,7 +194,7 @@ jobs:
           rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc
           rustup default stable
 
-      - name: Build and pack native NuGet packages
+      - name: Build and pack native NuGet package
         shell: pwsh
         run: |
           pwsh -NoLogo -NoProfile -File (Resolve-Path 'scripts\Build-NativeNuGetPackages.ps1') `
@@ -250,7 +250,7 @@ jobs:
             throw "Expected smoke output file was not found: $expected"
           }
 
-      - name: Smoke test AppHost package targets
+      - name: Smoke test AppHost mode targets
         shell: pwsh
         run: |
           pwsh -NoLogo -NoProfile -File (Resolve-Path 'tests\Invoke-AppHostNuGetPackageSmokeTest.ps1') `
@@ -258,7 +258,7 @@ jobs:
             -RuntimeIdentifier 'win-x64'
 
   nuget-apphost-linux:
-    name: NuGet AppHost smoke (Linux)
+    name: NuGet CLI AppHost smoke (Linux)
     runs-on: ubuntu-latest
     needs: test
 
@@ -283,15 +283,14 @@ jobs:
           rustup toolchain install stable --profile minimal --target x86_64-unknown-linux-gnu
           rustup default stable
 
-      - name: Build and pack AppHost NuGet package
+      - name: Build and pack native NuGet package
         shell: pwsh
         run: |
           pwsh -NoLogo -NoProfile -File (Resolve-Path 'scripts/Build-NativeNuGetPackages.ps1') `
             -RuntimeIdentifiers 'linux-x64' `
-            -Packages 'AppHost' `
             -Clean
 
-      - name: Smoke test AppHost package targets
+      - name: Smoke test AppHost mode targets
         shell: pwsh
         run: |
           pwsh -NoLogo -NoProfile -File (Resolve-Path 'tests/Invoke-AppHostNuGetPackageSmokeTest.ps1') `
