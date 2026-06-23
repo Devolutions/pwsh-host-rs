@@ -16,14 +16,14 @@ curl -fsSL https://github.com/Devolutions/multi-pwsh/releases/latest/download/in
 irm https://github.com/Devolutions/multi-pwsh/releases/latest/download/install-multi-pwsh.ps1 | iex
 ```
 
-Install a specific tag (example `v0.13.0`):
+Install a specific tag (example `v0.14.0`):
 
 ```bash
-curl -fsSL https://github.com/Devolutions/multi-pwsh/releases/download/v0.13.0/install-multi-pwsh.sh | bash -s -- v0.13.0
+curl -fsSL https://github.com/Devolutions/multi-pwsh/releases/download/v0.14.0/install-multi-pwsh.sh | bash -s -- v0.14.0
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/Devolutions/multi-pwsh/releases/download/v0.13.0/install-multi-pwsh.ps1))) -Version v0.13.0
+& ([scriptblock]::Create((irm https://github.com/Devolutions/multi-pwsh/releases/download/v0.14.0/install-multi-pwsh.ps1))) -Version v0.14.0
 ```
 
 Uninstall bootstrap scripts:
@@ -277,11 +277,35 @@ See [docs/host-and-venv.md](docs/host-and-venv.md) for host shims, local replace
 
 ## CLI NuGet package and AppHost mode
 
-`Devolutions.MultiPwsh.Cli` packages RID-specific `multi-pwsh` binaries for .NET projects. It also includes opt-in MSBuild targets for downstream packages that need to copy `multi-pwsh` as a replacement apphost. AppHost mode is inert by default.
+`Devolutions.MultiPwsh.Cli` packages RID-specific `multi-pwsh` binaries under `runtimes/<rid>/native/` for .NET projects. It also exposes neutral MSBuild metadata for downstream packages that need to consume the same binaries as PowerShell apphosts. The package supplies only the native launcher; downstream packages must place it beside their own `pwsh.dll` and `pwsh.runtimeconfig.json`.
+
+Package authors can consume the launchers privately and map them into their own package layout:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.13.0" PrivateAssets="all" />
+  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.14.0" PrivateAssets="all" />
+</ItemGroup>
+
+<PropertyGroup>
+  <MultiPwshRuntimeNativeContentCopyEnabled>false</MultiPwshRuntimeNativeContentCopyEnabled>
+</PropertyGroup>
+
+<Target Name="StagePowerShellAppHosts" DependsOnTargets="ResolveMultiPwshAppHostAssets">
+  <ItemGroup>
+    <PowerShellSdkAppHost Include="@(MultiPwshAppHostAsset)">
+      <PackagePath>tools/apphost/%(RuntimeIdentifier)/%(AppHostFileName)</PackagePath>
+    </PowerShellSdkAppHost>
+  </ItemGroup>
+</Target>
+```
+
+`@(MultiPwshAppHostAsset)` includes the source path as the item identity plus metadata such as `RuntimeIdentifier`, `NativeFileName`, `AppHostFileName`, `PackageRelativePath`, and `PackageId`. The package also sets `MultiPwshAppHostSupportedRuntimeIdentifiers` and `MultiPwshAppHostManifestPath`.
+
+For a simple single-RID project, AppHost mode can copy the selected binary directly to build and publish output. AppHost mode is inert by default.
+
+```xml
+<ItemGroup>
+  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.14.0" PrivateAssets="all" />
 </ItemGroup>
 
 <PropertyGroup>
