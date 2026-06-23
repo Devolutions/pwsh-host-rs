@@ -1,5 +1,9 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <ItemGroup Condition="'$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'win-x64'">
+  <PropertyGroup>
+    <MultiPwshRuntimeNativeContentCopyEnabled Condition="'$(MultiPwshRuntimeNativeContentCopyEnabled)' == ''">true</MultiPwshRuntimeNativeContentCopyEnabled>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(MultiPwshRuntimeNativeContentCopyEnabled)' == 'true' And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'win-x64')">
     <Content Include="$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\multi-pwsh.exe" Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\multi-pwsh.exe')">
       <Link>runtimes\win-x64\native\multi-pwsh.exe</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -10,7 +14,7 @@
     </Content>
   </ItemGroup>
 
-  <ItemGroup Condition="'$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'win-arm64'">
+  <ItemGroup Condition="'$(MultiPwshRuntimeNativeContentCopyEnabled)' == 'true' And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'win-arm64')">
     <Content Include="$(MSBuildThisFileDirectory)..\runtimes\win-arm64\native\multi-pwsh.exe" Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\win-arm64\native\multi-pwsh.exe')">
       <Link>runtimes\win-arm64\native\multi-pwsh.exe</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -21,7 +25,7 @@
     </Content>
   </ItemGroup>
 
-  <ItemGroup Condition="'$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'linux-x64'">
+  <ItemGroup Condition="'$(MultiPwshRuntimeNativeContentCopyEnabled)' == 'true' And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'linux-x64')">
     <Content Include="$(MSBuildThisFileDirectory)..\runtimes\linux-x64\native\multi-pwsh" Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\linux-x64\native\multi-pwsh')">
       <Link>runtimes\linux-x64\native\multi-pwsh</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -32,7 +36,7 @@
     </Content>
   </ItemGroup>
 
-  <ItemGroup Condition="'$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'linux-arm64'">
+  <ItemGroup Condition="'$(MultiPwshRuntimeNativeContentCopyEnabled)' == 'true' And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'linux-arm64')">
     <Content Include="$(MSBuildThisFileDirectory)..\runtimes\linux-arm64\native\multi-pwsh" Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\linux-arm64\native\multi-pwsh')">
       <Link>runtimes\linux-arm64\native\multi-pwsh</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -43,7 +47,7 @@
     </Content>
   </ItemGroup>
 
-  <ItemGroup Condition="'$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'osx-x64'">
+  <ItemGroup Condition="'$(MultiPwshRuntimeNativeContentCopyEnabled)' == 'true' And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'osx-x64')">
     <Content Include="$(MSBuildThisFileDirectory)..\runtimes\osx-x64\native\multi-pwsh" Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\osx-x64\native\multi-pwsh')">
       <Link>runtimes\osx-x64\native\multi-pwsh</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -54,7 +58,7 @@
     </Content>
   </ItemGroup>
 
-  <ItemGroup Condition="'$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'osx-arm64'">
+  <ItemGroup Condition="'$(MultiPwshRuntimeNativeContentCopyEnabled)' == 'true' And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'osx-arm64')">
     <Content Include="$(MSBuildThisFileDirectory)..\runtimes\osx-arm64\native\multi-pwsh" Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\osx-arm64\native\multi-pwsh')">
       <Link>runtimes\osx-arm64\native\multi-pwsh</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

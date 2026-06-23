@@ -1,5 +1,36 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Target Name="ResolveMultiPwshAppHost" Condition="'$(MultiPwshAppHostEnabled)' == 'true'">
+  <Target Name="ResolveMultiPwshAppHostAssets">
+    <PropertyGroup>
+      <MultiPwshAppHostPackageRoot Condition="'$(MultiPwshAppHostPackageRoot)' == ''">$(MSBuildThisFileDirectory)..\</MultiPwshAppHostPackageRoot>
+      <MultiPwshAppHostRuntimeNativeRoot Condition="'$(MultiPwshAppHostRuntimeNativeRoot)' == ''">$(MultiPwshAppHostPackageRoot)runtimes\</MultiPwshAppHostRuntimeNativeRoot>
+      <MultiPwshAppHostManifestPath Condition="'$(MultiPwshAppHostManifestPath)' == ''">$(MultiPwshAppHostPackageRoot)build\Devolutions.MultiPwsh.Cli.AppHostManifest.json</MultiPwshAppHostManifestPath>
+      <MultiPwshAppHostSupportedRuntimeIdentifiers Condition="'$(MultiPwshAppHostSupportedRuntimeIdentifiers)' == ''">win-x64;win-arm64;linux-x64;linux-arm64;osx-x64;osx-arm64</MultiPwshAppHostSupportedRuntimeIdentifiers>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <_MultiPwshAppHostAssetDefinition Include="win-x64;win-arm64">
+        <NativeFileName>multi-pwsh.exe</NativeFileName>
+        <AppHostFileName>pwsh.exe</AppHostFileName>
+      </_MultiPwshAppHostAssetDefinition>
+      <_MultiPwshAppHostAssetDefinition Include="linux-x64;linux-arm64;osx-x64;osx-arm64">
+        <NativeFileName>multi-pwsh</NativeFileName>
+        <AppHostFileName>pwsh</AppHostFileName>
+      </_MultiPwshAppHostAssetDefinition>
+
+      <MultiPwshAppHostAsset Include="$(MultiPwshAppHostRuntimeNativeRoot)%(_MultiPwshAppHostAssetDefinition.Identity)\native\%(_MultiPwshAppHostAssetDefinition.NativeFileName)"
+                              Condition="Exists('$(MultiPwshAppHostRuntimeNativeRoot)%(_MultiPwshAppHostAssetDefinition.Identity)\native\%(_MultiPwshAppHostAssetDefinition.NativeFileName)')">
+        <RuntimeIdentifier>%(_MultiPwshAppHostAssetDefinition.Identity)</RuntimeIdentifier>
+        <NativeFileName>%(_MultiPwshAppHostAssetDefinition.NativeFileName)</NativeFileName>
+        <AppHostFileName>%(_MultiPwshAppHostAssetDefinition.AppHostFileName)</AppHostFileName>
+        <PackageRelativePath>runtimes/%(_MultiPwshAppHostAssetDefinition.Identity)/native/%(_MultiPwshAppHostAssetDefinition.NativeFileName)</PackageRelativePath>
+        <PackageId>Devolutions.MultiPwsh.Cli</PackageId>
+      </MultiPwshAppHostAsset>
+    </ItemGroup>
+  </Target>
+
+  <Target Name="ResolveMultiPwshAppHost"
+          DependsOnTargets="ResolveMultiPwshAppHostAssets"
+          Condition="'$(MultiPwshAppHostEnabled)' == 'true'">
     <PropertyGroup>
       <_MultiPwshAppHostResolvedRuntimeIdentifier Condition="'$(MultiPwshAppHostRuntimeIdentifier)' != ''">$(MultiPwshAppHostRuntimeIdentifier)</_MultiPwshAppHostResolvedRuntimeIdentifier>
       <_MultiPwshAppHostResolvedRuntimeIdentifier Condition="'$(_MultiPwshAppHostResolvedRuntimeIdentifier)' == '' And '$(PowerShellSDKAppHostRuntimeIdentifier)' != ''">$(PowerShellSDKAppHostRuntimeIdentifier)</_MultiPwshAppHostResolvedRuntimeIdentifier>
@@ -18,14 +49,22 @@
       <_MultiPwshAppHostOutputBaseName Condition="'$(_MultiPwshAppHostOutputBaseName)' == ''">multi-pwsh</_MultiPwshAppHostOutputBaseName>
       <_MultiPwshAppHostOutputName Condition="'$(MultiPwshAppHostOutputName)' != ''">$(MultiPwshAppHostOutputName)</_MultiPwshAppHostOutputName>
       <_MultiPwshAppHostOutputName Condition="'$(_MultiPwshAppHostOutputName)' == ''">$(_MultiPwshAppHostOutputBaseName)$(_MultiPwshAppHostExeSuffix)</_MultiPwshAppHostOutputName>
-      <MultiPwshAppHostResolvedNativeBinary>$(MSBuildThisFileDirectory)..\runtimes\$(_MultiPwshAppHostResolvedRuntimeIdentifier)\native\$(_MultiPwshAppHostNativeFileName)</MultiPwshAppHostResolvedNativeBinary>
     </PropertyGroup>
 
-    <Error Condition="!Exists('$(MultiPwshAppHostResolvedNativeBinary)')"
-           Text="Devolutions.MultiPwsh.Cli does not contain a native binary for runtime identifier '$(_MultiPwshAppHostResolvedRuntimeIdentifier)' at '$(MultiPwshAppHostResolvedNativeBinary)'. Supported RIDs are win-x64, win-arm64, linux-x64, linux-arm64, osx-x64, and osx-arm64." />
+    <ItemGroup>
+      <_MultiPwshResolvedAppHostAsset Include="@(MultiPwshAppHostAsset)"
+                                      Condition="'%(MultiPwshAppHostAsset.RuntimeIdentifier)' == '$(_MultiPwshAppHostResolvedRuntimeIdentifier)'" />
+    </ItemGroup>
+
+    <Error Condition="'@(_MultiPwshResolvedAppHostAsset)' == ''"
+           Text="Devolutions.MultiPwsh.Cli does not contain a native binary for runtime identifier '$(_MultiPwshAppHostResolvedRuntimeIdentifier)'. Supported RIDs are $(MultiPwshAppHostSupportedRuntimeIdentifiers)." />
+
+    <PropertyGroup>
+      <MultiPwshAppHostResolvedNativeBinary>@(_MultiPwshResolvedAppHostAsset)</MultiPwshAppHostResolvedNativeBinary>
+    </PropertyGroup>
 
     <ItemGroup>
-      <MultiPwshAppHostNativeBinary Include="$(MultiPwshAppHostResolvedNativeBinary)">
+      <MultiPwshAppHostNativeBinary Include="@(_MultiPwshResolvedAppHostAsset)">
         <RuntimeIdentifier>$(_MultiPwshAppHostResolvedRuntimeIdentifier)</RuntimeIdentifier>
         <OutputName>$(_MultiPwshAppHostOutputName)</OutputName>
       </MultiPwshAppHostNativeBinary>

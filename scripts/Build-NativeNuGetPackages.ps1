@@ -85,6 +85,49 @@ function Resolve-RustTarget {
     }
 }
 
+function Resolve-AppHostFileName {
+    param([Parameter(Mandatory)][string]$RuntimeIdentifier)
+
+    if ($RuntimeIdentifier.StartsWith('win-', [System.StringComparison]::OrdinalIgnoreCase)) {
+        'pwsh.exe'
+    }
+    else {
+        'pwsh'
+    }
+}
+
+function New-AppHostManifest {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$PackageId,
+        [Parameter(Mandatory)][string]$PackageVersion,
+        [Parameter(Mandatory)][string[]]$RuntimeIdentifiers
+    )
+
+    $assets = foreach ($rid in $RuntimeIdentifiers) {
+        $target = Resolve-RustTarget -RuntimeIdentifier $rid
+        [ordered]@{
+            runtimeIdentifier = $rid
+            packageRelativePath = "runtimes/$rid/native/$($target['BinaryName'])"
+            nativeFileName = $target['BinaryName']
+            appHostFileName = Resolve-AppHostFileName -RuntimeIdentifier $rid
+        }
+    }
+
+    $manifest = [ordered]@{
+        packageId = $PackageId
+        packageVersion = $PackageVersion
+        supportedRuntimeIdentifiers = $RuntimeIdentifiers
+        requiredAdjacentPayloadFiles = @('pwsh.dll', 'pwsh.runtimeconfig.json')
+        notes = 'This package supplies only the native PowerShell apphost executable. Consumers must place it beside their own PowerShell managed payload.'
+        assets = @($assets)
+    }
+
+    $manifestDirectory = Split-Path -Path $Path -Parent
+    New-Item -Path $manifestDirectory -ItemType Directory -Force | Out-Null
+    $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path $Path -Encoding utf8
+}
+
 function Resolve-PackageProject {
     param([Parameter(Mandatory)][string]$Package)
 
@@ -95,6 +138,7 @@ function Resolve-PackageProject {
                 Project = Join-Path $repoRoot 'nuget\Devolutions.MultiPwsh.Cli\Devolutions.MultiPwsh.Cli.csproj'
                 FixedEntries = @(
                     'build/Devolutions.MultiPwsh.Cli.targets',
+                    'build/Devolutions.MultiPwsh.Cli.AppHostManifest.json',
                     'buildTransitive/Devolutions.MultiPwsh.Cli.props',
                     'buildTransitive/Devolutions.MultiPwsh.Cli.targets',
                     'README.md'
@@ -135,6 +179,7 @@ function Assert-NupkgContents {
     param(
         [Parameter(Mandatory)][string]$PackagePath,
         [Parameter(Mandatory)][hashtable]$PackageInfo,
+        [Parameter(Mandatory)][string]$PackageVersion,
         [Parameter(Mandatory)][string[]]$ExpectedRuntimeIdentifiers
     )
 
@@ -160,6 +205,56 @@ function Assert-NupkgContents {
         foreach ($entry in $expectedEntries) {
             if (-not $actualEntries.ContainsKey($entry)) {
                 throw "Expected package entry '$entry' was not found in $PackagePath"
+            }
+        }
+
+        $manifestEntryName = 'build/Devolutions.MultiPwsh.Cli.AppHostManifest.json'
+        $manifestEntry = $archive.GetEntry($manifestEntryName)
+        if ($null -eq $manifestEntry) {
+            throw "Expected package manifest '$manifestEntryName' was not found in $PackagePath"
+        }
+
+        $reader = [System.IO.StreamReader]::new($manifestEntry.Open())
+        try {
+            $manifest = $reader.ReadToEnd() | ConvertFrom-Json
+        }
+        finally {
+            $reader.Dispose()
+        }
+
+        if ($manifest.packageId -ne $PackageInfo['Id']) {
+            throw "Package manifest packageId mismatch: expected '$($PackageInfo['Id'])', got '$($manifest.packageId)'"
+        }
+
+        if ($manifest.packageVersion -ne $PackageVersion) {
+            throw "Package manifest packageVersion mismatch: expected '$PackageVersion', got '$($manifest.packageVersion)'"
+        }
+
+        $manifestRids = @($manifest.supportedRuntimeIdentifiers)
+        $manifestAssets = @($manifest.assets)
+        foreach ($rid in $ExpectedRuntimeIdentifiers) {
+            if ($manifestRids -notcontains $rid) {
+                throw "Package manifest is missing supported RID '$rid'"
+            }
+
+            $target = Resolve-RustTarget -RuntimeIdentifier $rid
+            $asset = $manifestAssets | Where-Object { $_.runtimeIdentifier -eq $rid } | Select-Object -First 1
+            if ($null -eq $asset) {
+                throw "Package manifest is missing an asset for RID '$rid'"
+            }
+
+            $expectedPackageRelativePath = "runtimes/$rid/native/$($target['BinaryName'])"
+            if ($asset.packageRelativePath -ne $expectedPackageRelativePath) {
+                throw "Package manifest asset path mismatch for '$rid': expected '$expectedPackageRelativePath', got '$($asset.packageRelativePath)'"
+            }
+
+            if ($asset.nativeFileName -ne $target['BinaryName']) {
+                throw "Package manifest native file mismatch for '$rid': expected '$($target['BinaryName'])', got '$($asset.nativeFileName)'"
+            }
+
+            $expectedAppHostFileName = Resolve-AppHostFileName -RuntimeIdentifier $rid
+            if ($asset.appHostFileName -ne $expectedAppHostFileName) {
+                throw "Package manifest apphost file mismatch for '$rid': expected '$expectedAppHostFileName', got '$($asset.appHostFileName)'"
             }
         }
     }
@@ -228,6 +323,8 @@ foreach ($rid in $RuntimeIdentifiers) {
 if (-not $NoPack) {
     foreach ($package in $Packages) {
         $packageInfo = Resolve-PackageProject -Package $package
+        New-AppHostManifest -Path (Join-Path $StagingRoot 'apphost-manifest.json') -PackageId $packageInfo['Id'] -PackageVersion $Version -RuntimeIdentifiers $RuntimeIdentifiers
+
         Invoke-NativeCommand -FilePath dotnet -ArgumentList @(
             'pack',
             $packageInfo['Project'],
@@ -235,6 +332,7 @@ if (-not $NoPack) {
             $Configuration,
             '-o',
             $OutputRoot,
+            "/p:MultiPwshCliStagingRoot=$StagingRoot",
             "/p:Version=$Version",
             '/p:ContinuousIntegrationBuild=true'
         )
@@ -242,6 +340,6 @@ if (-not $NoPack) {
         $packagePath = Join-Path $OutputRoot "$($packageInfo['Id']).$Version.nupkg"
         Assert-FileExists -Path $packagePath
         Set-NupkgUnixExecutablePermissions -PackagePath $packagePath
-        Assert-NupkgContents -PackagePath $packagePath -PackageInfo $packageInfo -ExpectedRuntimeIdentifiers $RuntimeIdentifiers
+        Assert-NupkgContents -PackagePath $packagePath -PackageInfo $packageInfo -PackageVersion $Version -ExpectedRuntimeIdentifiers $RuntimeIdentifiers
     }
 }

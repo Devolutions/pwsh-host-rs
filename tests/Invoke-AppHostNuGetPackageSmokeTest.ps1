@@ -150,13 +150,23 @@ try {
     <SelfContained>false</SelfContained>
     <MultiPwshAppHostEnabled>true</MultiPwshAppHostEnabled>
     <MultiPwshAppHostOutputName>$outputName</MultiPwshAppHostOutputName>
+    <MultiPwshRuntimeNativeContentCopyEnabled>false</MultiPwshRuntimeNativeContentCopyEnabled>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="$packageId" Version="$PackageVersion" PrivateAssets="all" />
   </ItemGroup>
 
-  <Target Name="ValidateResolvedAppHostMetadata" AfterTargets="ResolveMultiPwshAppHost">
+  <Target Name="ValidateResolvedAppHostMetadata" DependsOnTargets="ResolveMultiPwshAppHostAssets" AfterTargets="ResolveMultiPwshAppHost">
+    <ItemGroup>
+      <_CurrentRidAppHostAsset Include="@(MultiPwshAppHostAsset)" Condition="'%(MultiPwshAppHostAsset.RuntimeIdentifier)' == '$RuntimeIdentifier'" />
+    </ItemGroup>
+
+    <Error Condition="'`$(MultiPwshAppHostSupportedRuntimeIdentifiers)' == ''" Text="MultiPwshAppHostSupportedRuntimeIdentifiers was not set." />
+    <Error Condition="'`$(MultiPwshAppHostManifestPath)' == '' Or !Exists('`$(MultiPwshAppHostManifestPath)')" Text="MultiPwshAppHostManifestPath was not set to an existing manifest." />
+    <Error Condition="'@(_CurrentRidAppHostAsset)' == ''" Text="MultiPwshAppHostAsset was not emitted for $RuntimeIdentifier." />
+    <Error Condition="'@(_CurrentRidAppHostAsset)' != '' And '%(_CurrentRidAppHostAsset.AppHostFileName)' != '$outputName'" Text="MultiPwshAppHostAsset AppHostFileName metadata was not '$outputName'." />
+    <Error Condition="'@(_CurrentRidAppHostAsset)' != '' And '%(_CurrentRidAppHostAsset.PackageRelativePath)' == ''" Text="MultiPwshAppHostAsset PackageRelativePath metadata was not set." />
     <Error Condition="'`$(MultiPwshAppHostResolvedNativeBinary)' == ''" Text="MultiPwshAppHostResolvedNativeBinary was not set." />
     <Error Condition="'@(MultiPwshAppHostNativeBinary)' == ''" Text="MultiPwshAppHostNativeBinary item was not set." />
   </Target>
@@ -184,6 +194,7 @@ try {
     <TargetFramework>net8.0</TargetFramework>
     <RuntimeIdentifier>$RuntimeIdentifier</RuntimeIdentifier>
     <SelfContained>false</SelfContained>
+    <MultiPwshRuntimeNativeContentCopyEnabled>false</MultiPwshRuntimeNativeContentCopyEnabled>
   </PropertyGroup>
 
   <ItemGroup>
@@ -201,6 +212,17 @@ try {
         if (Test-Path -Path $unexpectedPath -PathType Leaf) {
             throw "AppHost targets should be inert by default, but found unexpected output: $unexpectedPath"
         }
+    }
+
+    $runtimeNativeName = if ($RuntimeIdentifier.StartsWith('win-', [System.StringComparison]::OrdinalIgnoreCase)) {
+        'multi-pwsh.exe'
+    }
+    else {
+        'multi-pwsh'
+    }
+    $unexpectedRuntimeNativePath = Join-Path $inertOutputDir "runtimes\$RuntimeIdentifier\native\$runtimeNativeName"
+    if (Test-Path -Path $unexpectedRuntimeNativePath -PathType Leaf) {
+        throw "Runtime native content copy should be disabled, but found unexpected output: $unexpectedRuntimeNativePath"
     }
 
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $projectPath, '--configfile', $nugetConfig)
