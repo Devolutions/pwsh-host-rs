@@ -13,6 +13,7 @@
 - Direct `multi-pwsh host`, `alias`, `doctor`, and `venv` commands operate on the default user layout. Machine-scope aliases are normally entered through the generated machine-scope shims, which carry layout hints.
 - Copying or renaming `multi-pwsh.exe` to an alias-like name such as `pwsh-7.4.exe` also enters implicit host mode.
 - `-NamedPipeCommand <pipeName>` is supported in host mode on Windows.
+- `-mcp -McpCommands <command> [command ...]` starts the hosted runspace as a stdio MCP server that exposes selected PowerShell commands as tools. See [MCP host mode](mcp.md).
 
 ### Local `pwsh` apphost replacement mode
 

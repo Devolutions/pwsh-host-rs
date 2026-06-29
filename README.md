@@ -1,6 +1,6 @@
 # multi-pwsh
 
-Install and manage side-by-side PowerShell versions with aliases and native hosting.
+Install and manage side-by-side PowerShell versions with aliases, offline bundles, native hosting, module venvs, and MCP command exposure.
 
 ![multi-pwsh](docs/images/multi-pwsh.png)
 
@@ -93,6 +93,7 @@ Rerun the bootstrap script against a newer warmed bundle to update `multi-pwsh` 
 ## More docs
 
 - [Native host mode and virtual environments](docs/host-and-venv.md)
+- [MCP host mode](docs/mcp.md)
 - [Feature matrix and roadmap](docs/feature-matrix.md)
 - [Testing guide](docs/testing.md)
 - [Release process](RELEASE.md)
@@ -218,6 +219,8 @@ multi-pwsh venv list
 
 ```text
 multi-pwsh --version
+multi-pwsh -V
+multi-pwsh version
 multi-pwsh --help
 multi-pwsh help [command]
 multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]
@@ -234,6 +237,7 @@ multi-pwsh alias set <major.minor> <version|latest>
 multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>
 multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>
 multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]
+multi-pwsh host <version|major|major.minor|pwsh-alias> -mcp -McpCommands <command> [command ...] [-VirtualEnvironment <name>|-venv <name>]
 multi-pwsh doctor --repair-aliases
 ```
 
@@ -269,11 +273,12 @@ The current LTS line is encoded in the tool; at the moment that is `7.6`.
 
 - `multi-pwsh host <selector> ...` runs PowerShell through native hosting instead of launching a `pwsh` subprocess.
 - Use `-venv <name>` or `-VirtualEnvironment <name>` to select a managed module root for hosted launches.
+- Use `-mcp -McpCommands <command> [command ...]` to expose selected PowerShell commands as stdio MCP tools from the chosen hosted version.
 - Use `multi-pwsh doctor --repair-aliases` to repair host shims and named aliases.
 
 Advanced local replacement mode is also supported: if `multi-pwsh` is renamed to `pwsh`/`pwsh.exe` and placed beside `pwsh.dll` plus `pwsh.runtimeconfig.json`, it runs that adjacent payload directly from the executable directory instead of resolving the managed `pwsh` alias or searching `PATH`.
 
-See [docs/host-and-venv.md](docs/host-and-venv.md) for host shims, local replacement mode, venv layout, import/export, managed paths, and current limitations.
+See [docs/host-and-venv.md](docs/host-and-venv.md) for host shims, local replacement mode, venv layout, import/export, managed paths, and current limitations. See [docs/mcp.md](docs/mcp.md) for MCP host mode.
 
 ## CLI NuGet package and AppHost mode
 
