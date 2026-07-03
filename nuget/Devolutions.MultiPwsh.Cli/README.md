@@ -6,7 +6,7 @@ The normal CLI payload is copied under `runtimes/<rid>/native/` for build and pu
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.14.0" PrivateAssets="all" />
+  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.14.1" PrivateAssets="all" />
 </ItemGroup>
 
 <PropertyGroup>
@@ -28,7 +28,7 @@ AppHost mode is inert by default; set `MultiPwshAppHostEnabled=true` to copy the
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.14.0" PrivateAssets="all" />
+  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.14.1" PrivateAssets="all" />
 </ItemGroup>
 
 <PropertyGroup>
@@ -37,4 +37,4 @@ AppHost mode is inert by default; set `MultiPwshAppHostEnabled=true` to copy the
 </PropertyGroup>
 ```
 
-Downstream SDK packages can copy the binary as `pwsh` or `pwsh.exe` beside their own `pwsh.dll` and `pwsh.runtimeconfig.json`. In that layout, `multi-pwsh` runs the adjacent payload directly instead of resolving `pwsh` from PATH.
+Downstream SDK packages can copy the binary as `pwsh` or `pwsh.exe` beside their own `pwsh.dll` and `pwsh.runtimeconfig.json`, or place it under `runtimes/<rid>/native/` with the shared PowerShell payload at the publish root. In both layouts, `multi-pwsh` runs the local payload directly instead of resolving `pwsh` from PATH.

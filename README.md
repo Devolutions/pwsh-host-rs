@@ -16,14 +16,14 @@ curl -fsSL https://github.com/Devolutions/multi-pwsh/releases/latest/download/in
 irm https://github.com/Devolutions/multi-pwsh/releases/latest/download/install-multi-pwsh.ps1 | iex
 ```
 
-Install a specific tag (example `v0.14.0`):
+Install a specific tag (example `v0.14.1`):
 
 ```bash
-curl -fsSL https://github.com/Devolutions/multi-pwsh/releases/download/v0.14.0/install-multi-pwsh.sh | bash -s -- v0.14.0
+curl -fsSL https://github.com/Devolutions/multi-pwsh/releases/download/v0.14.1/install-multi-pwsh.sh | bash -s -- v0.14.1
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/Devolutions/multi-pwsh/releases/download/v0.14.0/install-multi-pwsh.ps1))) -Version v0.14.0
+& ([scriptblock]::Create((irm https://github.com/Devolutions/multi-pwsh/releases/download/v0.14.1/install-multi-pwsh.ps1))) -Version v0.14.1
 ```
 
 Uninstall bootstrap scripts:
@@ -276,19 +276,19 @@ The current LTS line is encoded in the tool; at the moment that is `7.6`.
 - Use `-mcp -McpCommands <command> [command ...]` to expose selected PowerShell commands as stdio MCP tools from the chosen hosted version.
 - Use `multi-pwsh doctor --repair-aliases` to repair host shims and named aliases.
 
-Advanced local replacement mode is also supported: if `multi-pwsh` is renamed to `pwsh`/`pwsh.exe` and placed beside `pwsh.dll` plus `pwsh.runtimeconfig.json`, it runs that adjacent payload directly from the executable directory instead of resolving the managed `pwsh` alias or searching `PATH`.
+Advanced local replacement mode is also supported: if `multi-pwsh` is renamed to `pwsh`/`pwsh.exe`, it runs a local SDK payload directly instead of resolving the managed `pwsh` alias or searching `PATH`. The payload can be adjacent to the executable, or shared from the publish root when the executable is under `runtimes/<rid>/native/`.
 
 See [docs/host-and-venv.md](docs/host-and-venv.md) for host shims, local replacement mode, venv layout, import/export, managed paths, and current limitations. See [docs/mcp.md](docs/mcp.md) for MCP host mode.
 
 ## CLI NuGet package and AppHost mode
 
-`Devolutions.MultiPwsh.Cli` packages RID-specific `multi-pwsh` binaries under `runtimes/<rid>/native/` for .NET projects. It also exposes neutral MSBuild metadata for downstream packages that need to consume the same binaries as PowerShell apphosts. The package supplies only the native launcher; downstream packages must place it beside their own `pwsh.dll` and `pwsh.runtimeconfig.json`.
+`Devolutions.MultiPwsh.Cli` packages RID-specific `multi-pwsh` binaries under `runtimes/<rid>/native/` for .NET projects. It also exposes neutral MSBuild metadata for downstream packages that need to consume the same binaries as PowerShell apphosts. The package supplies only the native launcher; downstream packages must provide their own `pwsh.dll` and `pwsh.runtimeconfig.json` either beside the renamed launcher or at the shared publish root above `runtimes/<rid>/native/`.
 
 Package authors can consume the launchers privately and map them into their own package layout:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.14.0" PrivateAssets="all" />
+  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.14.1" PrivateAssets="all" />
 </ItemGroup>
 
 <PropertyGroup>
@@ -310,7 +310,7 @@ For a simple single-RID project, AppHost mode can copy the selected binary direc
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.14.0" PrivateAssets="all" />
+  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.14.1" PrivateAssets="all" />
 </ItemGroup>
 
 <PropertyGroup>

@@ -118,8 +118,10 @@ function New-AppHostManifest {
         packageId = $PackageId
         packageVersion = $PackageVersion
         supportedRuntimeIdentifiers = $RuntimeIdentifiers
+        requiredPayloadFiles = @('pwsh.dll', 'pwsh.runtimeconfig.json')
         requiredAdjacentPayloadFiles = @('pwsh.dll', 'pwsh.runtimeconfig.json')
-        notes = 'This package supplies only the native PowerShell apphost executable. Consumers must place it beside their own PowerShell managed payload.'
+        supportedPayloadLayouts = @('adjacent', 'runtimeNativeSharedPayload')
+        notes = 'This package supplies only the native PowerShell apphost executable. Consumers must provide their PowerShell managed payload either beside the executable or at the shared root above runtimes/<rid>/native.'
         assets = @($assets)
     }
 

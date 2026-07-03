@@ -176,13 +176,10 @@ struct CommandParameterMetadata {
     type_name: String,
 }
 
-pub fn run_stdio_mcp_server(executable: &Path, commands: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
-    let pwsh_dir = executable.parent().ok_or_else(|| {
-        format!(
-            "failed to determine the PowerShell home directory from {}",
-            executable.display()
-        )
-    })?;
+pub fn run_stdio_mcp_server_for_pwsh_dir(
+    pwsh_dir: &Path,
+    commands: &[String],
+) -> Result<i32, Box<dyn std::error::Error>> {
     let server = HostMcpServer::new(pwsh_dir, commands)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()

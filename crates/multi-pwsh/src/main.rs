@@ -865,6 +865,21 @@ fn run_known_host_executable(
     selector_input: &str,
     pwsh_args: Vec<OsString>,
 ) -> Result<i32> {
+    let pwsh_dir = executable.parent().ok_or_else(|| {
+        MultiPwshError::Host(format!(
+            "failed to determine the PowerShell home directory from {}",
+            executable.display()
+        ))
+    })?;
+    run_known_host_executable_for_pwsh_dir(pwsh_dir, layout, selector_input, pwsh_args)
+}
+
+fn run_known_host_executable_for_pwsh_dir(
+    pwsh_dir: &Path,
+    layout: Option<&InstallLayout>,
+    selector_input: &str,
+    pwsh_args: Vec<OsString>,
+) -> Result<i32> {
     let os = HostOs::detect()?;
     let HostDispatchOptions { launch, mcp } = preprocess_host_args(pwsh_args)?;
     let HostLaunchOptions {
@@ -893,7 +908,7 @@ fn run_known_host_executable(
             ));
         }
 
-        return mcp::run_stdio_mcp_server(executable, &mcp.commands).map_err(|error| {
+        return mcp::run_stdio_mcp_server_for_pwsh_dir(pwsh_dir, &mcp.commands).map_err(|error| {
             MultiPwshError::Host(format!(
                 "failed to start MCP host for selector '{}': {}",
                 selector_input, error
@@ -907,7 +922,7 @@ fn run_known_host_executable(
         (pwsh_args, None)
     };
 
-    pwsh_host::run_pwsh_command_line_for_pwsh_exe(executable, pwsh_args).map_err(|error| {
+    pwsh_host::run_pwsh_command_line_for_pwsh_dir(pwsh_dir, pwsh_args).map_err(|error| {
         MultiPwshError::Host(format!(
             "failed to start native host for selector '{}': {}",
             selector_input, error
@@ -982,16 +997,48 @@ fn is_exact_pwsh_executable_name(executable_path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn is_local_pwsh_apphost(executable_path: &Path) -> bool {
-    if !is_exact_pwsh_executable_name(executable_path) {
-        return false;
+fn has_pwsh_payload_markers(pwsh_dir: &Path) -> bool {
+    pwsh_dir.join("pwsh.dll").is_file() && pwsh_dir.join("pwsh.runtimeconfig.json").is_file()
+}
+
+fn path_file_name_eq_ignore_ascii_case(path: &Path, expected: &str) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
+}
+
+fn resolve_runtime_native_apphost_payload_dir(native_dir: &Path) -> Option<PathBuf> {
+    if !path_file_name_eq_ignore_ascii_case(native_dir, "native") {
+        return None;
     }
 
-    let Some(executable_dir) = executable_path.parent() else {
-        return false;
-    };
+    let rid_dir = native_dir.parent()?;
+    let runtimes_dir = rid_dir.parent()?;
+    if !path_file_name_eq_ignore_ascii_case(runtimes_dir, "runtimes") {
+        return None;
+    }
 
-    executable_dir.join("pwsh.dll").is_file() && executable_dir.join("pwsh.runtimeconfig.json").is_file()
+    let shared_payload_dir = runtimes_dir.parent()?;
+    if has_pwsh_payload_markers(shared_payload_dir) {
+        return Some(shared_payload_dir.to_path_buf());
+    }
+
+    None
+}
+
+fn resolve_local_pwsh_apphost_payload_dir(executable_path: &Path) -> Option<PathBuf> {
+    if !is_exact_pwsh_executable_name(executable_path) {
+        return None;
+    }
+
+    let executable_dir = executable_path.parent()?;
+
+    if has_pwsh_payload_markers(executable_dir) {
+        return Some(executable_dir.to_path_buf());
+    }
+
+    resolve_runtime_native_apphost_payload_dir(executable_dir)
 }
 
 fn infer_layout_from_host_shim(os: HostOs, executable_path: &Path) -> Option<InstallLayout> {
@@ -1031,10 +1078,11 @@ fn run_implicit_host_mode_if_needed() -> Result<Option<i32>> {
     let executable_path = env::current_exe()?;
 
     let args: Vec<OsString> = env::args_os().skip(1).collect();
-    if is_local_pwsh_apphost(&executable_path) {
+    if let Some(pwsh_dir) = resolve_local_pwsh_apphost_payload_dir(&executable_path) {
         let os = HostOs::detect()?;
         let venv_layout = default_current_user_layout(os)?;
-        let exit_code = run_known_host_executable(&executable_path, Some(&venv_layout), "local pwsh apphost", args)?;
+        let exit_code =
+            run_known_host_executable_for_pwsh_dir(&pwsh_dir, Some(&venv_layout), "local pwsh apphost", args)?;
         return Ok(Some(exit_code));
     }
 
@@ -3884,7 +3932,10 @@ mod tests {
         fs::write(temp_dir.path().join("pwsh.dll"), "").unwrap();
         fs::write(temp_dir.path().join("pwsh.runtimeconfig.json"), "{}").unwrap();
 
-        assert!(is_local_pwsh_apphost(&executable_path));
+        assert_eq!(
+            resolve_local_pwsh_apphost_payload_dir(&executable_path).as_deref(),
+            Some(temp_dir.path())
+        );
     }
 
     #[test]
@@ -3895,18 +3946,44 @@ mod tests {
         fs::write(temp_dir.path().join("pwsh.dll"), "").unwrap();
         fs::write(temp_dir.path().join("pwsh.runtimeconfig.json"), "{}").unwrap();
 
-        assert!(is_local_pwsh_apphost(&executable_path));
+        assert_eq!(
+            resolve_local_pwsh_apphost_payload_dir(&executable_path).as_deref(),
+            Some(temp_dir.path())
+        );
     }
 
     #[test]
-    fn is_local_pwsh_apphost_rejects_alias_name_with_adjacent_payload() {
+    fn is_local_pwsh_apphost_accepts_runtime_native_shared_payload() {
+        let temp_dir = TempDir::new().unwrap();
+        let native_dir = temp_dir.path().join("runtimes").join("win-x64").join("native");
+        fs::create_dir_all(&native_dir).unwrap();
+        let executable_path = native_dir.join("pwsh.exe");
+        fs::write(&executable_path, "").unwrap();
+        fs::write(temp_dir.path().join("pwsh.dll"), "").unwrap();
+        fs::write(temp_dir.path().join("pwsh.runtimeconfig.json"), "{}").unwrap();
+
+        assert_eq!(
+            resolve_local_pwsh_apphost_payload_dir(&executable_path).as_deref(),
+            Some(temp_dir.path())
+        );
+    }
+
+    #[test]
+    fn is_local_pwsh_apphost_rejects_alias_name_with_local_payloads() {
         let temp_dir = TempDir::new().unwrap();
         let executable_path = temp_dir.path().join("pwsh-preview.exe");
         fs::write(&executable_path, "").unwrap();
         fs::write(temp_dir.path().join("pwsh.dll"), "").unwrap();
         fs::write(temp_dir.path().join("pwsh.runtimeconfig.json"), "{}").unwrap();
 
-        assert!(!is_local_pwsh_apphost(&executable_path));
+        assert!(resolve_local_pwsh_apphost_payload_dir(&executable_path).is_none());
+
+        let native_dir = temp_dir.path().join("runtimes").join("win-x64").join("native");
+        fs::create_dir_all(&native_dir).unwrap();
+        let runtime_native_executable_path = native_dir.join("pwsh-preview.exe");
+        fs::write(&runtime_native_executable_path, "").unwrap();
+
+        assert!(resolve_local_pwsh_apphost_payload_dir(&runtime_native_executable_path).is_none());
     }
 
     #[test]
@@ -3915,14 +3992,32 @@ mod tests {
         let executable_path = temp_dir.path().join("pwsh.exe");
         fs::write(&executable_path, "").unwrap();
 
-        assert!(!is_local_pwsh_apphost(&executable_path));
+        assert!(resolve_local_pwsh_apphost_payload_dir(&executable_path).is_none());
 
         fs::write(temp_dir.path().join("pwsh.dll"), "").unwrap();
-        assert!(!is_local_pwsh_apphost(&executable_path));
+        assert!(resolve_local_pwsh_apphost_payload_dir(&executable_path).is_none());
 
         fs::remove_file(temp_dir.path().join("pwsh.dll")).unwrap();
         fs::write(temp_dir.path().join("pwsh.runtimeconfig.json"), "{}").unwrap();
-        assert!(!is_local_pwsh_apphost(&executable_path));
+        assert!(resolve_local_pwsh_apphost_payload_dir(&executable_path).is_none());
+    }
+
+    #[test]
+    fn is_local_pwsh_apphost_rejects_runtime_native_missing_shared_payload() {
+        let temp_dir = TempDir::new().unwrap();
+        let native_dir = temp_dir.path().join("runtimes").join("linux-x64").join("native");
+        fs::create_dir_all(&native_dir).unwrap();
+        let executable_path = native_dir.join("pwsh");
+        fs::write(&executable_path, "").unwrap();
+
+        assert!(resolve_local_pwsh_apphost_payload_dir(&executable_path).is_none());
+
+        fs::write(temp_dir.path().join("pwsh.dll"), "").unwrap();
+        assert!(resolve_local_pwsh_apphost_payload_dir(&executable_path).is_none());
+
+        fs::remove_file(temp_dir.path().join("pwsh.dll")).unwrap();
+        fs::write(temp_dir.path().join("pwsh.runtimeconfig.json"), "{}").unwrap();
+        assert!(resolve_local_pwsh_apphost_payload_dir(&executable_path).is_none());
     }
 
     #[test]
