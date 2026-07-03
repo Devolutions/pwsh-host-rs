@@ -19,9 +19,9 @@
 
 As an advanced replacement workflow, `multi-pwsh` can be renamed to `pwsh`/`pwsh.exe` and placed directly in a PowerShell SDK/apphost output directory. This mode is intentionally separate from managed alias-shim mode.
 
-Detection uses the executable path reported by the OS, not the current working directory and not `PATH`. It activates only when the executable name is exactly `pwsh` or `pwsh.exe` and the same directory contains both `pwsh.dll` and `pwsh.runtimeconfig.json`. Additional files such as `System.Management.Automation.dll`, `Microsoft.PowerShell.ConsoleHost.dll`, and `Modules/` are expected in complete PowerShell payloads but are not required as marker files.
+Detection uses the executable path reported by the OS, not the current working directory and not `PATH`. It activates only when the executable name is exactly `pwsh` or `pwsh.exe` and either the same directory contains both `pwsh.dll` and `pwsh.runtimeconfig.json`, or the executable is under `runtimes/<rid>/native/` and those marker files exist three directories up at the shared publish root. Additional files such as `System.Management.Automation.dll`, `Microsoft.PowerShell.ConsoleHost.dll`, and `Modules/` are expected in complete PowerShell payloads but are not required as marker files.
 
-When this local payload probe succeeds, `multi-pwsh` bypasses the managed `pwsh` alias policy and layout-shim inference, then hosts the adjacent `pwsh.dll` directly. Host-side preprocessing still applies, including `-venv` / `-VirtualEnvironment`, `-NamedPipeCommand`, stdin command rewriting, MCP mode, startup-hook setup, and PowerShell update-check suppression.
+When this local payload probe succeeds, `multi-pwsh` bypasses the managed `pwsh` alias policy and layout-shim inference, then hosts `pwsh.dll` from the resolved payload directory. Host-side preprocessing still applies, including `-venv` / `-VirtualEnvironment`, `-NamedPipeCommand`, stdin command rewriting, MCP mode, startup-hook setup, and PowerShell update-check suppression.
 
 Hostfxr loading is app-local first. If `hostfxr` is not present beside the payload, `pwsh-host` falls back to the .NET hosting layer via `nethost`/global .NET roots, which supports framework-dependent SDK build output. Self-contained payloads still need their app-local hosting files such as `hostfxr` and `hostpolicy`.
 
