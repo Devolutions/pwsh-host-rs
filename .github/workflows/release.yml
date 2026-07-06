@@ -297,7 +297,7 @@ jobs:
 
       - name: Upload multi-pwsh artifact
         if: ${{ !contains(matrix.target, 'windows-msvc') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.multi_archive }}
           path: ${{ matrix.multi_archive }}
@@ -305,7 +305,7 @@ jobs:
 
       - name: Upload unsigned Windows binary
         if: ${{ contains(matrix.target, 'windows-msvc') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: multi-pwsh-unsigned-${{ matrix.runtime_id }}
           path: target/${{ matrix.target }}/release/${{ matrix.multi_binary }}
@@ -330,7 +330,7 @@ jobs:
 
       - name: Upload NuGet runtime artifact
         if: ${{ !contains(matrix.target, 'windows-msvc') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: multi-pwsh-nuget-${{ matrix.runtime_id }}
           path: nuget-stage/${{ matrix.runtime_id }}/*
@@ -346,13 +346,13 @@ jobs:
 
     steps:
       - name: Download unsigned Windows x64 binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: multi-pwsh-unsigned-win-x64
           path: work/win-x64
 
       - name: Download unsigned Windows arm64 binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: multi-pwsh-unsigned-win-arm64
           path: work/win-arm64
@@ -500,28 +500,28 @@ jobs:
           }
 
       - name: Upload signed Windows x64 archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: multi-pwsh-windows-x64.zip
           path: multi-pwsh-windows-x64.zip
           if-no-files-found: error
 
       - name: Upload signed Windows arm64 archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: multi-pwsh-windows-arm64.zip
           path: multi-pwsh-windows-arm64.zip
           if-no-files-found: error
 
       - name: Upload signed Windows x64 NuGet runtime artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: multi-pwsh-nuget-win-x64
           path: nuget-stage/win-x64/*
           if-no-files-found: error
 
       - name: Upload signed Windows arm64 NuGet runtime artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: multi-pwsh-nuget-win-arm64
           path: nuget-stage/win-arm64/*
@@ -542,7 +542,7 @@ jobs:
           ref: ${{ needs.validate.outputs.checkout_ref }}
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
 
@@ -590,7 +590,7 @@ jobs:
             -Clean:$false
 
       - name: Upload native NuGet package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: native-nuget
           path: artifacts/native-nuget/*.nupkg
@@ -706,7 +706,7 @@ jobs:
 
       - name: Download native NuGet package artifacts
         if: steps.publish_mode.outputs.dry_run == 'true' || steps.publish_mode.outputs.has_login_user == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: native-nuget
           path: dist
