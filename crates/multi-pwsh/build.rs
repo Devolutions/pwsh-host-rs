@@ -1,5 +1,6 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_PKG_VERSION");
+    println!("cargo:rerun-if-changed=assets/powershell.ico");
 
     if std::env::var_os("CARGO_CFG_WINDOWS").is_none() {
         return;
@@ -17,6 +18,7 @@ fn main() {
         .set("OriginalFilename", "multi-pwsh.exe")
         .set("FileVersion", &version)
         .set("ProductVersion", &version);
+    resource.set_icon("assets/powershell.ico");
     resource.set_manifest(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
