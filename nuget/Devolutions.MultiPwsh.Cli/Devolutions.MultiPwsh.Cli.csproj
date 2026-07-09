@@ -35,6 +35,9 @@
     <Content Include="$(MultiPwshCliStagingRoot)\linux-arm64\multi-pwsh" Pack="true" Condition="Exists('$(MultiPwshCliStagingRoot)\linux-arm64\multi-pwsh')">
       <PackagePath>runtimes\linux-arm64\native</PackagePath>
     </Content>
+    <Content Include="$(MultiPwshCliStagingRoot)\linux-arm\multi-pwsh" Pack="true" Condition="Exists('$(MultiPwshCliStagingRoot)\linux-arm\multi-pwsh')">
+      <PackagePath>runtimes\linux-arm\native</PackagePath>
+    </Content>
     <Content Include="$(MultiPwshCliStagingRoot)\osx-x64\multi-pwsh" Pack="true" Condition="Exists('$(MultiPwshCliStagingRoot)\osx-x64\multi-pwsh')">
       <PackagePath>runtimes\osx-x64\native</PackagePath>
     </Content>

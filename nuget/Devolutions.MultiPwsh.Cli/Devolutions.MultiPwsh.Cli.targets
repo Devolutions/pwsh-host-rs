@@ -47,6 +47,17 @@
     </Content>
   </ItemGroup>
 
+  <ItemGroup Condition="'$(MultiPwshRuntimeNativeContentCopyEnabled)' == 'true' And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'linux-arm')">
+    <Content Include="$(MSBuildThisFileDirectory)..\runtimes\linux-arm\native\multi-pwsh" Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\linux-arm\native\multi-pwsh')">
+      <Link>runtimes\linux-arm\native\multi-pwsh</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <PublishState>Included</PublishState>
+      <Visible>false</Visible>
+      <Pack>false</Pack>
+    </Content>
+  </ItemGroup>
+
   <ItemGroup Condition="'$(MultiPwshRuntimeNativeContentCopyEnabled)' == 'true' And ('$(RuntimeIdentifier)' == '' Or '$(RuntimeIdentifier)' == 'osx-x64')">
     <Content Include="$(MSBuildThisFileDirectory)..\runtimes\osx-x64\native\multi-pwsh" Condition="Exists('$(MSBuildThisFileDirectory)..\runtimes\osx-x64\native\multi-pwsh')">
       <Link>runtimes\osx-x64\native\multi-pwsh</Link>

@@ -4,7 +4,7 @@
       <MultiPwshAppHostPackageRoot Condition="'$(MultiPwshAppHostPackageRoot)' == ''">$(MSBuildThisFileDirectory)..\</MultiPwshAppHostPackageRoot>
       <MultiPwshAppHostRuntimeNativeRoot Condition="'$(MultiPwshAppHostRuntimeNativeRoot)' == ''">$(MultiPwshAppHostPackageRoot)runtimes\</MultiPwshAppHostRuntimeNativeRoot>
       <MultiPwshAppHostManifestPath Condition="'$(MultiPwshAppHostManifestPath)' == ''">$(MultiPwshAppHostPackageRoot)build\Devolutions.MultiPwsh.Cli.AppHostManifest.json</MultiPwshAppHostManifestPath>
-      <MultiPwshAppHostSupportedRuntimeIdentifiers Condition="'$(MultiPwshAppHostSupportedRuntimeIdentifiers)' == ''">win-x64;win-arm64;linux-x64;linux-arm64;osx-x64;osx-arm64</MultiPwshAppHostSupportedRuntimeIdentifiers>
+      <MultiPwshAppHostSupportedRuntimeIdentifiers Condition="'$(MultiPwshAppHostSupportedRuntimeIdentifiers)' == ''">win-x64;win-arm64;linux-x64;linux-arm64;linux-arm;osx-x64;osx-arm64</MultiPwshAppHostSupportedRuntimeIdentifiers>
     </PropertyGroup>
 
     <ItemGroup>
@@ -12,7 +12,7 @@
         <NativeFileName>multi-pwsh.exe</NativeFileName>
         <AppHostFileName>pwsh.exe</AppHostFileName>
       </_MultiPwshAppHostAssetDefinition>
-      <_MultiPwshAppHostAssetDefinition Include="linux-x64;linux-arm64;osx-x64;osx-arm64">
+      <_MultiPwshAppHostAssetDefinition Include="linux-x64;linux-arm64;linux-arm;osx-x64;osx-arm64">
         <NativeFileName>multi-pwsh</NativeFileName>
         <AppHostFileName>pwsh</AppHostFileName>
       </_MultiPwshAppHostAssetDefinition>

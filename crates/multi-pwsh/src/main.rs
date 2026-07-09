@@ -1614,6 +1614,7 @@ fn multi_pwsh_asset_name(target_os: HostOs, target_arch: HostArch) -> Result<Str
     let arch = match (target_os, target_arch) {
         (_, HostArch::X64) => "x64",
         (HostOs::Windows | HostOs::Macos | HostOs::Linux, HostArch::Arm64) => "arm64",
+        (HostOs::Linux, HostArch::Arm32) => "arm",
         _ => {
             return Err(MultiPwshError::UnsupportedPlatform(format!(
                 "multi-pwsh does not publish an archive for {} {}",
@@ -4101,6 +4102,13 @@ mod tests {
         assert!(options.include_prerelease);
         assert!(options.arch.is_none());
         assert_eq!(options.checksum_source, ChecksumSource::ReleaseAsset);
+    }
+
+    #[test]
+    fn multi_pwsh_asset_name_supports_linux_arm32() {
+        let asset_name = multi_pwsh_asset_name(HostOs::Linux, HostArch::Arm32).unwrap();
+
+        assert_eq!(asset_name, "multi-pwsh-linux-arm.zip");
     }
 
     #[test]
