@@ -7,6 +7,6 @@
     <MultiPwshAppHostPackageRoot Condition="'$(MultiPwshAppHostPackageRoot)' == ''">$(MSBuildThisFileDirectory)..\</MultiPwshAppHostPackageRoot>
     <MultiPwshAppHostRuntimeNativeRoot Condition="'$(MultiPwshAppHostRuntimeNativeRoot)' == ''">$(MultiPwshAppHostPackageRoot)runtimes\</MultiPwshAppHostRuntimeNativeRoot>
     <MultiPwshAppHostManifestPath Condition="'$(MultiPwshAppHostManifestPath)' == ''">$(MultiPwshAppHostPackageRoot)build\Devolutions.MultiPwsh.Cli.AppHostManifest.json</MultiPwshAppHostManifestPath>
-    <MultiPwshAppHostSupportedRuntimeIdentifiers Condition="'$(MultiPwshAppHostSupportedRuntimeIdentifiers)' == ''">win-x64;win-arm64;linux-x64;linux-arm64;osx-x64;osx-arm64</MultiPwshAppHostSupportedRuntimeIdentifiers>
+    <MultiPwshAppHostSupportedRuntimeIdentifiers Condition="'$(MultiPwshAppHostSupportedRuntimeIdentifiers)' == ''">win-x64;win-arm64;linux-x64;linux-arm64;linux-arm;osx-x64;osx-arm64</MultiPwshAppHostSupportedRuntimeIdentifiers>
   </PropertyGroup>
 </Project>

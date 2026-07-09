@@ -181,6 +181,13 @@ jobs:
             multi_archive: multi-pwsh-linux-arm64.zip
             multi_binary: multi-pwsh
 
+          - name: linux-arm
+            os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            runtime_id: linux-arm
+            multi_archive: multi-pwsh-linux-arm.zip
+            multi_binary: multi-pwsh
+
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -238,6 +245,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
+      - name: Install Linux ARM linker
+        if: matrix.target == 'armv7-unknown-linux-gnueabihf'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf
+
       - name: Configure static MSVC runtime
         if: contains(matrix.target, 'windows-msvc')
         shell: pwsh
@@ -248,6 +261,7 @@ jobs:
         shell: pwsh
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
         run: |
           cargo build --locked --release --package multi-pwsh --bin multi-pwsh --target "${{ matrix.target }}"
 
@@ -559,6 +573,7 @@ jobs:
             @{ Artifact = 'multi-pwsh-nuget-win-arm64'; Rid = 'win-arm64'; Binary = 'multi-pwsh.exe' },
             @{ Artifact = 'multi-pwsh-nuget-linux-x64'; Rid = 'linux-x64'; Binary = 'multi-pwsh' },
             @{ Artifact = 'multi-pwsh-nuget-linux-arm64'; Rid = 'linux-arm64'; Binary = 'multi-pwsh' },
+            @{ Artifact = 'multi-pwsh-nuget-linux-arm'; Rid = 'linux-arm'; Binary = 'multi-pwsh' },
             @{ Artifact = 'multi-pwsh-nuget-osx-x64'; Rid = 'osx-x64'; Binary = 'multi-pwsh' },
             @{ Artifact = 'multi-pwsh-nuget-osx-arm64'; Rid = 'osx-arm64'; Binary = 'multi-pwsh' }
           )

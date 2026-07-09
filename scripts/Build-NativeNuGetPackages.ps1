@@ -8,7 +8,7 @@ param(
 
     [string]$OutputRoot,
 
-    [string[]]$RuntimeIdentifiers = @('win-x64', 'win-arm64', 'linux-x64', 'linux-arm64', 'osx-x64', 'osx-arm64'),
+    [string[]]$RuntimeIdentifiers = @('win-x64', 'win-arm64', 'linux-x64', 'linux-arm64', 'linux-arm', 'osx-x64', 'osx-arm64'),
 
     [ValidateSet('Cli')]
     [string[]]$Packages = @('Cli'),
@@ -79,6 +79,7 @@ function Resolve-RustTarget {
         'win-arm64' { @{ CargoTarget = 'aarch64-pc-windows-msvc'; BinaryName = 'multi-pwsh.exe' } }
         'linux-x64' { @{ CargoTarget = 'x86_64-unknown-linux-gnu'; BinaryName = 'multi-pwsh' } }
         'linux-arm64' { @{ CargoTarget = 'aarch64-unknown-linux-gnu'; BinaryName = 'multi-pwsh' } }
+        'linux-arm' { @{ CargoTarget = 'armv7-unknown-linux-gnueabihf'; BinaryName = 'multi-pwsh' } }
         'osx-x64' { @{ CargoTarget = 'x86_64-apple-darwin'; BinaryName = 'multi-pwsh' } }
         'osx-arm64' { @{ CargoTarget = 'aarch64-apple-darwin'; BinaryName = 'multi-pwsh' } }
         default { throw "Unsupported runtime identifier: $RuntimeIdentifier" }
@@ -290,6 +291,7 @@ foreach ($rid in $RuntimeIdentifiers) {
 
     if (-not $NoBuild) {
         $env:CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = 'aarch64-linux-gnu-gcc'
+        $env:CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER = 'arm-linux-gnueabihf-gcc'
         $previousRustFlags = $env:RUSTFLAGS
         try {
             if ($target['CargoTarget'] -like '*-windows-msvc') {

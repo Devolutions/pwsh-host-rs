@@ -90,8 +90,9 @@ uname_m="$(uname -m)"
 case "${uname_m}" in
   x86_64 | amd64) arch="x64" ;;
   aarch64 | arm64) arch="arm64" ;;
+  armv7l | armv7* | armhf) arch="arm" ;;
   *)
-    echo "Unsupported architecture: ${uname_m}. Supported arch: x86_64/amd64, aarch64/arm64." >&2
+    echo "Unsupported architecture: ${uname_m}. Supported arch: x86_64/amd64, aarch64/arm64, armv7/armhf." >&2
     exit 1
     ;;
 esac
