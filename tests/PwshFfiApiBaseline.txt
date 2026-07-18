@@ -224,6 +224,21 @@ facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Devolutions.PowerShell
 facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Devolutions.PowerShell.Ffi.PowerShellValue Switch(Boolean)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Devolutions.PowerShell.Ffi.PowerShellValue UnsignedInteger(UInt64)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Devolutions.PowerShell.Ffi.PowerShellValue Uri(System.Uri)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean TryGetBoolean(Boolean ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean TryGetBytes(Byte[] ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean TryGetDateTime(System.DateTime ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean TryGetDateTimeOffset(System.DateTimeOffset ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean TryGetDecimal(System.Decimal ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean TryGetDouble(Double ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean TryGetGuid(System.Guid ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean TryGetProperty(System.String, Devolutions.PowerShell.Ffi.PowerShellValue ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean TryGetSignedInteger(Int64 ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean TryGetString(System.String ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean TryGetSwitch(Boolean ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean TryGetUnsignedInteger(UInt64 ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean TryGetUri(System.Uri ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::System.Collections.Generic.IReadOnlyDictionary`2[System.String,Devolutions.PowerShell.Ffi.PowerShellValue] GetPropertyBag()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellValue::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellValue] GetArray()
 facade:property:Devolutions.PowerShell.Ffi.PowerShell::UInt32 AbiVersion
 facade:property:Devolutions.PowerShell.Ffi.PowerShell::UInt64 FeatureFlags
 facade:property:Devolutions.PowerShell.Ffi.PowerShellFfiException::Devolutions.PowerShell.Ffi.PowerShellFfiStatus Status
@@ -329,6 +344,7 @@ facade:property:Devolutions.PowerShell.Ffi.PowerShellStreamSnapshot`1::UInt64 Dr
 facade:property:Devolutions.PowerShell.Ffi.PowerShellStreamSnapshot`1::UInt64 TotalRecordCount
 facade:property:Devolutions.PowerShell.Ffi.PowerShellValue::Devolutions.PowerShell.Ffi.PowerShellValue Null
 facade:property:Devolutions.PowerShell.Ffi.PowerShellValue::Devolutions.PowerShell.Ffi.PowerShellValueKind Kind
+facade:property:Devolutions.PowerShell.Ffi.PowerShellValue::Boolean IsNull
 facade:property:Devolutions.PowerShell.Ffi.PowerShellValueConversionException::System.Type SourceType
 facade:type:Devolutions.PowerShell.Ffi.PowerShell
 facade:type:Devolutions.PowerShell.Ffi.PowerShellFfiException

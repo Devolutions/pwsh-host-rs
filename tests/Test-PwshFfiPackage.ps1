@@ -279,6 +279,95 @@ void Require(bool condition, string message)
     }
 }
 
+void VerifyCopiedValueReaders()
+{
+    Guid expectedGuid = Guid.Parse("3e0a9e49-2cc4-44d0-b4ce-65fc29f5d8b1");
+    Uri expectedUri = new("https://example.test/rdm");
+    DateTime expectedDateTime = new(2026, 7, 18, 10, 30, 0, DateTimeKind.Utc);
+    DateTimeOffset expectedDateTimeOffset = new(2026, 7, 18, 10, 30, 0, TimeSpan.FromHours(-4));
+    PowerShellValue bytes = PowerShellValue.Bytes(new byte[] { 1, 2, 3 });
+    PowerShellValue value = PowerShellValue.PropertyBag(new[]
+    {
+        new KeyValuePair<string, PowerShellValue>("Text", PowerShellValue.String("copied-reader")),
+        new KeyValuePair<string, PowerShellValue>("Switch", PowerShellValue.Switch()),
+        new KeyValuePair<string, PowerShellValue>("Boolean", PowerShellValue.Boolean(true)),
+        new KeyValuePair<string, PowerShellValue>("Signed", PowerShellValue.SignedInteger(-42)),
+        new KeyValuePair<string, PowerShellValue>("Unsigned", PowerShellValue.UnsignedInteger(42)),
+        new KeyValuePair<string, PowerShellValue>("Double", PowerShellValue.Double(1.5)),
+        new KeyValuePair<string, PowerShellValue>("Decimal", PowerShellValue.Decimal(3.25m)),
+        new KeyValuePair<string, PowerShellValue>("Bytes", bytes),
+        new KeyValuePair<string, PowerShellValue>("DateTime", PowerShellValue.DateTime(expectedDateTime)),
+        new KeyValuePair<string, PowerShellValue>("DateTimeOffset", PowerShellValue.DateTimeOffset(expectedDateTimeOffset)),
+        new KeyValuePair<string, PowerShellValue>("Guid", PowerShellValue.Guid(expectedGuid)),
+        new KeyValuePair<string, PowerShellValue>("Uri", PowerShellValue.Uri(expectedUri)),
+        new KeyValuePair<string, PowerShellValue>(
+            "Array",
+            PowerShellValue.Array(new[]
+            {
+                PowerShellValue.SignedInteger(1),
+                PowerShellValue.String("two"),
+            })),
+    });
+
+    Require(
+        PowerShellValue.Null.IsNull &&
+        value.GetPropertyBag().Count == 13 &&
+        value.TryGetProperty("text", out PowerShellValue? text) &&
+        text!.TryGetString(out string? textValue) &&
+        textValue == "copied-reader" &&
+        value.TryGetProperty("Switch", out PowerShellValue? switchValue) &&
+        switchValue!.TryGetSwitch(out bool switchPresent) &&
+        switchPresent &&
+        value.TryGetProperty("Boolean", out PowerShellValue? booleanValue) &&
+        booleanValue!.TryGetBoolean(out bool boolean) &&
+        boolean &&
+        value.TryGetProperty("Signed", out PowerShellValue? signedValue) &&
+        signedValue!.TryGetSignedInteger(out long signed) &&
+        signed == -42 &&
+        value.TryGetProperty("Unsigned", out PowerShellValue? unsignedValue) &&
+        unsignedValue!.TryGetUnsignedInteger(out ulong unsigned) &&
+        unsigned == 42 &&
+        value.TryGetProperty("Double", out PowerShellValue? doubleValue) &&
+        doubleValue!.TryGetDouble(out double doubleResult) &&
+        doubleResult == 1.5 &&
+        value.TryGetProperty("Decimal", out PowerShellValue? decimalValue) &&
+        decimalValue!.TryGetDecimal(out decimal decimalResult) &&
+        decimalResult == 3.25m &&
+        value.TryGetProperty("Bytes", out PowerShellValue? bytesValue) &&
+        bytesValue!.TryGetBytes(out byte[]? byteResult) &&
+        byteResult!.SequenceEqual(new byte[] { 1, 2, 3 }) &&
+        value.TryGetProperty("DateTime", out PowerShellValue? dateTimeValue) &&
+        dateTimeValue!.TryGetDateTime(out DateTime dateTimeResult) &&
+        dateTimeResult == expectedDateTime &&
+        value.TryGetProperty("DateTimeOffset", out PowerShellValue? dateTimeOffsetValue) &&
+        dateTimeOffsetValue!.TryGetDateTimeOffset(out DateTimeOffset dateTimeOffsetResult) &&
+        dateTimeOffsetResult == expectedDateTimeOffset &&
+        value.TryGetProperty("Guid", out PowerShellValue? guidValue) &&
+        guidValue!.TryGetGuid(out Guid guidResult) &&
+        guidResult == expectedGuid &&
+        value.TryGetProperty("Uri", out PowerShellValue? uriValue) &&
+        uriValue!.TryGetUri(out Uri? uriResult) &&
+        uriResult == expectedUri &&
+        value.TryGetProperty("Array", out PowerShellValue? arrayValue) &&
+        arrayValue!.GetArray().Count == 2 &&
+        arrayValue.GetArray()[0].TryGetSignedInteger(out long firstArrayValue) &&
+        firstArrayValue == 1 &&
+        !value.TryGetProperty("missing", out _) &&
+        !value.TryGetString(out _),
+        "Copied PowerShellValue readers did not preserve the documented DTO graph.");
+
+    bool rejectedArrayRead = false;
+    try
+    {
+        _ = value.GetArray();
+    }
+    catch (InvalidOperationException)
+    {
+        rejectedArrayRead = true;
+    }
+    Require(rejectedArrayRead, "Property bags must not be read as arrays.");
+}
+
 async Task VerifyCancellationAndDisposeAsync()
 {
     using (var cancellation = new CancellationTokenSource())
@@ -372,6 +461,7 @@ if (args.Length != 3)
 
 PowerShellRuntime runtime = PowerShellRuntime.Activate(
    new PowerShellPayloadActivationOptions(args[0], args[1], args[2]));
+VerifyCopiedValueReaders();
 const string SecretMarker = "ffi-secret-marker-not-accepted";
 Require(
    PowerShellSecretTransfer.Policy == PowerShellSecretTransferPolicy.Rejected &&
@@ -434,14 +524,26 @@ using (PowerShell projectionBuilder = PowerShell.Create())
         .InvokeWithDiagnostics();
     PowerShellObjectSnapshot projection = projectionResult.Output.Records[0];
     PowerShellInvocationError projectionError = projectionResult.Errors.Records[0];
+    PowerShellValue? projectionBag = projection.PropertyBag;
+    PowerShellValue? projectionTarget = projectionError.TargetValue;
     Require(
         projectionResult.Output.TotalRecordCount == 1 &&
         projectionResult.Output.DroppedRecordCount == 0 &&
-        projection.PropertyBag?.Kind == PowerShellValueKind.PropertyBag &&
+        projectionBag?.Kind == PowerShellValueKind.PropertyBag &&
         projection.PropertyEntryCount == 2 &&
         projection.DroppedPropertyEntryCount == 2 &&
         projection.ScalarValue is null &&
-        projectionError.TargetValue?.Kind == PowerShellValueKind.SignedInteger &&
+        projectionBag is not null &&
+        projectionBag.TryGetProperty("Name", out PowerShellValue? projectionName) &&
+        projectionName!.TryGetString(out string? projectionNameText) &&
+        projectionNameText == "package-projection" &&
+        projectionBag.TryGetProperty("Count", out PowerShellValue? projectionCount) &&
+        projectionCount!.TryGetSignedInteger(out long projectionCountValue) &&
+        projectionCountValue == 2 &&
+        projectionTarget?.Kind == PowerShellValueKind.SignedInteger &&
+        projectionTarget is not null &&
+        projectionTarget.TryGetSignedInteger(out long projectionTargetValue) &&
+        projectionTargetValue == 42 &&
         projectionResult.Errors.TotalRecordCount == 1,
         "Package consumer did not preserve bounded snapshot projections.");
 
@@ -450,9 +552,14 @@ using (PowerShell projectionBuilder = PowerShell.Create())
         !Encoding.UTF8.GetString(stored).Contains(SecretMarker, StringComparison.Ordinal),
         "Snapshot serialization leaked a rejected secret marker.");
     PowerShellInvocationResult restored = PowerShellSnapshotSerializer.Deserialize(stored);
+    PowerShellValue? restoredBag = restored.Output.Records[0].PropertyBag;
     Require(
-        restored.Output.Records[0].PropertyBag?.Kind == PowerShellValueKind.PropertyBag &&
-        restored.Output.Records[0].DroppedPropertyEntryCount == 2,
+        restoredBag?.Kind == PowerShellValueKind.PropertyBag &&
+        restored.Output.Records[0].DroppedPropertyEntryCount == 2 &&
+        restoredBag is not null &&
+        restoredBag.TryGetProperty("Count", out PowerShellValue? restoredCount) &&
+        restoredCount!.TryGetSignedInteger(out long restoredCountValue) &&
+        restoredCountValue == 2,
         "Package consumer did not round-trip the bounded storage/display snapshot.");
 
     try
@@ -756,7 +863,15 @@ PowerShellValue copiedVariable = PowerShellValue.PropertyBag(new[]
 session.SetVariable("FfiCopied", copiedVariable);
 Require(
     session.TryGetVariable("FfiCopied", out PowerShellValue? copiedSnapshot) &&
-    copiedSnapshot?.Kind == PowerShellValueKind.PropertyBag,
+    copiedSnapshot?.Kind == PowerShellValueKind.PropertyBag &&
+    copiedSnapshot is not null &&
+    copiedSnapshot.TryGetProperty("Marker", out PowerShellValue? copiedMarker) &&
+    copiedMarker!.TryGetString(out string? copiedMarkerText) &&
+    copiedMarkerText == "copied-variable" &&
+    copiedSnapshot.TryGetProperty("Items", out PowerShellValue? copiedItems) &&
+    copiedItems!.GetArray().Count == 2 &&
+    copiedItems.GetArray()[0].TryGetSignedInteger(out long copiedFirstItem) &&
+    copiedFirstItem == 3,
     "Session variable storage did not return a copied property-bag snapshot.");
 using (PowerShell copiedVariableBuilder = session.CreatePowerShell())
 {
@@ -770,6 +885,29 @@ using (PowerShell copiedVariableBuilder = session.CreatePowerShell())
         copiedVariableResult.Output.Records[2].DisplayText == "four",
         "Copied session variables were not retained as tagged PowerShell values.");
 }
+session.SetVariable(
+    "FfiResult",
+    PowerShellValue.PropertyBag(
+    [
+        new KeyValuePair<string, PowerShellValue>("Status", PowerShellValue.String("pending")),
+    ]));
+using (PowerShell resultVariableBuilder = session.CreatePowerShell())
+{
+    _ = resultVariableBuilder
+        .AddScript("`$FfiResult = [pscustomobject]@{ Status = 'completed'; Count = 2 }")
+        .Invoke();
+}
+Require(
+    session.TryGetVariable("FfiResult", out PowerShellValue? resultSnapshot) &&
+    resultSnapshot?.Kind == PowerShellValueKind.PropertyBag &&
+    resultSnapshot is not null &&
+    resultSnapshot.TryGetProperty("Status", out PowerShellValue? resultStatus) &&
+    resultStatus!.TryGetString(out string? resultStatusText) &&
+    resultStatusText == "completed" &&
+    resultSnapshot.TryGetProperty("Count", out PowerShellValue? resultCount) &&
+    resultCount!.TryGetSignedInteger(out long resultCountValue) &&
+    resultCountValue == 2,
+    "A value-only script result did not return as a copied session-variable DTO.");
 Require(
     session.RemoveVariable("FfiCopied") &&
     !session.RemoveVariable("FfiCopied") &&

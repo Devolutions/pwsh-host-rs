@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Text;
 
@@ -25,6 +26,8 @@ public sealed class PowerShellValue
     }
 
     public PowerShellValueKind Kind { get; }
+
+    public bool IsNull => Kind == PowerShellValueKind.Null;
 
     public static PowerShellValue Null { get; } = new(PowerShellValueKind.Null, System.Array.Empty<byte>());
 
@@ -163,6 +166,224 @@ public sealed class PowerShellValue
         return From(value, new HashSet<object>(ReferenceEqualityComparer.Instance), 0);
     }
 
+    /// <summary>
+    /// Gets a copied string when this is a tagged string value.
+    /// </summary>
+    public bool TryGetString(out string? value)
+    {
+        if (Kind != PowerShellValueKind.String)
+        {
+            value = null;
+            return false;
+        }
+
+        value = DecodeUtf8(payload);
+        return true;
+    }
+
+    /// <summary>
+    /// Gets a copied switch presence value when this is a tagged switch.
+    /// </summary>
+    public bool TryGetSwitch(out bool value)
+    {
+        return TryGetBoolean(PowerShellValueKind.Switch, out value);
+    }
+
+    /// <summary>
+    /// Gets a copied Boolean value when this is a tagged Boolean.
+    /// </summary>
+    public bool TryGetBoolean(out bool value)
+    {
+        return TryGetBoolean(PowerShellValueKind.Boolean, out value);
+    }
+
+    public bool TryGetSignedInteger(out long value)
+    {
+        if (Kind != PowerShellValueKind.SignedInteger)
+        {
+            value = default;
+            return false;
+        }
+
+        value = ReadInt64(payload, 0);
+        return true;
+    }
+
+    public bool TryGetUnsignedInteger(out ulong value)
+    {
+        if (Kind != PowerShellValueKind.UnsignedInteger)
+        {
+            value = default;
+            return false;
+        }
+
+        value = ReadUInt64(payload, 0);
+        return true;
+    }
+
+    public bool TryGetDouble(out double value)
+    {
+        if (Kind != PowerShellValueKind.Double)
+        {
+            value = default;
+            return false;
+        }
+
+        value = BitConverter.Int64BitsToDouble(ReadInt64(payload, 0));
+        return true;
+    }
+
+    public bool TryGetDecimal(out decimal value)
+    {
+        if (Kind != PowerShellValueKind.Decimal)
+        {
+            value = default;
+            return false;
+        }
+
+        return decimal.TryParse(
+            DecodeUtf8(payload),
+            NumberStyles.Number,
+            CultureInfo.InvariantCulture,
+            out value);
+    }
+
+    /// <summary>
+    /// Gets a copied byte array when this is a tagged byte value.
+    /// </summary>
+    public bool TryGetBytes(out byte[]? value)
+    {
+        if (Kind != PowerShellValueKind.Bytes)
+        {
+            value = null;
+            return false;
+        }
+
+        value = (byte[])payload.Clone();
+        return true;
+    }
+
+    public bool TryGetDateTime(out DateTime value)
+    {
+        if (Kind != PowerShellValueKind.DateTime)
+        {
+            value = default;
+            return false;
+        }
+
+        value = System.DateTime.FromBinary(ReadInt64(payload, 0));
+        return true;
+    }
+
+    public bool TryGetDateTimeOffset(out DateTimeOffset value)
+    {
+        if (Kind != PowerShellValueKind.DateTimeOffset)
+        {
+            value = default;
+            return false;
+        }
+
+        value = DecodeDateTimeOffset(payload);
+        return true;
+    }
+
+    public bool TryGetGuid(out Guid value)
+    {
+        if (Kind != PowerShellValueKind.Guid)
+        {
+            value = default;
+            return false;
+        }
+
+        return System.Guid.TryParseExact(DecodeUtf8(payload), "D", out value);
+    }
+
+    public bool TryGetUri(out Uri? value)
+    {
+        if (Kind != PowerShellValueKind.Uri)
+        {
+            value = null;
+            return false;
+        }
+
+        return System.Uri.TryCreate(DecodeUtf8(payload), System.UriKind.Absolute, out value);
+    }
+
+    /// <summary>
+    /// Returns a copied, immutable sequence of the documented tagged values.
+    /// </summary>
+    public IReadOnlyList<PowerShellValue> GetArray()
+    {
+        if (Kind != PowerShellValueKind.Array)
+        {
+            throw new InvalidOperationException("The tagged value is not an array.");
+        }
+
+        var values = new List<PowerShellValue>();
+        int offset = 0;
+        uint count = ReadUInt32(payload, ref offset);
+        for (uint index = 0; index < count; index++)
+        {
+            PowerShellValueKind kind = (PowerShellValueKind)ReadUInt32(payload, ref offset);
+            byte[] nestedPayload = ReadBytes(payload, ref offset, ReadUInt32(payload, ref offset)).ToArray();
+            values.Add(FromNative((uint)kind, nestedPayload));
+        }
+
+        if (offset != payload.Length)
+        {
+            throw InvalidNativeValue();
+        }
+
+        return System.Array.AsReadOnly(values.ToArray());
+    }
+
+    /// <summary>
+    /// Returns a copied, immutable property bag of documented tagged values.
+    /// </summary>
+    public IReadOnlyDictionary<string, PowerShellValue> GetPropertyBag()
+    {
+        if (Kind != PowerShellValueKind.PropertyBag)
+        {
+            throw new InvalidOperationException("The tagged value is not a property bag.");
+        }
+
+        var properties = new Dictionary<string, PowerShellValue>(StringComparer.OrdinalIgnoreCase);
+        int offset = 0;
+        uint count = ReadUInt32(payload, ref offset);
+        for (uint index = 0; index < count; index++)
+        {
+            string name = DecodeUtf8(ReadBytes(payload, ref offset, ReadUInt32(payload, ref offset)));
+            PowerShellValueKind kind = (PowerShellValueKind)ReadUInt32(payload, ref offset);
+            byte[] nestedPayload = ReadBytes(payload, ref offset, ReadUInt32(payload, ref offset)).ToArray();
+            if (!properties.TryAdd(name, FromNative((uint)kind, nestedPayload)))
+            {
+                throw InvalidNativeValue();
+            }
+        }
+
+        if (offset != payload.Length)
+        {
+            throw InvalidNativeValue();
+        }
+
+        return new ReadOnlyDictionary<string, PowerShellValue>(properties);
+    }
+
+    /// <summary>
+    /// Looks up a copied property by its case-insensitive documented property name.
+    /// </summary>
+    public bool TryGetProperty(string name, out PowerShellValue? value)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        if (Kind != PowerShellValueKind.PropertyBag)
+        {
+            value = null;
+            return false;
+        }
+
+        return GetPropertyBag().TryGetValue(name, out value);
+    }
+
     private static PowerShellValue From(object? value, HashSet<object> ancestors, int depth)
     {
         return value switch
@@ -259,27 +480,7 @@ public sealed class PowerShellValue
 
     internal IReadOnlyList<PowerShellValue> GetArrayElements()
     {
-        if (Kind != PowerShellValueKind.Array)
-        {
-            throw new InvalidOperationException("The tagged value is not an array.");
-        }
-
-        var values = new List<PowerShellValue>();
-        int offset = 0;
-        uint count = ReadUInt32(payload, ref offset);
-        for (uint index = 0; index < count; index++)
-        {
-            PowerShellValueKind kind = (PowerShellValueKind)ReadUInt32(payload, ref offset);
-            byte[] nestedPayload = ReadBytes(payload, ref offset, ReadUInt32(payload, ref offset)).ToArray();
-            values.Add(FromNative((uint)kind, nestedPayload));
-        }
-
-        if (offset != payload.Length)
-        {
-            throw InvalidNativeValue();
-        }
-
-        return System.Array.AsReadOnly(values.ToArray());
+        return GetArray();
     }
 
     private static PowerShellValue FromPropertyBag(
@@ -437,6 +638,46 @@ public sealed class PowerShellValue
         }
     }
 
+    private bool TryGetBoolean(PowerShellValueKind expectedKind, out bool value)
+    {
+        if (Kind != expectedKind)
+        {
+            value = default;
+            return false;
+        }
+
+        value = payload[0] != 0;
+        return true;
+    }
+
+    private static DateTimeOffset DecodeDateTimeOffset(ReadOnlySpan<byte> value)
+    {
+        long ticks = ReadInt64(value, 0);
+        short offsetMinutes = unchecked((short)(value[sizeof(long)] | (value[sizeof(long) + 1] << 8)));
+        return new System.DateTimeOffset(ticks, TimeSpan.FromMinutes(offsetMinutes));
+    }
+
+    private static long ReadInt64(ReadOnlySpan<byte> value, int offset)
+    {
+        return unchecked((long)ReadUInt64(value, offset));
+    }
+
+    private static ulong ReadUInt64(ReadOnlySpan<byte> value, int offset)
+    {
+        if (offset < 0 || value.Length - offset < sizeof(ulong))
+        {
+            throw InvalidNativeValue();
+        }
+
+        ulong result = 0;
+        for (int index = 0; index < sizeof(ulong); index++)
+        {
+            result |= (ulong)value[offset + index] << (index * 8);
+        }
+
+        return result;
+    }
+
     private static void ValidatePayload(PowerShellValueKind kind, ReadOnlySpan<byte> value, int depth)
         {
             if (depth > MaximumDepth)
@@ -456,19 +697,50 @@ public sealed class PowerShellValue
                 case PowerShellValueKind.SignedInteger:
                 case PowerShellValueKind.UnsignedInteger:
                 case PowerShellValueKind.Double:
+                    if (value.Length != sizeof(long)) throw InvalidNativeValue();
+                    return;
                 case PowerShellValueKind.DateTime:
                     if (value.Length != sizeof(long)) throw InvalidNativeValue();
+                    try
+                    {
+                        _ = System.DateTime.FromBinary(ReadInt64(value, 0));
+                    }
+                    catch (ArgumentException)
+                    {
+                        throw InvalidNativeValue();
+                    }
                     return;
                 case PowerShellValueKind.DateTimeOffset:
                     if (value.Length != sizeof(long) + sizeof(short)) throw InvalidNativeValue();
+                    try
+                    {
+                        _ = DecodeDateTimeOffset(value);
+                    }
+                    catch (ArgumentOutOfRangeException)
+                    {
+                        throw InvalidNativeValue();
+                    }
                     return;
                 case PowerShellValueKind.Bytes:
                     return;
                 case PowerShellValueKind.String:
-                case PowerShellValueKind.Decimal:
-                case PowerShellValueKind.Guid:
-                case PowerShellValueKind.Uri:
                     ValidateUtf8(value);
+                    return;
+                case PowerShellValueKind.Decimal:
+                    if (!decimal.TryParse(
+                        DecodeUtf8(value),
+                        NumberStyles.Number,
+                        CultureInfo.InvariantCulture,
+                        out _))
+                    {
+                        throw InvalidNativeValue();
+                    }
+                    return;
+                case PowerShellValueKind.Guid:
+                    if (!System.Guid.TryParseExact(DecodeUtf8(value), "D", out _)) throw InvalidNativeValue();
+                    return;
+                case PowerShellValueKind.Uri:
+                    if (!System.Uri.TryCreate(DecodeUtf8(value), System.UriKind.Absolute, out _)) throw InvalidNativeValue();
                     return;
                 case PowerShellValueKind.Array:
                     ValidateArray(value, depth);

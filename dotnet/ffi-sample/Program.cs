@@ -15,11 +15,17 @@ PowerShellRuntime runtime = PowerShellRuntime.Activate(
     new PowerShellPayloadActivationOptions(args[0], args[1], args[2]));
 using PowerShell powerShell = runtime.Create();
 PowerShellInvocationResult output = powerShell.AddScript("'nativeaot-in-process'").Invoke();
+PowerShellValue outputScalar = output.Output.Records.Count == 1
+    ? output.Output.Records[0].ScalarValue
+    : null;
 
 if (output.Output.Records.Count != 1 ||
     output.Output.Records[0].DisplayText != "nativeaot-in-process" ||
     output.Output.Records[0].TypeNames.Count == 0 ||
-    output.Output.Records[0].ScalarValue?.Kind != PowerShellValueKind.String ||
+    outputScalar?.Kind != PowerShellValueKind.String ||
+    outputScalar is null ||
+    !outputScalar.TryGetString(out string outputText) ||
+    outputText != "nativeaot-in-process" ||
     output.Output.TotalRecordCount != 1 ||
     output.Output.DroppedRecordCount != 0 ||
     output.State != PowerShellInvocationState.Completed ||

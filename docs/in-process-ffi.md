@@ -345,14 +345,14 @@ below is the current implementation status for RDM-facing work.
 | --- | --- | --- |
 | Explicit payload activation, hostfxr startup, one runtime per process | Implemented | Hash-pinned manifest activation and an opaque `PowerShellRuntime`; only `win-x64` has NativeAOT smoke evidence. |
 | Script or named-command execution with scalar parameters | Implemented | `AddScript`, `AddCommand`, `AddParameter`, and bounded `PowerShellValue` inputs. No raw `object`, `PSObject`, or `SecureString` overload exists. |
-| Output, errors, diagnostics, warning/progress streams | Implemented | Immutable bounded `PowerShellInvocationResult` snapshots; callers inspect streams and terminating state rather than live SMA collections. |
+| Output, errors, diagnostics, warning/progress streams | Implemented | Immutable bounded `PowerShellInvocationResult` snapshots. Safe scalar and property-bag projections are read through typed copied-value readers, never live SMA collections. |
 | Timeout, cancellation, async completion, deterministic disposal | Implemented | `InvokeAsync(CancellationToken)`, `BeginInvoke`, `Wait`, `Stop`, and `SafeHandle` ownership. Cancellation wins and never returns a partial success result. |
 | Long-lived local state | Implemented | Opaque local `PowerShellSession` plus serialized builders. It is not a pool or a remoting session. |
 | `SessionStateProxy.SetVariable` for value data | Implemented, copied-only | `SetVariable`, `TryGetVariable`, and `RemoveVariable` transfer bounded tagged values only. No methods, proxies, handles, or CLR identity survive the boundary. |
 | Approved local modules | Implemented, local-only | Each requested import must map to a manifest-pinned `.psd1` identity: canonical name, path beneath an approved module root, SHA-256 also listed in `files`, and exact `ModuleVersion`. Rust resolves the identity and the payload imports that exact manifest path. This does not validate PowerCLI or remoting dependencies. |
 | `PSCredential` parameter | Intentionally unsupported | Arbitrary scripts can emit or transform a supplied credential. The DTO result model cannot guarantee redaction or a zeroable managed lifetime. |
 | Enumerated RDM capability calls and bounded host interaction | Implemented, opt-in | A registered `PowerShellCapabilitySet` makes only declared typed calls available through the temporary payload-local `$DpsCapabilities` object. `PowerShellHostInteraction` supplies schemas for text, progress, line, and choice interactions; it is not a `PSHost` proxy. |
-| PowerCLI typed return objects, PSRP/WinRM/SSH, pools, transports | Unsupported | Retain the existing SMA/process paths for these families. |
+| PowerCLI typed return objects, PSRP/WinRM/SSH, pools, and transports | Unsupported | Retain the existing SMA/process paths. No CLR type, transport, or live session crosses the facade. |
 
 ### Copied session variables
 
@@ -370,6 +370,54 @@ the process-global operation lock, so they cannot race a runspace mutation.
 `TryGetVariable` cannot return a `PSVariable`, adapted object, methods, or any
 value that cannot be encoded as the documented copied graph; such values return
 `UnsupportedValue` rather than being stringified.
+
+### Value-only projection readers
+
+`PowerShellValue` is an immutable copied DTO, not an opaque serialized
+`PSObject`. Its `TryGetString`, numeric, Boolean, date/time, GUID, URI, and
+byte-array readers, together with `GetArray`, `GetPropertyBag`, and
+`TryGetProperty`, let an RDM adapter map data into its own DTOs without parsing
+display text or snapshot JSON. Arrays and property bags always return copied,
+immutable collections; bytes are cloned on every read.
+
+Output projection is deliberately narrower than input values. A
+`PowerShellObjectSnapshot` can contain either one scalar or a property bag of
+up to 16 scalar properties. Callers must check `IsPropertyBagTruncated` and
+`DroppedPropertyEntryCount` before treating a projected bag as complete. For
+example, a value-only replacement for reading a custom resolver result is:
+
+```csharp
+PowerShellObjectSnapshot record = result.Output.Records.Single();
+if (record.IsPropertyBagTruncated ||
+    record.PropertyBag is not { } properties ||
+    !properties.TryGetProperty("Name", out PowerShellValue? name) ||
+    !name!.TryGetString(out string? connectionName))
+{
+    throw new InvalidOperationException("The resolver result was not a complete DTO projection.");
+}
+```
+
+This is an application-owned projection contract. It is not a substitute for
+`PSObject.BaseObject`, adapted members, methods, PowerCLI CLR types, or generic
+typed invocation.
+
+### Replacing injected RDM data
+
+Value-only scripts can migrate their former injected objects into explicit
+copied variables: for example, `FfiConnection`, `FfiCoreOptions`, and
+`FfiResult`. The caller sets input bags before invoking a session builder. A
+script may replace `FfiResult` with a scalar-only `PSCustomObject` or
+hashtable, and the caller retrieves its bounded property-bag snapshot with
+`TryGetVariable` after the invocation completes. The package NativeAOT
+contract covers this update/readback flow.
+
+The old object's methods do not migrate this way. A reviewed operation that
+needs parent-side behavior must instead be a named `rdm.*` capability with
+explicit arguments and a copied response. A script that needs a local resource
+may create it inside an opaque `PowerShellSession` and use it only through
+approved script or module commands in that same serialized session; no
+`PSSession`, `Runspace`, PowerCLI object, or resource handle is returned to the
+parent.
 
 ### Exact local module identities
 
