@@ -73,11 +73,12 @@ Production activation is deliberately **not** an existence check. Before
 loading `hostfxr`, `dps_pwsh_v2_initialize_payload` canonicalizes the payload
 and manifest paths, parses the manifest, verifies the caller-supplied SHA-256
 pin of the complete manifest bytes, checks the target RID/architecture, and
-SHA-256 verifies every declared file. It also requires hashes for
+SHA-256 verifies every declared file. A hash-pinned manifest must declare
+**every regular file recursively beneath the selected payload root**; an
+undeclared DLL, module file, or other regular file rejects activation. It also requires hashes for
 `pwsh.dll`, `pwsh.runtimeconfig.json`, `pwsh.deps.json`,
 `System.Management.Automation.dll`, `hostfxr.dll`, and `coreclr.dll` on the
-currently supported Windows payload. The manifest may name additional modules
-and native dependencies, which are verified the same way.
+currently supported Windows payload.
 
 The schema is `devolutions-pwsh-payload` version `1`:
 
@@ -94,7 +95,7 @@ The schema is `devolutions-pwsh-payload` version `1`:
     "bindingsAbiVersion": 2,
     "requiredBindingsFeatures": 123136
   },
-  "files": [{ "path": "pwsh.dll", "sha256": "<64 hexadecimal digits>" }],
+  "files": [{ "path": "every/regular/file", "sha256": "<64 hexadecimal digits>" }],
   "trust": { "allowSymlinks": false },
   "sessionPolicy": {
     "modulePaths": [],
@@ -121,16 +122,57 @@ file are canonicalized; a file resolving outside the canonical root is
 rejected. Payload roots reached through normal Windows junction/path
 substitution are accepted after canonicalization. Per-file symlinks are
 rejected unless `trust.allowSymlinks` is explicitly true, and even then must
-resolve inside the payload root.
+resolve inside the payload root. With the default `allowSymlinks: false`, any
+symlink in a hash-pinned payload rejects its complete-closure check.
+
+The hash-pinned manifest itself must be outside the payload root: otherwise a
+manifest that hashes every regular file would need to contain a stable hash of
+its own bytes. The package template is deliberately not a usable manifest.
+Build the `files` array from the installed payload, including nested module
+files, then set the remaining placeholders and pin the final manifest bytes.
+For example, this produces the complete array for a non-symlinked payload:
+
+```powershell
+$payload = (Resolve-Path 'C:\path\to\payload').Path
+$files = @(
+  Get-ChildItem -LiteralPath $payload -Recurse -Force |
+    ForEach-Object {
+      if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "Payload symlinks require an explicitly reviewed allowSymlinks policy: $($_.FullName)"
+      }
+      if (-not $_.PSIsContainer) {
+        [ordered]@{
+          path = [IO.Path]::GetRelativePath($payload, $_.FullName) -replace '\\', '/'
+          sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+      }
+    } |
+    Sort-Object path
+)
+```
+
+`tests/Test-PwshFfiPackage.ps1` uses this same complete-closure approach when
+it generates its smoke-test manifest.
 
 The caller's manifest SHA-256 pin is the trust anchor. This implementation
 does **not** validate a signature and must not be described as signed.
+For hash-pinned activation, the validated files are copied into a fresh
+per-activation staging root, every staged file is hashed again against the
+manifest, and `hostfxr` and PowerShell load only from that staging root. The
+native runtime retains ownership of the staging root for its process lifetime.
+This removes the validation-to-load race against the original payload path.
+The staging directory is an ordinary per-user temporary filesystem directory:
+a peer with the same account and sufficient filesystem access can still modify
+it after verification, so this is not a defense against a hostile same-account
+process. Protect the account and its temporary directory accordingly.
+
 `PowerShellPayloadActivationOptions.UnsafeUntrustedLocalDevelopment` exists
 only for an explicit local-development opt-in: it still requires and validates
-a manifest and all file hashes, but accepts no manifest pin, so an attacker
-who can replace both the manifest and payload can subvert it. Do not use that
-mode for deployment. The obsolete string overloads use this unsafe mode with
-the conventional `devolutions-pwsh-payload.json` beside the payload.
+a manifest and its declared file hashes, but accepts no manifest pin, does not
+require complete closure, and loads the local payload directly. An attacker
+who can replace the manifest or payload can subvert it. Do not use that mode
+for deployment. The obsolete string overloads use this unsafe mode with the
+conventional `devolutions-pwsh-payload.json` beside the payload.
 
 ### Async operations and cancellation
 
@@ -203,8 +245,17 @@ optional, but omitted or empty entries deny the corresponding module paths,
 working directories, module imports, and environment keys. Policy paths are
 canonical, slash-separated relative directories inside the payload (use `.`
 for the payload root); requested facade paths must be absolute existing
-directories and match an approved canonical directory exactly. Module imports
-are bounded names and are resolved only beneath approved module paths.
+directories and match an approved canonical source directory exactly. For
+hash-pinned activation, approved module roots, working directories, and exact
+module-manifest identities are translated to their staged equivalents before
+the managed session is created; initial imports cannot use the original source
+directory. A session working directory selected from the source payload is
+therefore observed as the corresponding staged directory. Module imports are
+bounded names and are resolved only beneath approved module paths. For a
+staged approved module root, the payload-local authorization manager permits
+only external scripts under that root and rejects every other external script.
+This preserves the exact manifest identity and staged closure boundary; it is
+not a general authorization bypass or an additional module search path.
 Diagnostics report policy categories without echoing supplied paths or
 environment values. `CurrentRunspace` rejects all configuration so the ABI
 does not mutate ambient application state.
@@ -442,8 +493,8 @@ outside-root, mismatched-hash, or mismatched-version identities are rejected
 with `SessionPolicyViolation` or a manifest activation error.
 
 This is a local module identity contract, not a module sandbox or a PowerCLI
-claim. The manifest must hash every module file that needs payload-integrity
-coverage, and `win-x64` local built-in module smoke coverage is the only
+claim. The complete-closure requirement hashes every regular module file, and
+`win-x64` local built-in module smoke coverage is the only
 validated configuration. Do not enable PowerCLI, arbitrary module
 initialization, native loading, or remoting modules until their full payload
 dependency closure has separately passed this contract.

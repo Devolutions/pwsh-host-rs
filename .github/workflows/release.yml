@@ -265,6 +265,12 @@ jobs:
         run: |
           cargo build --locked --release --package multi-pwsh --bin multi-pwsh --target "${{ matrix.target }}"
 
+      - name: Build Windows x64 FFI library
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          cargo build --locked --profile ffi-release --package devolutions-pwsh-ffi
+
       - name: Package artifacts
         if: ${{ !contains(matrix.target, 'windows-msvc') }}
         shell: pwsh
@@ -325,6 +331,14 @@ jobs:
           path: target/${{ matrix.target }}/release/${{ matrix.multi_binary }}
           if-no-files-found: error
 
+      - name: Upload unsigned Windows x64 FFI library
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@v6
+        with:
+          name: pwsh-ffi-unsigned-win-x64
+          path: target/ffi-release/devolutions_pwsh_ffi.dll
+          if-no-files-found: error
+
       - name: Stage NuGet runtime artifact
         if: ${{ !contains(matrix.target, 'windows-msvc') }}
         shell: pwsh
@@ -370,6 +384,12 @@ jobs:
         with:
           name: multi-pwsh-unsigned-win-arm64
           path: work/win-arm64
+
+      - name: Download unsigned Windows x64 FFI library
+        uses: actions/download-artifact@v7
+        with:
+          name: pwsh-ffi-unsigned-win-x64
+          path: work/ffi-win-x64
 
       - name: Resolve signing mode
         id: signing_mode
@@ -446,7 +466,7 @@ jobs:
           $extractRoot | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           & $toolPath --version
 
-      - name: Code sign Windows executables
+      - name: Code sign Windows binaries
         if: steps.signing_mode.outputs.should_sign == 'true'
         shell: pwsh
         env:
@@ -459,7 +479,8 @@ jobs:
         run: |
           $binaries = @(
             @{ Rid = 'win-x64'; Path = 'work/win-x64/multi-pwsh.exe' },
-            @{ Rid = 'win-arm64'; Path = 'work/win-arm64/multi-pwsh.exe' }
+            @{ Rid = 'win-arm64'; Path = 'work/win-arm64/multi-pwsh.exe' },
+            @{ Rid = 'win-x64'; Path = 'work/ffi-win-x64/devolutions_pwsh_ffi.dll' }
           )
 
           foreach ($binary in $binaries) {
@@ -541,6 +562,68 @@ jobs:
           path: nuget-stage/win-arm64/*
           if-no-files-found: error
 
+      - name: Upload signed Windows x64 FFI library
+        uses: actions/upload-artifact@v6
+        with:
+          name: pwsh-ffi-signed-win-x64
+          path: work/ffi-win-x64/devolutions_pwsh_ffi.dll
+          if-no-files-found: error
+
+  validate-ffi-package:
+    name: Validate NativeAOT FFI package
+    runs-on: windows-latest
+    needs:
+      - validate
+      - sign-windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.checkout_ref }}
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Install PowerShell 7.4 payload
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/Install-PowerShell74ForCi.ps1
+
+      - name: Download signed Windows x64 FFI library
+        uses: actions/download-artifact@v7
+        with:
+          name: pwsh-ffi-signed-win-x64
+          path: ffi-stage
+
+      - name: Pack and smoke test signed NativeAOT FFI package
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: |
+          $nativeLibrary = Resolve-Path 'ffi-stage\devolutions_pwsh_ffi.dll'
+          dotnet pack dotnet\ffi\Devolutions.PowerShell.Ffi.csproj -c Release `
+            -p:PackageVersion="$env:PACKAGE_VERSION" `
+            -p:PwshFfiNativeLibrary="$nativeLibrary" `
+            -p:BuildPwshFfiNativeAsset=false `
+            -o artifacts\ffi-nuget
+          if ($LASTEXITCODE -ne 0) { throw 'FFI package creation failed.' }
+
+          pwsh -NoLogo -NoProfile -File (Resolve-Path 'tests\Test-PwshFfiPackage.ps1') `
+            -PackageSource (Resolve-Path 'artifacts\ffi-nuget') `
+            -PackageVersion "$env:PACKAGE_VERSION" `
+            -PowerShellPayloadDirectory (Split-Path -Parent $env:PwshExePath)
+
+      - name: Upload FFI NuGet package artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ffi-nuget
+          path: artifacts/ffi-nuget/*.nupkg
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub release
     runs-on: ubuntu-latest
@@ -548,6 +631,7 @@ jobs:
       - validate
       - build
       - sign-windows
+      - validate-ffi-package
 
     steps:
       - name: Checkout
@@ -649,7 +733,10 @@ jobs:
           $cliNugetPackages = Get-ChildItem -Path artifacts/native-nuget -Filter 'Devolutions.MultiPwsh.Cli.*.nupkg' |
             Sort-Object Name |
             ForEach-Object { $_.FullName }
-          $nugetPackages = @($cliNugetPackages)
+          $ffiNugetPackages = Get-ChildItem -Path dist -Recurse -Filter 'Devolutions.PowerShell.Ffi.*.nupkg' |
+            Sort-Object Name |
+            ForEach-Object { $_.FullName }
+          $nugetPackages = @($cliNugetPackages) + @($ffiNugetPackages)
 
           if (-not $zipFiles) {
             throw 'No release archives found under dist'
@@ -657,6 +744,9 @@ jobs:
 
           if (-not $cliNugetPackages) {
             throw 'No CLI NuGet package was produced.'
+          }
+          if (-not $ffiNugetPackages) {
+            throw 'No NativeAOT FFI NuGet package was produced.'
           }
 
           gh release view "$env:RELEASE_TAG" *> $null
@@ -726,6 +816,13 @@ jobs:
           name: native-nuget
           path: dist
 
+      - name: Download NativeAOT FFI NuGet package artifact
+        if: steps.publish_mode.outputs.dry_run == 'true' || steps.publish_mode.outputs.has_login_user == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: ffi-nuget
+          path: dist
+
       - name: Install .NET SDK
         if: steps.publish_mode.outputs.dry_run == 'true' || steps.publish_mode.outputs.has_login_user == 'true'
         uses: actions/setup-dotnet@v5
@@ -757,7 +854,8 @@ jobs:
           }
 
           $packagePatterns = @(
-            'Devolutions.MultiPwsh.Cli.*.nupkg'
+            'Devolutions.MultiPwsh.Cli.*.nupkg',
+            'Devolutions.PowerShell.Ffi.*.nupkg'
           )
 
           $packages = @()

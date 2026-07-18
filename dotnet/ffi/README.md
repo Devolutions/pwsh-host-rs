@@ -16,8 +16,9 @@ PowerShellRuntime runtime = PowerShellRuntime.Activate(
         manifestSha256));
 ```
 
-The manifest must use the `devolutions-pwsh-payload` schema and SHA-256-pin all
-required payload files. The package provides
+The manifest must use the `devolutions-pwsh-payload` schema and SHA-256-pin
+every regular file recursively beneath the selected payload root, including
+nested module dependencies. The package provides
 `contentFiles/any/any/devolutions-pwsh-payload.manifest.template.json`; it is a
 template, not a trusted manifest. Store the final manifest SHA-256 in
 application-controlled deployment configuration. `PowerShell.Initialize(string)`
@@ -42,19 +43,25 @@ CoreCLR is an experimental deployment condition, not a generally supported
 Native deployment is inert by default even for a matching RID. Set
 `DevolutionsPowerShellFfiEnabled=true` to stage the package's
 `runtimes/win-x64/native/devolutions_pwsh_ffi.dll` beside the application. The
-package never embeds a PowerShell payload.
+package never embeds a PowerShell payload. Its native asset uses a static MSVC
+runtime and the dedicated unwind-enabled `ffi-release` Rust profile, so native
+panic containment remains effective at the ABI boundary.
 
 The facade requires native ABI v2 and obtains a bounded diagnostic from the
 specific native call that failed. Its `SafeHandle` wrapper keeps a native handle
 alive for each P/Invoke call, including concurrent disposal races. Empty
 strings are valid UTF-8 inputs; embedded NUL characters are rejected.
 
-Activation verifies canonical paths, no file traversal, target RID and
-architecture, manifest schema/pin, every declared file hash, PowerShell/.NET/
-hostfxr versions, and bindings ABI/features before `hostfxr` is initialized.
-It does not validate signatures. `UnsafeUntrustedLocalDevelopment` is an
-explicitly unsafe opt-in that accepts an unpinned manifest only; it is not
-appropriate for deployment.
+Hash-pinned activation verifies canonical paths, no file traversal, target RID
+and architecture, manifest schema/pin, complete file closure, every declared
+file hash, PowerShell/.NET/hostfxr versions, and bindings ABI/features before
+`hostfxr` is initialized. It then copies and re-verifies the declared files in
+a fresh process-owned staging directory and loads only from that directory.
+The staging directory remains owned for process runtime lifetime; a hostile
+same-account process with filesystem access remains outside this boundary. It
+does not validate signatures. `UnsafeUntrustedLocalDevelopment` is an explicitly
+unsafe, direct local-load opt-in that accepts an unpinned manifest and does not
+enforce complete closure; it is not appropriate for deployment.
 
 `PowerShellValue` is the only way to pass non-string values. It supports
 bounded primitive values, bytes, arrays, and property bags that become copied

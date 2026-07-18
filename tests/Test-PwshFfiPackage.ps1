@@ -77,24 +77,38 @@ function New-PowerShellPayloadManifest {
         throw 'Unable to read the PowerShell payload version.'
     }
 
-    $files = @(
-        foreach ($relativePath in @(
+    $requiredFiles = @(
         'pwsh.dll',
         'pwsh.runtimeconfig.json',
         'pwsh.deps.json',
         'System.Management.Automation.dll',
         'hostfxr.dll',
-        'coreclr.dll')) {
+        'coreclr.dll')
+    foreach ($relativePath in $requiredFiles) {
         $fullPath = Join-Path $PayloadDirectory $relativePath
         if (-not (Test-Path $fullPath -PathType Leaf)) {
             throw "The PowerShell payload is missing required manifest file: $relativePath"
         }
-        [ordered]@{
-            path = $relativePath
-            sha256 = (Get-FileHash -Path $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        }
-        }
+    }
+
+    $files = @(
+        Get-ChildItem -LiteralPath $PayloadDirectory -Recurse -Force | ForEach-Object {
+            if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "The PowerShell payload contains a symlink/reparse point that this generator does not permit: $($_.FullName)"
+            }
+            if (-not $_.PSIsContainer) {
+                $relativePath = [IO.Path]::GetRelativePath($PayloadDirectory, $_.FullName) -replace '\\', '/'
+                [ordered]@{
+                    path = $relativePath
+                    sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                }
+            }
+        } | Sort-Object { $_.path }
     )
+    $fileHashes = @{}
+    foreach ($file in $files) {
+        $fileHashes[$file.path] = $file.sha256
+    }
     $moduleIdentities = @(
         foreach ($name in @('Microsoft.PowerShell.Security', 'Microsoft.PowerShell.Utility')) {
             $relativePath = "Modules/$name/$name.psd1"
@@ -106,10 +120,9 @@ function New-PowerShellPayloadManifest {
             if ($null -eq $moduleManifest.ModuleVersion) {
                 throw "The PowerShell module manifest does not define ModuleVersion: $relativePath"
             }
-            $sha256 = (Get-FileHash -Path $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            $files += [ordered]@{
-                path = $relativePath
-                sha256 = $sha256
+            $sha256 = $fileHashes[$relativePath]
+            if ([string]::IsNullOrWhiteSpace($sha256)) {
+                throw "The PowerShell module manifest is not included in the complete payload file list: $relativePath"
             }
             [ordered]@{
                 name = $name
@@ -187,6 +200,25 @@ try {
         if (-not $archivePaths.Contains($requiredPath)) {
             throw "Package is missing required entry: $requiredPath"
         }
+    }
+
+    $nativeEntry = $archive.GetEntry('runtimes/win-x64/native/devolutions_pwsh_ffi.dll')
+    if ($null -eq $nativeEntry) {
+        throw 'Package native FFI asset could not be opened.'
+    }
+
+    $nativeStream = $nativeEntry.Open()
+    $nativeBytes = [System.IO.MemoryStream]::new()
+    try {
+        $nativeStream.CopyTo($nativeBytes)
+    }
+    finally {
+        $nativeStream.Dispose()
+    }
+
+    $nativeImports = [System.Text.Encoding]::ASCII.GetString($nativeBytes.ToArray())
+    if ($nativeImports -match 'VCRUNTIME[0-9_]*\.DLL' -or $nativeImports -match 'MSVCP[0-9_]*\.DLL') {
+        throw 'The packaged native FFI asset must use the static MSVC runtime.'
     }
 }
 finally {
@@ -682,8 +714,9 @@ if (sessionResult.Output.Records.Count != 5 ||
     sessionResult.Output.Records[0].DisplayText != "session-marker" ||
     sessionResult.Output.Records[1].DisplayText != "7" ||
     sessionResult.Output.Records[2].DisplayText != "session-environment" ||
-    !string.Equals(sessionResult.Output.Records[3].DisplayText, args[0], StringComparison.OrdinalIgnoreCase) ||
-    sessionResult.Output.Records[4].DisplayText != "Stop" ||
+string.Equals(sessionResult.Output.Records[3].DisplayText, args[0], StringComparison.OrdinalIgnoreCase) ||
+!File.Exists(Path.Combine(sessionResult.Output.Records[3].DisplayText, "pwsh.dll")) ||
+sessionResult.Output.Records[4].DisplayText != "Stop" ||
     moduleResult.Output.Records.Count != 1 ||
     moduleResult.Output.Records[0].DisplayText != "Microsoft.PowerShell.Utility" ||
     snapshot.InvocationCount != 2 ||
@@ -988,6 +1021,31 @@ using (PowerShell restrictedPowerShell = restrictedSession.CreatePowerShell())
         restrictedResult.Output.Records.Count == 1 &&
         restrictedResult.Output.Records[0].DisplayText == "Restricted",
         "The restricted execution-policy subset was not applied.");
+    string unapprovedScript = Path.Combine(Path.GetTempPath(), $"devolutions-pwsh-ffi-{Guid.NewGuid():N}.ps1");
+    File.WriteAllText(unapprovedScript, "'unapproved external script'");
+    try
+    {
+        using PowerShell unapprovedScriptPowerShell = restrictedSession.CreatePowerShell();
+        bool unapprovedScriptRejected;
+        try
+        {
+            PowerShellInvocationResult unapprovedResult = unapprovedScriptPowerShell
+                .AddScript($"& '{unapprovedScript.Replace("'", "''", StringComparison.Ordinal)}'")
+                .Invoke();
+            unapprovedScriptRejected = unapprovedResult.HadErrors;
+        }
+        catch (PowerShellInvocationException)
+        {
+            unapprovedScriptRejected = true;
+        }
+        Require(
+            unapprovedScriptRejected,
+            "The restricted session ran an external script outside its approved staged module roots.");
+    }
+    finally
+    {
+        File.Delete(unapprovedScript);
+    }
 }
 
 PowerShellSession leasedSession = runtime.CreateSession(

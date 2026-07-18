@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define DPS_PWSH_ABI_VERSION 2u
 #define DPS_PWSH_ABI_MINIMUM_COMPATIBLE_VERSION 2u
 #define DPS_PWSH_FEATURE_STRUCTURED_INVOCATION_ERRORS (UINT64_C(1) << 0)
@@ -724,5 +728,9 @@ int32_t dps_pwsh_copy_invocation_error_field_utf8(
     size_t buffer_len,
     size_t* required_len);
 int32_t dps_pwsh_stop(uint64_t handle);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

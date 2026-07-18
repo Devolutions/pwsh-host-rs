@@ -11,7 +11,7 @@ pub const REQUIRED_BINDINGS_ABI_VERSION: u32 = 2;
 pub const REQUIRED_BINDINGS_FEATURES: u64 = (1 << 8) | (1 << 13) | (1 << 14) | (1 << 15) | (1 << 16);
 
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
-const MAX_MANIFEST_FILES: usize = 512;
+const MAX_MANIFEST_FILES: usize = 4096;
 const MANIFEST_SCHEMA: &str = "devolutions-pwsh-payload";
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
 
@@ -52,6 +52,22 @@ pub struct ValidationRequest<'a> {
 pub struct ValidatedPayload {
     pub payload_root: PathBuf,
     pub session_policy: SessionPolicy,
+    files: Vec<ValidatedFile>,
+}
+
+pub struct StagedPayload {
+    pub payload_root: PathBuf,
+    pub session_policy: SessionPolicy,
+    pub staging: PayloadStaging,
+}
+
+pub struct PayloadStaging {
+    root: PathBuf,
+}
+
+struct ValidatedFile {
+    relative_path: PathBuf,
+    sha256: String,
 }
 
 #[derive(Clone, Default)]
@@ -61,6 +77,8 @@ pub struct SessionPolicy {
     pub module_imports: HashSet<String>,
     pub module_identities: HashMap<String, ModuleIdentity>,
     pub environment_keys: HashSet<String>,
+    pub(crate) staged_module_paths: HashMap<PathBuf, PathBuf>,
+    pub(crate) staged_working_directories: HashMap<PathBuf, PathBuf>,
 }
 
 #[derive(Clone)]
@@ -159,6 +177,11 @@ pub fn validate(request: ValidationRequest<'_>) -> Result<ValidatedPayload, Vali
                     "payload manifest SHA-256 does not match the activation pin".to_owned(),
                 ));
             }
+            if manifest_path.starts_with(&payload_root) {
+                return Err(ValidationError::ManifestInvalid(
+                    "a hash-pinned payload manifest must reside outside the payload directory".to_owned(),
+                ));
+            }
         }
         TrustPolicy::AllowUntrustedLocalDevelopment => {
             if !request.manifest_sha256.is_empty() {
@@ -171,11 +194,123 @@ pub fn validate(request: ValidationRequest<'_>) -> Result<ValidatedPayload, Vali
 
     let manifest: PayloadManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| ValidationError::ManifestInvalid(format!("payload manifest is not valid JSON: {}", error)))?;
-    let session_policy = validate_manifest(&manifest, &payload_root)?;
+    let (session_policy, files) = validate_manifest(
+        &manifest,
+        &payload_root,
+        request.trust_policy == TrustPolicy::RequireHashPinnedManifest,
+    )?;
 
     Ok(ValidatedPayload {
         payload_root,
         session_policy,
+        files,
+    })
+}
+
+impl PayloadStaging {
+    fn create() -> Result<Self, ValidationError> {
+        static NEXT_STAGING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+        let parent = std::env::temp_dir();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        for attempt in 0..32_u64 {
+            let path = parent.join(format!(
+                "devolutions-pwsh-ffi-{}-{}-{}-{}",
+                std::process::id(),
+                timestamp,
+                NEXT_STAGING.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                attempt,
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                        ValidationError::ManifestInvalid(format!(
+                            "payload staging directory cannot be inspected: {}",
+                            error
+                        ))
+                    })?;
+                    if metadata.file_type().is_symlink() {
+                        let _ = fs::remove_dir(&path);
+                        return Err(ValidationError::ManifestInvalid(
+                            "payload staging directory must not be a symlink".to_owned(),
+                        ));
+                    }
+                    let root = fs::canonicalize(&path).map_err(|error| {
+                        ValidationError::ManifestInvalid(format!(
+                            "payload staging directory cannot be canonicalized: {}",
+                            error
+                        ))
+                    })?;
+                    return Ok(Self { root });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(ValidationError::ManifestInvalid(format!(
+                        "payload staging directory cannot be created: {}",
+                        error
+                    )));
+                }
+            }
+        }
+        Err(ValidationError::ManifestInvalid(
+            "payload staging directory could not be allocated".to_owned(),
+        ))
+    }
+}
+
+impl Drop for PayloadStaging {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+pub fn stage(validated: ValidatedPayload) -> Result<StagedPayload, ValidationError> {
+    let staging = PayloadStaging::create()?;
+    for file in &validated.files {
+        let source = validated.payload_root.join(&file.relative_path);
+        let destination = staging.root.join(&file.relative_path);
+        let parent = destination
+            .parent()
+            .ok_or_else(|| ValidationError::ManifestInvalid("payload staging destination has no parent".to_owned()))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            ValidationError::ManifestInvalid(format!("payload staging directory cannot be created: {}", error))
+        })?;
+        fs::copy(&source, &destination).map_err(|error| {
+            ValidationError::ManifestInvalid(format!("payload file cannot be copied into staging: {}", error))
+        })?;
+    }
+
+    let staged_paths = collect_regular_file_paths(&staging.root, false)?;
+    let expected_paths = validated
+        .files
+        .iter()
+        .map(|file| path_to_manifest_string(&file.relative_path))
+        .collect::<Result<HashSet<_>, _>>()?;
+    if staged_paths != expected_paths {
+        return Err(ValidationError::ManifestInvalid(
+            "payload staging contains files that are not declared by the manifest".to_owned(),
+        ));
+    }
+    for file in &validated.files {
+        let staged = staging.root.join(&file.relative_path);
+        let actual = sha256_file(&staged).map_err(|error| {
+            ValidationError::ManifestInvalid(format!("staged payload file cannot be hashed: {}", error))
+        })?;
+        if actual != file.sha256 {
+            return Err(ValidationError::HashMismatch(
+                "staged payload file SHA-256 does not match the manifest".to_owned(),
+            ));
+        }
+    }
+
+    let session_policy = rebase_session_policy(validated.session_policy, &validated.payload_root, &staging.root)?;
+    Ok(StagedPayload {
+        payload_root: staging.root.clone(),
+        session_policy,
+        staging,
     })
 }
 
@@ -235,7 +370,11 @@ fn read_manifest(path: &Path) -> Result<Vec<u8>, ValidationError> {
         .map_err(|error| ValidationError::ManifestInvalid(format!("payload manifest cannot be read: {}", error)))
 }
 
-fn validate_manifest(manifest: &PayloadManifest, payload_root: &Path) -> Result<SessionPolicy, ValidationError> {
+fn validate_manifest(
+    manifest: &PayloadManifest,
+    payload_root: &Path,
+    require_complete_file_closure: bool,
+) -> Result<(SessionPolicy, Vec<ValidatedFile>), ValidationError> {
     if manifest.schema != MANIFEST_SCHEMA || manifest.schema_version != MANIFEST_SCHEMA_VERSION {
         return Err(ValidationError::ManifestInvalid(format!(
             "payload manifest must declare schema '{}' version {}",
@@ -270,9 +409,10 @@ fn validate_manifest(manifest: &PayloadManifest, payload_root: &Path) -> Result<
         .as_ref()
         .map(|trust| trust.allow_symlinks)
         .unwrap_or(false);
-    validate_payload_files(manifest, payload_root, allow_symlinks)?;
+    let files = validate_payload_files(manifest, payload_root, allow_symlinks, require_complete_file_closure)?;
     validate_runtime_versions(manifest, payload_root)?;
-    validate_session_policy(manifest, payload_root)
+    let session_policy = validate_session_policy(manifest, payload_root)?;
+    Ok((session_policy, files))
 }
 
 fn validate_session_policy(manifest: &PayloadManifest, payload_root: &Path) -> Result<SessionPolicy, ValidationError> {
@@ -330,6 +470,12 @@ fn validate_session_policy(manifest: &PayloadManifest, payload_root: &Path) -> R
     }
 
     Ok(SessionPolicy {
+        staged_module_paths: module_paths.iter().cloned().map(|path| (path.clone(), path)).collect(),
+        staged_working_directories: working_directories
+            .iter()
+            .cloned()
+            .map(|path| (path.clone(), path))
+            .collect(),
         module_paths,
         working_directories,
         module_imports,
@@ -515,7 +661,8 @@ fn validate_payload_files(
     manifest: &PayloadManifest,
     payload_root: &Path,
     allow_symlinks: bool,
-) -> Result<(), ValidationError> {
+    require_complete_file_closure: bool,
+) -> Result<Vec<ValidatedFile>, ValidationError> {
     if manifest.files.is_empty() || manifest.files.len() > MAX_MANIFEST_FILES {
         return Err(ValidationError::ManifestInvalid(format!(
             "payload manifest must contain between one and {} files",
@@ -524,6 +671,7 @@ fn validate_payload_files(
     }
 
     let mut paths = HashSet::new();
+    let mut files = Vec::with_capacity(manifest.files.len());
     for file in &manifest.files {
         let relative = parse_relative_file_path(&file.path)?;
         let path_key = normalized_path_key(&file.path);
@@ -535,7 +683,7 @@ fn validate_payload_files(
         }
         let expected_hash =
             normalize_sha256(&file.sha256, "payload file SHA-256").map_err(ValidationError::ManifestInvalid)?;
-        let payload_file = payload_root.join(relative);
+        let payload_file = payload_root.join(&relative);
         let metadata = fs::symlink_metadata(&payload_file).map_err(|error| {
             ValidationError::ManifestInvalid(format!("manifest file '{}' cannot be inspected: {}", file.path, error))
         })?;
@@ -568,6 +716,10 @@ fn validate_payload_files(
                 file.path
             )));
         }
+        files.push(ValidatedFile {
+            relative_path: relative,
+            sha256: expected_hash,
+        });
     }
 
     for required_file in required_payload_files() {
@@ -578,7 +730,187 @@ fn validate_payload_files(
             )));
         }
     }
-    Ok(())
+    if require_complete_file_closure {
+        let actual_paths = collect_regular_file_paths(payload_root, allow_symlinks)?;
+        for path in actual_paths {
+            if !paths.contains(&normalized_path_key(&path)) {
+                return Err(ValidationError::ManifestInvalid(format!(
+                    "payload manifest does not hash regular file '{}'",
+                    path
+                )));
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn collect_regular_file_paths(payload_root: &Path, allow_symlinks: bool) -> Result<HashSet<String>, ValidationError> {
+    let mut result = HashSet::new();
+    let mut ancestors = HashSet::new();
+    collect_regular_file_paths_in(payload_root, payload_root, allow_symlinks, &mut ancestors, &mut result)?;
+    Ok(result)
+}
+
+fn collect_regular_file_paths_in(
+    payload_root: &Path,
+    directory: &Path,
+    allow_symlinks: bool,
+    ancestors: &mut HashSet<PathBuf>,
+    result: &mut HashSet<String>,
+) -> Result<(), ValidationError> {
+    let canonical_directory = fs::canonicalize(directory).map_err(|error| {
+        ValidationError::ManifestInvalid(format!("payload directory cannot be canonicalized: {}", error))
+    })?;
+    if !canonical_directory.starts_with(payload_root) || !canonical_directory.is_dir() {
+        return Err(ValidationError::ManifestInvalid(
+            "payload directory escapes the canonical payload root".to_owned(),
+        ));
+    }
+    if !ancestors.insert(canonical_directory.clone()) {
+        return Err(ValidationError::ManifestInvalid(
+            "payload directory contains a symlink cycle".to_owned(),
+        ));
+    }
+
+    let outcome = (|| {
+        for entry in fs::read_dir(directory)
+            .map_err(|error| ValidationError::ManifestInvalid(format!("payload directory cannot be read: {}", error)))?
+        {
+            let entry = entry.map_err(|error| {
+                ValidationError::ManifestInvalid(format!("payload directory entry cannot be read: {}", error))
+            })?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                ValidationError::ManifestInvalid(format!("payload entry cannot be inspected: {}", error))
+            })?;
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                if !allow_symlinks {
+                    return Err(ValidationError::ManifestInvalid(
+                        "payload contains a symlink but the manifest does not permit symlinks".to_owned(),
+                    ));
+                }
+                let target = fs::canonicalize(&path).map_err(|error| {
+                    ValidationError::ManifestInvalid(format!("payload symlink cannot be canonicalized: {}", error))
+                })?;
+                if !target.starts_with(payload_root) {
+                    return Err(ValidationError::ManifestInvalid(
+                        "payload symlink escapes the canonical payload root".to_owned(),
+                    ));
+                }
+                if target.is_file() {
+                    result.insert(relative_manifest_path(payload_root, &path)?);
+                } else if target.is_dir() {
+                    collect_regular_file_paths_in(payload_root, &path, allow_symlinks, ancestors, result)?;
+                } else {
+                    return Err(ValidationError::ManifestInvalid(
+                        "payload symlink must resolve to a regular file or directory".to_owned(),
+                    ));
+                }
+            } else if file_type.is_file() {
+                result.insert(relative_manifest_path(payload_root, &path)?);
+            } else if file_type.is_dir() {
+                collect_regular_file_paths_in(payload_root, &path, allow_symlinks, ancestors, result)?;
+            }
+        }
+        Ok(())
+    })();
+    ancestors.remove(&canonical_directory);
+    outcome
+}
+
+fn relative_manifest_path(payload_root: &Path, path: &Path) -> Result<String, ValidationError> {
+    let relative = path
+        .strip_prefix(payload_root)
+        .map_err(|_| ValidationError::ManifestInvalid("payload file is outside the payload root".to_owned()))?;
+    let value = path_to_manifest_string(relative)?;
+    parse_relative_file_path(&value)?;
+    Ok(value)
+}
+
+fn path_to_manifest_string(path: &Path) -> Result<String, ValidationError> {
+    let mut components = Vec::new();
+    for component in path.components() {
+        let Component::Normal(component) = component else {
+            return Err(ValidationError::ManifestInvalid(
+                "payload file path is not a canonical relative path".to_owned(),
+            ));
+        };
+        let component = component
+            .to_str()
+            .ok_or_else(|| ValidationError::ManifestInvalid("payload file path is not valid UTF-8".to_owned()))?;
+        components.push(component);
+    }
+    if components.is_empty() {
+        return Err(ValidationError::ManifestInvalid(
+            "payload file path is not a canonical relative path".to_owned(),
+        ));
+    }
+    Ok(components.join("/"))
+}
+
+fn rebase_session_policy(
+    mut policy: SessionPolicy,
+    source_root: &Path,
+    staging_root: &Path,
+) -> Result<SessionPolicy, ValidationError> {
+    policy.staged_module_paths = rebase_policy_directories(&policy.module_paths, source_root, staging_root)?;
+    policy.staged_working_directories =
+        rebase_policy_directories(&policy.working_directories, source_root, staging_root)?;
+    for identity in policy.module_identities.values_mut() {
+        identity.manifest_path = rebase_payload_path(&identity.manifest_path, source_root, staging_root)?;
+        if !identity.manifest_path.is_file() {
+            return Err(ValidationError::ManifestInvalid(
+                "staged module manifest is unavailable".to_owned(),
+            ));
+        }
+    }
+    Ok(policy)
+}
+
+fn rebase_policy_directories(
+    source_paths: &HashSet<PathBuf>,
+    source_root: &Path,
+    staging_root: &Path,
+) -> Result<HashMap<PathBuf, PathBuf>, ValidationError> {
+    let mut staged = HashMap::with_capacity(source_paths.len());
+    for source in source_paths {
+        let relative = source.strip_prefix(source_root).map_err(|_| {
+            ValidationError::ManifestInvalid("session policy directory is outside the payload root".to_owned())
+        })?;
+        let target = staging_root.join(relative);
+        fs::create_dir_all(&target).map_err(|error| {
+            ValidationError::ManifestInvalid(format!("staged session policy directory cannot be created: {}", error))
+        })?;
+        let target = fs::canonicalize(&target).map_err(|error| {
+            ValidationError::ManifestInvalid(format!(
+                "staged session policy directory cannot be canonicalized: {}",
+                error
+            ))
+        })?;
+        if !target.starts_with(staging_root) || !target.is_dir() {
+            return Err(ValidationError::ManifestInvalid(
+                "staged session policy directory escapes the payload".to_owned(),
+            ));
+        }
+        staged.insert(source.clone(), target);
+    }
+    Ok(staged)
+}
+
+fn rebase_payload_path(source: &Path, source_root: &Path, staging_root: &Path) -> Result<PathBuf, ValidationError> {
+    let relative = source
+        .strip_prefix(source_root)
+        .map_err(|_| ValidationError::ManifestInvalid("session policy file is outside the payload root".to_owned()))?;
+    let staged = fs::canonicalize(staging_root.join(relative)).map_err(|error| {
+        ValidationError::ManifestInvalid(format!("staged session policy file cannot be canonicalized: {}", error))
+    })?;
+    if !staged.starts_with(staging_root) {
+        return Err(ValidationError::ManifestInvalid(
+            "staged session policy file escapes the payload".to_owned(),
+        ));
+    }
+    Ok(staged)
 }
 
 fn has_symlink_component(
@@ -675,7 +1007,7 @@ fn parse_relative_directory_path(path: &str) -> Result<PathBuf, ValidationError>
 
 fn normalized_path_key(path: &str) -> String {
     if cfg!(windows) {
-        path.to_ascii_lowercase()
+        path.to_lowercase()
     } else {
         path.to_owned()
     }
@@ -921,7 +1253,13 @@ fn windows_product_version(path: &Path) -> Option<String> {
 pub fn create_test_manifest(payload_root: &Path) -> (PathBuf, String) {
     static NEXT_MANIFEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-    let files = required_payload_files()
+    let payload_root = fs::canonicalize(payload_root).unwrap();
+    let mut paths = collect_regular_file_paths(&payload_root, false)
+        .unwrap()
+        .into_iter()
+        .collect::<Vec<_>>();
+    paths.sort();
+    let files = paths
         .iter()
         .map(|path| {
             serde_json::json!({
@@ -930,9 +1268,9 @@ pub fn create_test_manifest(payload_root: &Path) -> (PathBuf, String) {
             })
         })
         .collect::<Vec<_>>();
-    let power_shell_version = power_shell_version(payload_root).unwrap();
-    let dotnet_version = dotnet_version(payload_root).unwrap();
-    let hostfxr_version = hostfxr_version(payload_root).unwrap();
+    let power_shell_version = power_shell_version(&payload_root).unwrap();
+    let dotnet_version = dotnet_version(&payload_root).unwrap();
+    let hostfxr_version = hostfxr_version(&payload_root).unwrap();
     let manifest = serde_json::json!({
         "schema": MANIFEST_SCHEMA,
         "schemaVersion": MANIFEST_SCHEMA_VERSION,
@@ -988,6 +1326,11 @@ mod tests {
 
     fn cleanup(root: &Path) {
         let _ = fs::remove_dir_all(root);
+        let manifest = root
+            .parent()
+            .unwrap()
+            .join(format!("{}.manifest.json", root.file_name().unwrap().to_string_lossy()));
+        let _ = fs::remove_file(manifest);
     }
 
     fn write_file(root: &Path, path: &str, content: &[u8]) {
@@ -1032,7 +1375,10 @@ mod tests {
     }
 
     fn write_manifest(root: &Path, manifest: serde_json::Value) -> (PathBuf, String) {
-        let path = root.join("manifest.json");
+        let path = root
+            .parent()
+            .unwrap()
+            .join(format!("{}.manifest.json", root.file_name().unwrap().to_string_lossy()));
         let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
         let hash = sha256_bytes(&bytes);
         fs::write(&path, bytes).unwrap();
@@ -1057,6 +1403,27 @@ mod tests {
 
         let result = validate(request(&root, &manifest_path, &hash));
         assert!(matches!(result, Err(ValidationError::ManifestInvalid(message)) if message.contains("required file")));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn rejects_hash_pinned_manifest_with_unhashed_nested_file() {
+        let root = fixture_root();
+        let files = required_payload_files()
+            .iter()
+            .map(|path| {
+                write_file(&root, path, path.as_bytes());
+                file_entry(&root, path)
+            })
+            .collect();
+        write_file(&root, "Modules/Unpinned/Unpinned.dll", b"unhashed");
+        let manifest = base_manifest(files);
+        let (manifest_path, hash) = write_manifest(&root, manifest);
+
+        let result = validate(request(&root, &manifest_path, &hash));
+        assert!(
+            matches!(result, Err(ValidationError::ManifestInvalid(message)) if message.contains("Modules/Unpinned/Unpinned.dll"))
+        );
         cleanup(&root);
     }
 
@@ -1088,10 +1455,117 @@ mod tests {
     }
 
     #[test]
+    fn staging_uses_verified_copies_after_source_changes() {
+        let root = fixture_root();
+        let mut entries = required_payload_files()
+            .iter()
+            .map(|path| {
+                write_file(&root, path, path.as_bytes());
+                file_entry(&root, path)
+            })
+            .collect::<Vec<_>>();
+        write_file(&root, "payload.dll", b"before");
+        write_file(
+            &root,
+            "Modules/Example.Module/Example.Module.psd1",
+            b"@{\n    ModuleVersion = '1.2.3'\n}\n",
+        );
+        entries.push(file_entry(&root, "payload.dll"));
+        entries.push(file_entry(&root, "Modules/Example.Module/Example.Module.psd1"));
+        let manifest: PayloadManifest = serde_json::from_value(base_manifest(entries)).unwrap();
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        let files = validate_payload_files(&manifest, &canonical_root, false, false).unwrap();
+        let module_path = fs::canonicalize(root.join("Modules")).unwrap();
+        let module_manifest = fs::canonicalize(root.join("Modules/Example.Module/Example.Module.psd1")).unwrap();
+        let mut module_identities = HashMap::new();
+        module_identities.insert(
+            "example.module".to_owned(),
+            ModuleIdentity {
+                manifest_path: module_manifest,
+            },
+        );
+        let mut module_paths = HashSet::new();
+        module_paths.insert(module_path.clone());
+        let mut working_directories = HashSet::new();
+        working_directories.insert(canonical_root.clone());
+        let staged = stage(ValidatedPayload {
+            payload_root: canonical_root.clone(),
+            session_policy: SessionPolicy {
+                module_paths,
+                working_directories,
+                module_identities,
+                ..SessionPolicy::default()
+            },
+            files,
+        })
+        .unwrap();
+
+        write_file(&root, "payload.dll", b"modified source");
+        assert_ne!(staged.payload_root, canonical_root);
+        assert_eq!(fs::read(staged.payload_root.join("payload.dll")).unwrap(), b"before");
+        assert_eq!(
+            fs::read(staged.payload_root.join("Modules/Example.Module/Example.Module.psd1")).unwrap(),
+            b"@{\n    ModuleVersion = '1.2.3'\n}\n"
+        );
+        assert!(staged
+            .session_policy
+            .staged_module_paths
+            .get(&module_path)
+            .unwrap()
+            .starts_with(&staged.payload_root));
+        assert!(staged
+            .session_policy
+            .staged_working_directories
+            .get(&canonical_root)
+            .unwrap()
+            .starts_with(&staged.payload_root));
+        assert!(staged
+            .session_policy
+            .module_identities
+            .get("example.module")
+            .unwrap()
+            .manifest_path
+            .starts_with(&staged.payload_root));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn staging_rejects_source_replaced_after_validation() {
+        let root = fixture_root();
+        let files = required_payload_files()
+            .iter()
+            .map(|path| {
+                write_file(&root, path, path.as_bytes());
+                file_entry(&root, path)
+            })
+            .collect();
+        let manifest: PayloadManifest = serde_json::from_value(base_manifest(files)).unwrap();
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        let files = validate_payload_files(&manifest, &canonical_root, false, true).unwrap();
+
+        write_file(&root, "pwsh.dll", b"replaced after validation");
+
+        assert!(matches!(
+            stage(ValidatedPayload {
+                payload_root: canonical_root,
+                session_policy: SessionPolicy::default(),
+                files,
+            }),
+            Err(ValidationError::HashMismatch(message)) if message.contains("staged payload file")
+        ));
+        cleanup(&root);
+    }
+
+    #[test]
     fn rejects_rid_mismatch_before_runtime_initialization() {
         let root = fixture_root();
         let mut manifest = base_manifest(Vec::new());
-        manifest["target"]["rid"] = serde_json::Value::String("linux-x64".to_owned());
+        let incompatible_rid = match current_target().0 {
+            "win-x64" => "linux-x64",
+            _ => "win-x64",
+        };
+        assert_ne!(incompatible_rid, current_target().0);
+        manifest["target"]["rid"] = serde_json::Value::String(incompatible_rid.to_owned());
         let (manifest_path, hash) = write_manifest(&root, manifest);
 
         let result = validate(request(&root, &manifest_path, &hash));

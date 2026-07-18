@@ -227,6 +227,12 @@ foreach ($type in $facadeAssemblyObject.GetExportedTypes() | Sort-Object FullNam
 }
 
 $headerForPublicBaseline = Get-Content -Path $headerPath -Raw
+if ($headerForPublicBaseline -notmatch '(?s)#ifdef __cplusplus\s+extern "C" \{\s+#endif') {
+    throw 'The native FFI header must wrap ABI declarations in extern "C" for C++ consumers.'
+}
+if ($headerForPublicBaseline -notmatch '(?s)#ifdef __cplusplus\s+\}\s+#endif\s+#endif\s*$') {
+    throw 'The native FFI header must close its C++ linkage guard before the include guard.'
+}
 foreach ($match in [regex]::Matches($headerForPublicBaseline, '(?m)^int32_t\s+(dps_pwsh_(?:v2_[a-z0-9_]+|get_abi_info))\s*\(')) {
     $actual.Add("header:$($match.Groups[1].Value)")
 }

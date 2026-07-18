@@ -10,6 +10,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Text;
 using System.Management.Automation;
+using System.Management.Automation.Host;
 using System.Management.Automation.Runspaces;
 
 namespace NativeHost
@@ -1540,6 +1541,51 @@ namespace NativeHost
             private bool eventsTruncated;
             private bool disposed;
 
+            private sealed class FfiApprovedModuleAuthorizationManager : AuthorizationManager
+            {
+                private readonly string[] approvedModuleRoots;
+
+                public FfiApprovedModuleAuthorizationManager(string[] approvedModuleRoots)
+                    : base("Devolutions.PowerShell.Ffi")
+                {
+                    this.approvedModuleRoots = approvedModuleRoots;
+                }
+
+                protected override bool ShouldRun(CommandInfo commandInfo, CommandOrigin origin, PSHost host, out Exception reason)
+                {
+                    if (commandInfo is ExternalScriptInfo script)
+                    {
+                        if (approvedModuleRoots.Any(root => IsBeneathRoot(root, script.Path)))
+                        {
+                            reason = null;
+                            return true;
+                        }
+
+                        reason = new PSSecurityException(
+                            "External scripts are allowed only from approved staged module roots.");
+                        return false;
+                    }
+
+                    return base.ShouldRun(commandInfo, origin, host, out reason);
+                }
+
+                private static bool IsBeneathRoot(string root, string path)
+                {
+                    try
+                    {
+                        string relative = Path.GetRelativePath(root, Path.GetFullPath(path));
+                        return relative.Length != 0 &&
+                            !Path.IsPathFullyQualified(relative) &&
+                            relative != ".." &&
+                            !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal);
+                    }
+                    catch (ArgumentException)
+                    {
+                        return false;
+                    }
+                }
+            }
+
             private FfiPowerShellSession(Runspace runspace, bool ownsRunspace, bool addToHistory, uint errorPreference)
             {
                 this.runspace = runspace;
@@ -1656,16 +1702,22 @@ namespace NativeHost
                 {
                     initialState.ExecutionPolicy = Microsoft.PowerShell.ExecutionPolicy.Restricted;
                 }
+                string[] fullModulePaths = NormalizeDirectories(allowedModulePaths, "Allowed module path");
+                if (fullModulePaths.Length != 0)
+                {
+                    // Rust supplies only staged, manifest-approved roots. This authorization
+                    // manager permits external scripts only beneath those roots.
+                    initialState.AuthorizationManager = new FfiApprovedModuleAuthorizationManager(fullModulePaths);
+                }
                 foreach (string moduleImport in moduleImports)
                 {
-                    initialState.ImportPSModule(ResolveModuleImport(allowedModulePaths, moduleImport));
+                    initialState.ImportPSModule(ResolveModuleImport(fullModulePaths, moduleImport));
                 }
 
                 Runspace runspace = RunspaceFactory.CreateRunspace(initialState);
                 try
                 {
                     runspace.Open();
-                    string[] fullModulePaths = NormalizeDirectories(allowedModulePaths, "Allowed module path");
                     if (fullModulePaths.Length != 0)
                     {
                         runspace.SessionStateProxy.SetVariable("env:PSModulePath", string.Join(Path.PathSeparator, fullModulePaths));

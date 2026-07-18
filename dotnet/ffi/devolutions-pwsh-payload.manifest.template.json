@@ -17,12 +17,10 @@
     "requiredBindingsFeatures": 123136
   },
   "files": [
-    { "path": "pwsh.dll", "sha256": "REPLACE_WITH_SHA256" },
-    { "path": "pwsh.runtimeconfig.json", "sha256": "REPLACE_WITH_SHA256" },
-    { "path": "pwsh.deps.json", "sha256": "REPLACE_WITH_SHA256" },
-    { "path": "System.Management.Automation.dll", "sha256": "REPLACE_WITH_SHA256" },
-    { "path": "hostfxr.dll", "sha256": "REPLACE_WITH_SHA256" },
-    { "path": "coreclr.dll", "sha256": "REPLACE_WITH_SHA256" }
+    {
+      "path": "REPLACE_WITH_EVERY_REGULAR_FILE_RELATIVE_TO_THE_PAYLOAD_ROOT",
+      "sha256": "REPLACE_WITH_SHA256"
+    }
   ],
   "trust": {
     "allowSymlinks": false

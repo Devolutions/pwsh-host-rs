@@ -8,3 +8,9 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+# The FFI boundary catches Rust panics before they cross into the native caller.
+# Its shipping cdylib must therefore use unwinding even though CLI releases abort.
+[profile.ffi-release]
+inherits = "release"
+panic = "unwind"

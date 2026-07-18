@@ -8,13 +8,13 @@ use std::convert::TryFrom;
 use std::fs;
 use std::mem;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use payload::{SessionPolicy, TrustPolicy, ValidationError, ValidationRequest, MANIFEST_FILE_NAME};
+use payload::{PayloadStaging, SessionPolicy, TrustPolicy, ValidationError, ValidationRequest, MANIFEST_FILE_NAME};
 use pwsh_host::{
     FfiBindingError, FfiInvocationResult, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot,
     FfiSnapshotValue, HostedRuntime,
@@ -235,6 +235,8 @@ pub struct SessionPoolOptions {
 struct State {
     runtime: Option<Arc<HostedRuntime>>,
     session_policy: Option<Arc<SessionPolicy>>,
+    activation_source_root: Option<PathBuf>,
+    payload_staging: Option<PayloadStaging>,
     sessions: HashMap<u64, Arc<Session>>,
     runspace_sessions: HashMap<u64, Arc<RunspaceSession>>,
     results: HashMap<u64, Arc<InvocationResult>>,
@@ -409,7 +411,7 @@ impl Operation {
     }
 
     fn request_stop(&self) {
-        let should_stop = {
+        let (should_stop, finish_cancelled_capability) = {
             let mut completion = self
                 .completion
                 .0
@@ -425,14 +427,16 @@ impl Operation {
                     drop(completion);
                     self.completion.1.notify_all();
                     self.clear_session_operation();
-                    false
+                    (false, true)
                 }
-                OperationState::Running => !self.cancellation_requested.swap(true, Ordering::AcqRel),
-                OperationState::Completed | OperationState::Cancelled | OperationState::Failed => false,
+                OperationState::Running => (!self.cancellation_requested.swap(true, Ordering::AcqRel), false),
+                OperationState::Completed | OperationState::Cancelled | OperationState::Failed => (false, false),
             }
         };
 
-        if should_stop {
+        if finish_cancelled_capability {
+            cancel_and_finish_capability(self.capability.as_ref());
+        } else if should_stop {
             // A cancellation request wins even if the managed Stop call races a
             // natural completion; the worker discards any captured result.
             self.cancel_capability();
@@ -526,9 +530,7 @@ impl Operation {
     }
 
     fn finish_capability(&self) {
-        if let Some(capability) = &self.capability {
-            capability.registration.end_invocation(capability.invocation_id);
-        }
+        finish_capability(self.capability.as_ref());
     }
 }
 
@@ -537,6 +539,8 @@ impl Default for State {
         Self {
             runtime: None,
             session_policy: None,
+            activation_source_root: None,
+            payload_staging: None,
             sessions: HashMap::new(),
             runspace_sessions: HashMap::new(),
             results: HashMap::new(),
@@ -1120,6 +1124,19 @@ impl CapabilityInvocation {
     fn cancel(&self) {
         self.registration.cancel_invocation(self.invocation_id, &self.cancelled);
     }
+}
+
+fn finish_capability(capability: Option<&CapabilityInvocation>) {
+    if let Some(capability) = capability {
+        capability.registration.end_invocation(capability.invocation_id);
+    }
+}
+
+fn cancel_and_finish_capability(capability: Option<&CapabilityInvocation>) {
+    if let Some(capability) = capability {
+        capability.cancel();
+    }
+    finish_capability(capability);
 }
 
 fn take_session_capability(session: &Session) -> Result<Option<CapabilityInvocation>, (Status, String)> {
@@ -2105,32 +2122,44 @@ fn initialize_payload(
         trust_policy,
     })
     .map_err(validation_failure)?;
-    let payload_path = validated.payload_root;
-    let session_policy = Arc::new(validated.session_policy);
+    let source_payload_path = validated.payload_root.clone();
     let mut state = match state().lock() {
         Ok(state) => state,
         Err(poisoned) => poisoned.into_inner(),
     };
 
     if let Some(runtime) = &state.runtime {
-        return if runtime.pwsh_dir() == payload_path {
+        return if state.activation_source_root.as_ref() == Some(&source_payload_path) {
             Ok(Status::Success)
         } else {
+            let selected_path = state
+                .activation_source_root
+                .as_deref()
+                .unwrap_or_else(|| runtime.pwsh_dir());
             Err((
                 Status::IncompatiblePayload,
                 format!(
                     "PowerShell runtime is already initialized for {}; cannot select {}",
-                    runtime.pwsh_dir().display(),
-                    payload_path.display()
+                    selected_path.display(),
+                    source_payload_path.display()
                 ),
             ))
         };
     }
 
+    let (payload_path, session_policy, staging) = match trust_policy {
+        TrustPolicy::RequireHashPinnedManifest => {
+            let staged = payload::stage(validated).map_err(validation_failure)?;
+            (staged.payload_root, staged.session_policy, Some(staged.staging))
+        }
+        TrustPolicy::AllowUntrustedLocalDevelopment => (validated.payload_root, validated.session_policy, None),
+    };
     let runtime =
         HostedRuntime::new_for_pwsh_dir(&payload_path).map_err(|error| (Status::HostFailure, error.to_string()))?;
     state.runtime = Some(Arc::new(runtime));
-    state.session_policy = Some(session_policy);
+    state.session_policy = Some(Arc::new(session_policy));
+    state.activation_source_root = Some(source_payload_path);
+    state.payload_staging = staging;
     Ok(Status::Success)
 }
 
@@ -2236,10 +2265,15 @@ struct SessionOptionsInput<'a> {
     initial_variables: &'a [u8],
     module_imports: Vec<&'a str>,
     allowed_module_paths: Vec<&'a str>,
-    allowed_module_paths_payload: &'a [u8],
     working_directory: &'a str,
     environment: Vec<(&'a str, &'a str)>,
     environment_payload: &'a [u8],
+}
+
+struct ResolvedSessionPolicy {
+    module_imports: Vec<PathBuf>,
+    module_paths: Vec<PathBuf>,
+    working_directory: Option<PathBuf>,
 }
 
 unsafe fn session_options_input<'a>(
@@ -2298,9 +2332,9 @@ unsafe fn session_options_input<'a>(
     let (
         execution_policy,
         initial_variables,
+        initial_variables_are_empty,
         module_imports,
         allowed_module_paths,
-        allowed_module_paths_payload,
         working_directory,
         environment,
         environment_payload,
@@ -2319,7 +2353,7 @@ unsafe fn session_options_input<'a>(
                 "PowerShell session initial variables must be a tagged property bag".to_owned(),
             ));
         }
-        validate_session_initial_variables(initial_variables)?;
+        let initial_variables_are_empty = validate_session_initial_variables(initial_variables)?;
         let (module_imports_kind, module_imports_payload) = data_value_input(&options.module_imports)?;
         let module_imports = session_string_array(module_imports_kind, module_imports_payload, "module imports")?;
         let (module_paths_kind, module_paths_payload) = data_value_input(&options.allowed_module_paths)?;
@@ -2343,9 +2377,9 @@ unsafe fn session_options_input<'a>(
         (
             options.execution_policy,
             initial_variables,
+            initial_variables_are_empty,
             module_imports,
             allowed_module_paths,
-            module_paths_payload,
             working_directory,
             environment,
             environment_payload,
@@ -2354,9 +2388,9 @@ unsafe fn session_options_input<'a>(
         (
             0,
             &EMPTY_VALUE_CONTAINER[..],
+            true,
             Vec::new(),
             Vec::new(),
-            &EMPTY_VALUE_CONTAINER[..],
             "",
             Vec::new(),
             &EMPTY_VALUE_CONTAINER[..],
@@ -2371,7 +2405,7 @@ unsafe fn session_options_input<'a>(
             || prefix.debug_preference != 0
             || prefix.information_preference != 0
             || execution_policy != 0
-            || !initial_variables.is_empty()
+            || !initial_variables_are_empty
             || !module_imports.is_empty()
             || !allowed_module_paths.is_empty()
             || !working_directory.is_empty()
@@ -2396,7 +2430,6 @@ unsafe fn session_options_input<'a>(
         initial_variables,
         module_imports,
         allowed_module_paths,
-        allowed_module_paths_payload,
         working_directory,
         environment,
         environment_payload,
@@ -2545,7 +2578,7 @@ fn valid_session_name(value: &str) -> bool {
     value.len() <= 64 && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
-fn validate_session_initial_variables(payload: &[u8]) -> Result<(), (Status, String)> {
+fn validate_session_initial_variables(payload: &[u8]) -> Result<bool, (Status, String)> {
     let mut offset = 0;
     let count = read_value_u32(payload, &mut offset, "initial variable count")? as usize;
     if count > MAX_SESSION_CONFIGURATION_ENTRIES {
@@ -2577,7 +2610,7 @@ fn validate_session_initial_variables(payload: &[u8]) -> Result<(), (Status, Str
         validate_nested_value(payload, &mut offset, 1)?;
     }
     if offset == payload.len() {
-        Ok(())
+        Ok(count == 0)
     } else {
         Err((
             Status::InvalidArgument,
@@ -2603,8 +2636,10 @@ fn create_runspace_session(options: SessionOptionsInput<'_>) -> Result<u64, (Sta
             "PowerShell payload session policy is unavailable".to_owned(),
         )
     })?;
-    let resolved_module_imports = enforce_session_policy(&options, &session_policy)?;
-    let resolved_module_imports_payload = encode_string_array(&resolved_module_imports)?;
+    let resolved = enforce_session_policy(&options, &session_policy)?;
+    let resolved_module_imports_payload = encode_string_array(&resolved.module_imports)?;
+    let resolved_module_paths_payload = encode_string_array(&resolved.module_paths)?;
+    let resolved_working_directory = session_path_string(resolved.working_directory.as_deref())?;
     let session = FfiPowerShellSession::new_for_runtime(
         runtime,
         options.runspace_mode,
@@ -2618,8 +2653,8 @@ fn create_runspace_session(options: SessionOptionsInput<'_>) -> Result<u64, (Sta
         options.execution_policy,
         options.initial_variables,
         &resolved_module_imports_payload,
-        options.allowed_module_paths_payload,
-        options.working_directory,
+        &resolved_module_paths_payload,
+        &resolved_working_directory,
         options.environment_payload,
     )
     .map_err(managed_failure)?;
@@ -2642,7 +2677,8 @@ fn create_runspace_session(options: SessionOptionsInput<'_>) -> Result<u64, (Sta
 fn enforce_session_policy(
     options: &SessionOptionsInput<'_>,
     policy: &SessionPolicy,
-) -> Result<Vec<PathBuf>, (Status, String)> {
+) -> Result<ResolvedSessionPolicy, (Status, String)> {
+    let mut resolved_module_paths = Vec::with_capacity(options.allowed_module_paths.len());
     if !options.allowed_module_paths.is_empty() {
         if policy.module_paths.is_empty() {
             return Err((
@@ -2657,12 +2693,19 @@ fn enforce_session_policy(
                     "a requested module path is not an approved existing directory".to_owned(),
                 )
             })?;
-            if !canonical.is_dir() || !policy.module_paths.contains(&canonical) {
+            let staged = policy.staged_module_paths.get(&canonical).ok_or_else(|| {
+                (
+                    Status::SessionPolicyViolation,
+                    "a requested module path is not approved by the payload session policy".to_owned(),
+                )
+            })?;
+            if !canonical.is_dir() || !staged.is_dir() {
                 return Err((
                     Status::SessionPolicyViolation,
                     "a requested module path is not approved by the payload session policy".to_owned(),
                 ));
             }
+            resolved_module_paths.push(staged.clone());
         }
     }
     let mut resolved_module_imports = Vec::with_capacity(options.module_imports.len());
@@ -2697,11 +2740,9 @@ fn enforce_session_policy(
                         "a requested module import does not have an approved exact manifest identity".to_owned(),
                     )
                 })?;
-            let is_within_requested_path = options.allowed_module_paths.iter().any(|path| {
-                fs::canonicalize(path)
-                    .map(|canonical| identity.manifest_path.starts_with(canonical))
-                    .unwrap_or(false)
-            });
+            let is_within_requested_path = resolved_module_paths
+                .iter()
+                .any(|path| identity.manifest_path.starts_with(path));
             if !is_within_requested_path {
                 return Err((
                     Status::SessionPolicyViolation,
@@ -2711,20 +2752,29 @@ fn enforce_session_policy(
             resolved_module_imports.push(identity.manifest_path.clone());
         }
     }
-    if !options.working_directory.is_empty() {
+    let resolved_working_directory = if !options.working_directory.is_empty() {
         let canonical = fs::canonicalize(options.working_directory).map_err(|_| {
             (
                 Status::SessionPolicyViolation,
                 "the requested working directory is not an approved existing directory".to_owned(),
             )
         })?;
-        if !canonical.is_dir() || !policy.working_directories.contains(&canonical) {
+        let staged = policy.staged_working_directories.get(&canonical).ok_or_else(|| {
+            (
+                Status::SessionPolicyViolation,
+                "the requested working directory is not approved by the payload session policy".to_owned(),
+            )
+        })?;
+        if !canonical.is_dir() || !staged.is_dir() {
             return Err((
                 Status::SessionPolicyViolation,
                 "the requested working directory is not approved by the payload session policy".to_owned(),
             ));
         }
-    }
+        Some(staged.clone())
+    } else {
+        None
+    };
     if !options.environment.is_empty()
         && (policy.environment_keys.is_empty()
             || options
@@ -2737,7 +2787,32 @@ fn enforce_session_policy(
             "a requested environment key is not approved by the payload session policy".to_owned(),
         ));
     }
-    Ok(resolved_module_imports)
+    Ok(ResolvedSessionPolicy {
+        module_imports: resolved_module_imports,
+        module_paths: resolved_module_paths,
+        working_directory: resolved_working_directory,
+    })
+}
+
+fn session_path_string(path: Option<&Path>) -> Result<String, (Status, String)> {
+    let Some(path) = path else {
+        return Ok(String::new());
+    };
+    let value = path.to_str().ok_or_else(|| {
+        (
+            Status::SessionPolicyViolation,
+            "an approved working directory is not valid UTF-8".to_owned(),
+        )
+    })?;
+    #[cfg(windows)]
+    let value = value.strip_prefix(r"\\?\").unwrap_or(value);
+    if value.len() > MAX_SESSION_PATH_BYTES || value.as_bytes().contains(&0) {
+        return Err((
+            Status::SessionPolicyViolation,
+            "an approved working directory exceeds its bound".to_owned(),
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 fn encode_string_array(values: &[PathBuf]) -> Result<Vec<u8>, (Status, String)> {
@@ -6632,6 +6707,12 @@ mod tests {
         }
         .is_ok());
 
+        let current_without_configuration = SessionOptions {
+            runspace_mode: 0,
+            ..empty_session_options()
+        };
+        assert!(unsafe { session_options_input(&current_without_configuration) }.is_ok());
+
         let current_with_history = SessionOptions {
             runspace_mode: 0,
             history_mode: 1,
@@ -6668,6 +6749,56 @@ mod tests {
             ..invalid_pool
         };
         assert!(validate_pool_options(&bounded_pool).is_ok());
+    }
+
+    unsafe extern "C" fn test_capability_dispatch(
+        _handle: u64,
+        _invocation_id: u64,
+        _name: Utf8Span,
+        _arguments: *const DataValue,
+        _argument_count: u32,
+        _deadline_milliseconds: u32,
+        _response_kind: *mut u32,
+        _response: *mut u8,
+        _response_capacity: usize,
+        _response_required: *mut usize,
+        _result: *mut CallResult,
+    ) -> i32 {
+        Status::Success.value()
+    }
+
+    static TEST_CAPABILITY_CANCEL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+    unsafe extern "C" fn test_capability_cancel(_handle: u64, _invocation_id: u64) {
+        TEST_CAPABILITY_CANCEL_COUNT.fetch_add(1, Ordering::AcqRel);
+    }
+
+    #[test]
+    fn capability_cancellation_releases_pending_invocation() {
+        TEST_CAPABILITY_CANCEL_COUNT.store(0, Ordering::Release);
+        let registration = Arc::new(CapabilityRegistrationState {
+            handle: 1,
+            definitions: HashMap::new(),
+            dispatch: test_capability_dispatch,
+            cancel: test_capability_cancel,
+            active: AtomicBool::new(true),
+            invocations: Mutex::new(HashMap::new()),
+        });
+        let capability = registration.begin_invocation(42).unwrap();
+
+        cancel_and_finish_capability(Some(&capability));
+
+        assert_eq!(TEST_CAPABILITY_CANCEL_COUNT.load(Ordering::Acquire), 1);
+        assert!(!registration
+            .invocations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&42));
+    }
+
+    #[test]
+    fn execute_contains_native_panics() {
+        assert_eq!(execute(|_| panic!("test panic containment")), Status::Panic.value());
     }
 
     #[test]
