@@ -53,6 +53,10 @@ impl<'a, I> HostfxrContext<'a, I> {
         }
     }
 
+    pub(crate) fn handle(&self) -> HostfxrHandle {
+        self.handle
+    }
+
     #[allow(dead_code)]
     pub fn get_runtime_delegate(
         &self,

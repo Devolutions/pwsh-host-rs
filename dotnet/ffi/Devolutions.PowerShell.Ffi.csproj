@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PackageId>Devolutions.PowerShell.Ffi</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Devolutions</Authors>
+    <Description>Experimental hash-pinned PowerShell payload facade for the in-process NativeAOT Devolutions Rust FFI.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <RepositoryUrl>https://github.com/Devolutions/multi-pwsh</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>PowerShell;NativeAOT;FFI;experimental</PackageTags>
+    <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
+    <PackageReleaseNotes>win-x64 only. Native deployment is opt-in. PowerShell is not included; activation requires a hash-pinned payload manifest.</PackageReleaseNotes>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RepositoryRoot>$(MSBuildThisFileDirectory)..\..</RepositoryRoot>
+    <PwshFfiNativeLibrary>$(RepositoryRoot)\target\release\devolutions_pwsh_ffi.dll</PwshFfiNativeLibrary>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="buildTransitive\Devolutions.PowerShell.Ffi.targets"
+          Pack="true"
+          PackagePath="buildTransitive\" />
+    <None Include="devolutions-pwsh-payload.manifest.template.json"
+          Pack="true"
+          PackagePath="contentFiles\any\any\"
+          Visible="false" />
+    <None Include="$(PwshFfiNativeLibrary)"
+          Pack="true"
+          PackagePath="runtimes\win-x64\native\"
+          Visible="false" />
+  </ItemGroup>
+
+  <Target Name="BuildPwshFfiNativeAsset" BeforeTargets="GenerateNuspec">
+    <Exec Command="cargo build --release -p devolutions-pwsh-ffi" WorkingDirectory="$(RepositoryRoot)" />
+  </Target>
+</Project>

@@ -102,6 +102,9 @@ $rustApiFields
 
 pub type $rustGetApiFunctionType = unsafe extern "system" fn() -> *const $rustApiStructName;
 
+pub type FnBindingsGetAbiVersion = unsafe extern "system" fn() -> i32;
+
+#[derive(Clone, Copy)]
 pub struct Bindings {
 $rustBindingFields
 }
@@ -129,6 +132,21 @@ impl Bindings {
             )?;
             unsafe { std::mem::transmute(fn_ptr) }
         };
+
+        let get_abi_version_fn: FnBindingsGetAbiVersion = {
+            let fn_ptr = get_function_pointer(
+                fn_loader,
+                pdcstr!("$bindingTypeName"),
+                pdcstr!("Bindings_GetAbiVersion"),
+            )?;
+            unsafe { std::mem::transmute(fn_ptr) }
+        };
+        if unsafe { get_abi_version_fn() } != 2 {
+            return Err(Error::IO(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported managed PowerShell bindings ABI version",
+            )));
+        }
 
         let api = unsafe {
             let api_ptr = get_api_fn();

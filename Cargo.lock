@@ -231,6 +231,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "devolutions-pwsh-ffi"
+version = "0.1.0"
+dependencies = [
+ "pwsh-host",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <PublishAot>true</PublishAot>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ffi\Devolutions.PowerShell.Ffi.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <RepositoryRoot>$(MSBuildThisFileDirectory)..\..</RepositoryRoot>
+    <PwshFfiNativeLibrary>$(RepositoryRoot)\target\release\devolutions_pwsh_ffi.dll</PwshFfiNativeLibrary>
+  </PropertyGroup>
+
+  <Target Name="BuildAndStagePwshFfiNativeLibrary" BeforeTargets="Publish">
+    <Exec Command="cargo build --release -p devolutions-pwsh-ffi" WorkingDirectory="$(RepositoryRoot)" />
+  </Target>
+
+  <Target Name="CopyPwshFfiNativeLibrary" AfterTargets="Publish">
+    <Copy SourceFiles="$(PwshFfiNativeLibrary)" DestinationFolder="$(PublishDir)" />
+  </Target>
+</Project>

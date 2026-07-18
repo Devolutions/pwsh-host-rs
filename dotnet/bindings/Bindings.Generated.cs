@@ -18,6 +18,9 @@ namespace NativeHost
             public IntPtr PowerShell_AddScript;
             public IntPtr PowerShell_AddStatement;
             public IntPtr PowerShell_Invoke;
+            public IntPtr PowerShell_InvokeToUtf8;
+            public IntPtr PowerShell_GetInvocationErrorCount;
+            public IntPtr PowerShell_CopyInvocationErrorFieldToUtf8;
             public IntPtr PowerShell_Clear;
             public IntPtr PowerShell_ExportToXml;
             public IntPtr PowerShell_ExportToJson;
@@ -71,6 +74,9 @@ namespace NativeHost
                 PowerShell_AddScript = (IntPtr)(delegate* unmanaged<IntPtr, IntPtr, void>)&PowerShell_AddScript,
                 PowerShell_AddStatement = (IntPtr)(delegate* unmanaged<IntPtr, void>)&PowerShell_AddStatement,
                 PowerShell_Invoke = (IntPtr)(delegate* unmanaged<IntPtr, void>)&PowerShell_Invoke,
+                PowerShell_InvokeToUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, int*, int>)&PowerShell_InvokeToUtf8,
+                PowerShell_GetInvocationErrorCount = (IntPtr)(delegate* unmanaged<IntPtr, int>)&PowerShell_GetInvocationErrorCount,
+                PowerShell_CopyInvocationErrorFieldToUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, int, int, byte*, int, int*, int>)&PowerShell_CopyInvocationErrorFieldToUtf8,
                 PowerShell_Clear = (IntPtr)(delegate* unmanaged<IntPtr, void>)&PowerShell_Clear,
                 PowerShell_ExportToXml = (IntPtr)(delegate* unmanaged<IntPtr, IntPtr, IntPtr>)&PowerShell_ExportToXml,
                 PowerShell_ExportToJson = (IntPtr)(delegate* unmanaged<IntPtr, IntPtr, IntPtr>)&PowerShell_ExportToJson,

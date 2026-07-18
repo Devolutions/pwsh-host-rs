@@ -47,6 +47,10 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets
 
+      - name: Validate FFI API baseline
+        shell: pwsh
+        run: ./tests/Verify-PwshFfiApiBaseline.ps1
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -168,6 +172,10 @@ jobs:
         shell: pwsh
         run: dotnet test dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj --no-build -p:PwshExePath="$env:PwshExePath"
 
+      - name: Validate FFI ABI contract
+        shell: pwsh
+        run: ./tests/Verify-PwshFfiApiBaseline.ps1 -PwshExePath "$env:PwshExePath"
+
   nuget-cli:
     name: NuGet package smoke (Windows)
     runs-on: windows-latest
@@ -256,6 +264,52 @@ jobs:
           pwsh -NoLogo -NoProfile -File (Resolve-Path 'tests\Invoke-AppHostNuGetPackageSmokeTest.ps1') `
             -PackageSource (Resolve-Path 'artifacts\native-nuget') `
             -RuntimeIdentifier 'win-x64'
+
+  nativeaot-ffi:
+    name: NativeAOT FFI package smoke (Windows)
+    runs-on: windows-latest
+    needs: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Install PowerShell 7.4 payload
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/Install-PowerShell74ForCi.ps1
+
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Run explicit payload FFI lifecycle tests
+        shell: pwsh
+        run: |
+          dotnet build dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj -c Release -p:PwshExePath="$env:PwshExePath"
+          $env:PWSH_FFI_PAYLOAD = Split-Path -Parent $env:PwshExePath
+          cargo test -p devolutions-pwsh-ffi -- --ignored
+
+      - name: Pack NativeAOT FFI facade
+        shell: pwsh
+        run: |
+          dotnet pack dotnet/ffi/Devolutions.PowerShell.Ffi.csproj -c Release -o artifacts/ffi-nuget
+
+      - name: Run isolated NativeAOT FFI package consumer
+        shell: pwsh
+        run: |
+          $payloadDirectory = Split-Path -Parent $env:PwshExePath
+          pwsh -NoLogo -NoProfile -File (Resolve-Path 'tests/Test-PwshFfiPackage.ps1') `
+             -PackageSource (Resolve-Path 'artifacts/ffi-nuget') `
+             -PowerShellPayloadDirectory $payloadDirectory
 
   nuget-apphost-linux:
     name: NuGet CLI AppHost smoke (Linux)

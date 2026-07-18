@@ -1,0 +1,636 @@
+# In-process PowerShell FFI experiment
+
+`pwsh-host` can be exposed through the `devolutions-pwsh-ffi` Rust `cdylib`.
+The library receives an explicit PowerShell payload directory, loads that
+payload's `hostfxr`, initializes `pwsh.dll`, injects
+`Devolutions.PowerShell.SDK.Bindings`, and invokes its unmanaged function table.
+
+The `dotnet/ffi` facade uses only `LibraryImport` and the native header at
+`crates/pwsh-ffi/include/devolutions_pwsh_ffi.h`. It has no
+`System.Management.Automation` or `Microsoft.PowerShell.*` dependency.
+
+## Experimental runtime boundary
+
+The `dotnet/ffi-sample` NativeAOT executable has been exercised on Windows x64
+with an explicit PowerShell 7.4 payload in the **same process**. It creates a
+pipeline and receives script output through the Rust `cdylib`.
+
+This is an acceptance experiment, not a claim that NativeAOT plus a dynamically
+hosted CoreCLR is a supported general .NET topology. The runtime host rejects
+incompatible initialization. Do not rely on dynamic runtime switching, multiple
+PowerShell runtime versions, or runtime unloading in the same process.
+
+## Lifecycle and ABI
+
+- `dps_pwsh_v2_initialize_payload` is process-global and accepts one canonical
+  payload directory only. Repeating it with the same payload succeeds; selecting
+  a different payload returns `DPS_PWSH_INCOMPATIBLE_PAYLOAD`.
+- The native product ABI is v2. Call `dps_pwsh_get_abi_info` before
+  initialization, verify its compatible version and feature flags, then use the
+  `dps_pwsh_v2_*` exports. The injected managed function table is independently
+  versioned at v2.
+- v2 uses sized, caller-owned `dps_pwsh_call_result` structures. Each operation
+  returns its own bounded UTF-8 diagnostic and truncation metadata, so concurrent
+  calls never read a process-global error slot. `dps_pwsh_utf8_span` permits
+  `(NULL, 0)` for an empty value; the library never retains caller memory.
+- The v1 exports and `dps_pwsh_last_error_utf8` remain as preview compatibility
+  shims only. New consumers must not use them because their diagnostic state is
+  process-global.
+- The caller owns all input and output buffers. UTF-8 fields use a two-pass
+  required-length query and never retain caller memory.
+- `dps_pwsh_v2_create` returns an opaque builder handle. `dps_pwsh_v2_release`
+  disposes its managed `GCHandle`; handles are never reused by the current
+  process. `dps_pwsh_v2_invoke` instead returns a distinct immutable result
+  handle. Release it explicitly with `dps_pwsh_v2_result_release`; it remains
+  readable after the builder is cleared, mutated, or released.
+  - `dps_pwsh_v2_result_get_metadata` reports the immutable invocation ID,
+    terminal synchronous state (`Completed` or `Terminated`), and `had_errors`
+    bit alongside the retained stream snapshot.
+- Exports contain Rust panics and return fixed status codes without unwinding
+  into the caller.
+- Normal pipeline execution and builder-mutation calls are serialized by the
+  cdylib's **process-global** operation lock, including calls made through
+  otherwise independent builders and sessions. This ABI version does not
+  support parallel independent-session execution. `Stop` is the exception:
+  builder and operation stop requests may run concurrently with the active
+  pipeline so cancellation is not blocked behind `Invoke`.
+- A v2 session is a separate opaque handle, not a builder alias. A session owns
+  (or narrowly borrows) one local runspace; builders created by
+  `dps_pwsh_v2_session_create_builder` keep an internal managed lease, so they
+  remain valid if the public session handle is released first. Session release
+  prevents new builders and closes an owned runspace after the final builder
+  lease is released. Immutable results and operations remain independently
+  owned as before.
+- Explicit native release consumes its raw handle: a second release or any
+  later use deterministically returns `DPS_PWSH_INVALID_HANDLE`. In contrast,
+  the facade's `IDisposable` implementations are idempotent and their
+  `SafeHandle` leases keep an in-flight facade call alive until that call
+  returns.
+
+## Payload trust and activation
+
+Production activation is deliberately **not** an existence check. Before
+loading `hostfxr`, `dps_pwsh_v2_initialize_payload` canonicalizes the payload
+and manifest paths, parses the manifest, verifies the caller-supplied SHA-256
+pin of the complete manifest bytes, checks the target RID/architecture, and
+SHA-256 verifies every declared file. It also requires hashes for
+`pwsh.dll`, `pwsh.runtimeconfig.json`, `pwsh.deps.json`,
+`System.Management.Automation.dll`, `hostfxr.dll`, and `coreclr.dll` on the
+currently supported Windows payload. The manifest may name additional modules
+and native dependencies, which are verified the same way.
+
+The schema is `devolutions-pwsh-payload` version `1`:
+
+```json
+{
+  "schema": "devolutions-pwsh-payload",
+  "schemaVersion": 1,
+  "payload": { "id": "PowerShell", "version": "7.x.y" },
+  "target": { "rid": "win-x64", "architecture": "x64" },
+  "runtime": {
+    "powerShellVersion": "7.x.y",
+    "dotnetVersion": "x.y.z",
+    "hostfxrVersion": "x.y.z",
+    "bindingsAbiVersion": 2,
+    "requiredBindingsFeatures": 123136
+  },
+  "files": [{ "path": "pwsh.dll", "sha256": "<64 hexadecimal digits>" }],
+  "trust": { "allowSymlinks": false },
+  "sessionPolicy": {
+    "modulePaths": [],
+    "workingDirectories": [],
+    "moduleImports": [],
+    "environmentKeys": []
+  }
+}
+```
+
+`payload.version` and `runtime.powerShellVersion` must match the
+`System.Management.Automation` version in `pwsh.deps.json`.
+`runtime.dotnetVersion` is checked against `pwsh.runtimeconfig.json`, and
+`runtime.hostfxrVersion` is checked against the Windows `hostfxr.dll` product
+version. The bindings ABI must be `2` and declare the async-operation,
+snapshot-projection, bounded session-configuration, and copied-session-variable
+bits (`123136`). Validation failures are returned by the activation call as bounded
+diagnostics with one of `PayloadManifestInvalid`, `PayloadUntrusted`,
+`PayloadHashMismatch`, or `PayloadIncompatible`; CoreCLR has not started yet.
+
+Manifest file paths are slash-separated relative paths only. `..`, rooted,
+dot, and duplicate paths are rejected. The payload root and every declared
+file are canonicalized; a file resolving outside the canonical root is
+rejected. Payload roots reached through normal Windows junction/path
+substitution are accepted after canonicalization. Per-file symlinks are
+rejected unless `trust.allowSymlinks` is explicitly true, and even then must
+resolve inside the payload root.
+
+The caller's manifest SHA-256 pin is the trust anchor. This implementation
+does **not** validate a signature and must not be described as signed.
+`PowerShellPayloadActivationOptions.UnsafeUntrustedLocalDevelopment` exists
+only for an explicit local-development opt-in: it still requires and validates
+a manifest and all file hashes, but accepts no manifest pin, so an attacker
+who can replace both the manifest and payload can subvert it. Do not use that
+mode for deployment. The obsolete string overloads use this unsafe mode with
+the conventional `devolutions-pwsh-payload.json` beside the payload.
+
+### Async operations and cancellation
+
+`dps_pwsh_v2_invoke_async` returns an opaque operation handle. It is a genuine
+native-owned invocation: the Rust bridge retains the builder and its managed
+pipeline until the operation reaches a terminal state. It is not a managed
+`Task.Run` wrapper around synchronous `Invoke`.
+
+- `dps_pwsh_v2_operation_poll` and `dps_pwsh_v2_operation_wait` report
+  `Pending`, `Running`, `Completed`, `Cancelled`, or `Failed`, together with
+  the terminal status. A wait timeout reports the current non-terminal state;
+  `UINT32_MAX` waits indefinitely.
+- `dps_pwsh_v2_operation_stop` is idempotent. The first stop request wins over
+  any concurrent successful completion: the operation becomes `Cancelled`,
+  returns `DPS_PWSH_OPERATION_CANCELLED_STATUS`, and never exposes an
+  immutable result. This prevents a caller from accepting partial script
+  output as a successful result. Repeated stop calls and stop after a terminal
+  state succeed.
+- A completed operation exposes immutable result snapshots through
+  `dps_pwsh_v2_operation_get_result`. Retrieval before terminal completion
+  returns `DPS_PWSH_OPERATION_NOT_TERMINAL`; cancelled and failed operations
+  return their terminal status plus the operation's bounded (4 KiB) diagnostic.
+  Result handles are independently released with
+  `dps_pwsh_v2_result_release` and can outlive the operation handle.
+- `dps_pwsh_v2_operation_release` is explicit single-owner release. Releasing an
+  active operation first requests cancellation, then detaches the caller's
+  handle. Existing native calls and the worker retain internal references, so
+  no release race can free a pipeline while it is executing. The raw operation
+  handle is then stale and a repeated release deterministically returns
+  `DPS_PWSH_INVALID_HANDLE`; `PowerShellInvocationOperation.Dispose()` remains
+  idempotent. Releasing a builder with an active operation likewise requests
+  cancellation.
+- A builder is immutable while its async operation is active. Builder mutation,
+  synchronous invocation, and input calls return `DPS_PWSH_BACKPRESSURE`
+  until terminal completion. Builder `Stop` targets its active operation and
+  has the same cancellation-wins semantics.
+
+The facade projects this model as `PowerShell.BeginInvoke()` and
+`PowerShell.InvokeAsync(CancellationToken)`. `PowerShellInvocationOperation`
+offers `Poll`, bounded `Wait`, `Stop`, and `GetResult`. Token cancellation
+calls the native stop primitive, then waits for the native terminal state
+before completing the task as cancelled; it never abandons or prematurely
+releases the operation handle. The facade uses `LibraryImport` and
+`SafeHandle` leases only—no SMA objects, native callbacks, or collectible
+managed delegates cross the boundary.
+
+### Sessions, bounded settings, and polling
+
+`PowerShellRuntime.CreateSession(PowerShellSessionOptions)` creates a reusable
+`PowerShellSession`. It deliberately offers only copied, declarative settings:
+
+- `NewRunspace` creates and owns a local runspace. Its initial configuration is
+  either PowerShell's default local state or `ConstrainedLanguage`. Its
+  `PowerShellSessionConfiguration` can set copied tagged initial variables,
+  approved module paths/imports, one approved working directory, allowlisted
+  environment values, and the `Default`/`Restricted` execution-policy subset.
+  It is not an arbitrary `InitialSessionState` or module-loading API.
+- `CurrentRunspace` is a narrow ambient-runspace opt-in. It requires an already
+  opened default runspace and rejects all configuration, history, preferences,
+  and module-path changes, so this boundary cannot mutate the embedding
+  application's current runspace.
+- History is a Boolean invocation setting. Error, warning, verbose, debug, and
+  information preferences are limited to inherit, continue, silently continue,
+  or stop. Interactive preference modes are rejected because the ABI has no
+  prompt channel. Error preference is also passed through a bounded
+  `PSInvocationSettings`; no settings object leaves managed code.
+
+The activated manifest governs session configuration. `sessionPolicy` is
+optional, but omitted or empty entries deny the corresponding module paths,
+working directories, module imports, and environment keys. Policy paths are
+canonical, slash-separated relative directories inside the payload (use `.`
+for the payload root); requested facade paths must be absolute existing
+directories and match an approved canonical directory exactly. Module imports
+are bounded names and are resolved only beneath approved module paths.
+Diagnostics report policy categories without echoing supplied paths or
+environment values. `CurrentRunspace` rejects all configuration so the ABI
+does not mutate ambient application state.
+
+`GetSnapshot()` and `GetEvents()` are polling APIs. A snapshot reports copied
+session/runspace state, active pipeline count, invocation and history counts.
+Events are numeric state records only—no callback function pointer, delegate,
+or managed object crosses the ABI. At most 32 events are retained; overflow is
+reported by the snapshot's `AreEventsTruncated` flag. Pipelines on the same
+session are serialized by the in-process host's operation boundary and the
+process-global normal-operation lock. A snapshot does not authorize concurrent
+live runspace use, including across separate sessions.
+
+The lifecycle is explicit even though configuration/import are synchronous:
+construction validates configuration and approved imports before returning an
+`Opened` session; invocation reports `Running`; stop/cancellation returns to
+`Opened` after terminal cleanup; owner release is `Closed`; an unrecoverable
+runspace failure reports `Faulted`. A closed public session cannot create
+builders, while an already-created builder retains its managed lease until it
+is released. There is no concurrent session mutator model: normal operations
+are process-globally serialized and copied-variable access rejects an active
+async session operation.
+
+`PowerShellSessionPoolOptions` and `CreateSessionPool` form an explicit
+rejection boundary. `dps_pwsh_v2_session_pool_create` validates a bounded
+maximum of 1–64 sessions (with a minimum no greater than that) then always returns
+`DPS_PWSH_UNSUPPORTED_CAPABILITY`: the current single CoreCLR, local-runspace
+model has no safe pool lifecycle/concurrency implementation. It does not
+pretend that serializing one runspace is a pool.
+
+The proxy surface is `Create`, `AddCommand`/`AddScript` (including
+`useLocalScope`), `AddArgument`, typed and switch parameters, `AddStatement`,
+`Clear`, bounded input feeding, result-oriented `Invoke`, `Stop`, and
+`Dispose`. `AddArguments` and `AddParameters` are convenience bulk builders;
+each item is validated and appended in order, so callers should `Clear` to
+discard a partially built pipeline after an item fails.
+
+## Tagged values and input
+
+`dps_pwsh_data_value` is the only native value-transfer envelope. Its `kind`,
+bounded caller-owned payload, and zero flags are copied synchronously by the
+call. It never carries a CLR object, `PSObject`, delegate, handle, reflection
+request, or JSON document. The facade exposes the same contract as immutable
+`PowerShellValue` instances:
+
+- null, string, switch, Boolean, signed/unsigned 64-bit integer, double,
+  invariant decimal text, bytes, `DateTime`, `DateTimeOffset`, `Guid`, and
+  absolute `Uri`;
+- arrays of at most 64 tagged values;
+- property bags of at most 64 unique string keys. The payload is copied to a
+  fresh managed `PSObject` with note properties, so it is a
+  PSCustomObject-style snapshot rather than a live caller object.
+
+Payloads are capped at 64 KiB and containers nest at most eight levels. Fixed
+numeric payloads are little-endian; `Guid` uses canonical UTF-8 `D` text,
+decimal uses invariant UTF-8 text, `DateTime` is `DateTime.ToBinary()`, and
+`DateTimeOffset` is ticks followed by a signed little-endian offset-minute
+count. Array payloads are `u32 item-count` followed by `u32 kind`, `u32
+length`, and payload for each item. Property bags use `u32 item-count`,
+`u32 key-length`, UTF-8 key, then that same nested value record. These binary
+envelopes are deliberately not JSON.
+
+`PowerShellValue.From(object?)` converts only that documented set and nested
+property bags/arrays. It throws `PowerShellValueConversionException` for
+delegates and unsupported CLR objects; no facade builder overload accepts a
+raw `object`.
+
+`AddInput` copies one tagged value into a synchronous per-builder collection.
+The collection accepts at most 64 values and 64 KiB of payload; exceeding
+either bound returns `DPS_PWSH_BACKPRESSURE`. Call `CompleteInput` before
+`Invoke` after starting input. Invoking an uncompleted collection returns
+`DPS_PWSH_INPUT_NOT_COMPLETED` and retains the input so it can be completed or
+`ResetInput` can discard it. Invoking without ever starting input retains the
+ordinary no-input behavior. Completion, reset, clear, release, and invocation
+all discard the managed input collection after its defined use, preventing
+reuse from retaining unreported input.
+
+Async input intentionally supports only that bounded producer model: add up to
+64 tagged values, call `CompleteInput`, then start the operation. Streaming a
+producer concurrently with `InvokeAsync`, adding input after start, and
+reopening completed input are intentionally unsupported. This preserves an
+explicit copied-input lifetime and deterministic cancellation boundary.
+
+`dps_pwsh_v2_result_get_stream_info` and indexed record APIs expose output,
+error, warning, verbose, debug, information, and progress. Retained records
+carry a global capture sequence available through
+`dps_pwsh_v2_result_get_sequence_record`. Each stream retains at most 32
+records; each field retains at most 4,096 UTF-16 code units.
+`dps_pwsh_v2_result_get_stream_totals` reports all observed and dropped
+records, not merely the retained ring. Result, stream, and record flags report
+terminating invocation, dropped sequence/stream records, and field truncation.
+Managed stream buffers are cleared before and after every result invocation,
+including streams the caller does not read.
+
+The facade projects this into immutable `PowerShellInvocationResult` snapshots:
+output is a `PowerShellObjectSnapshot` with display text, up to eight copied
+type-label strings, and an optional copied tagged scalar. Type labels are
+declarative text only; they do not expose, bind, or retain a CLR type or object
+identity. The optional property bag is built only from `PSNoteProperty` values
+that convert to documented tagged scalars. It retains at most 16 ordinal-sorted
+keys of at most 128 UTF-16 code units, a 1 KiB scalar payload per value, and a
+16 KiB total envelope. Complex values and enumerables are neither traversed nor
+enumerated; they are dropped and the retained/dropped entry counts and
+truncation flag make that loss explicit.
+
+Errors add copied category reason/activity/target labels, command and source
+location text, pipeline coordinates, details/recommended-action text, target
+display text, and an optional scalar target projection. These are bounded
+strings or tagged copies, never `ErrorRecord` or `InvocationInfo` references.
+There is intentionally no per-record terminal flag: PowerShell does not expose
+one reliably for every captured error. `IsTerminatingFailure` is the reliable
+result-level terminal indicator. A terminating invocation throws
+`PowerShellInvocationException`, whose `InvocationResult` retains that bounded
+snapshot.
+
+`PowerShellSnapshotSerializer` serializes and restores those immutable facade
+snapshots as deterministic, versioned UTF-8 JSON (format version 1). It is for
+storage or display only, capped at 1 MiB and JSON depth-limited to 16 by the
+source-generated DTO/parser contract. It rejects unknown members, unsupported versions, malformed
+tagged-value envelopes, oversized values, and invalid stream totals. It never
+deserializes into PowerShell, SMA, a parent CLR object, or an arbitrary CLR
+type.
+
+Call `PowerShellRuntime.Activate(new PowerShellPayloadActivationOptions(
+payloadDirectory, manifestPath, manifestSha256))` for a typed, hash-pinned
+activation object, then use `runtime.Create()` (or the equivalent
+`PowerShell.Create()` process-global entry point) to construct builders. The
+runtime object reports the selected paths, trust policy, and negotiated
+ABI/features; it does not permit selecting a second payload or unloading the
+selected runtime.
+
+## RDM DTO migration boundary
+
+This SDK offers DTO migration compatibility, not SMA compatibility. The table
+below is the current implementation status for RDM-facing work.
+
+| RDM need | Status | FFI replacement and boundary |
+| --- | --- | --- |
+| Explicit payload activation, hostfxr startup, one runtime per process | Implemented | Hash-pinned manifest activation and an opaque `PowerShellRuntime`; only `win-x64` has NativeAOT smoke evidence. |
+| Script or named-command execution with scalar parameters | Implemented | `AddScript`, `AddCommand`, `AddParameter`, and bounded `PowerShellValue` inputs. No raw `object`, `PSObject`, or `SecureString` overload exists. |
+| Output, errors, diagnostics, warning/progress streams | Implemented | Immutable bounded `PowerShellInvocationResult` snapshots; callers inspect streams and terminating state rather than live SMA collections. |
+| Timeout, cancellation, async completion, deterministic disposal | Implemented | `InvokeAsync(CancellationToken)`, `BeginInvoke`, `Wait`, `Stop`, and `SafeHandle` ownership. Cancellation wins and never returns a partial success result. |
+| Long-lived local state | Implemented | Opaque local `PowerShellSession` plus serialized builders. It is not a pool or a remoting session. |
+| `SessionStateProxy.SetVariable` for value data | Implemented, copied-only | `SetVariable`, `TryGetVariable`, and `RemoveVariable` transfer bounded tagged values only. No methods, proxies, handles, or CLR identity survive the boundary. |
+| Approved local modules | Implemented, local-only | Each requested import must map to a manifest-pinned `.psd1` identity: canonical name, path beneath an approved module root, SHA-256 also listed in `files`, and exact `ModuleVersion`. Rust resolves the identity and the payload imports that exact manifest path. This does not validate PowerCLI or remoting dependencies. |
+| `PSCredential` parameter | Intentionally unsupported | Arbitrary scripts can emit or transform a supplied credential. The DTO result model cannot guarantee redaction or a zeroable managed lifetime. |
+| Enumerated RDM capability calls and bounded host interaction | Implemented, opt-in | A registered `PowerShellCapabilitySet` makes only declared typed calls available through the temporary payload-local `$DpsCapabilities` object. `PowerShellHostInteraction` supplies schemas for text, progress, line, and choice interactions; it is not a `PSHost` proxy. |
+| PowerCLI typed return objects, PSRP/WinRM/SSH, pools, transports | Unsupported | Retain the existing SMA/process paths for these families. |
+
+### Copied session variables
+
+`PowerShellSession.SetVariable(string, PowerShellValue)`,
+`TryGetVariable(string, out PowerShellValue?)`, and `RemoveVariable(string)`
+are the migration path for declarative `Result`, `Core`, `connection`, and
+option snapshots. Variable names are ASCII identifiers up to 64 characters.
+Values are copied on every set/get, capped at 64 KiB, at most 64 entries per
+array/property bag, and at most eight nested levels. Cycles and unsupported CLR
+objects are rejected before the native call.
+
+The operation is rejected with `Backpressure` while that session has a pending
+or running async operation. Synchronous operations and variable operations use
+the process-global operation lock, so they cannot race a runspace mutation.
+`TryGetVariable` cannot return a `PSVariable`, adapted object, methods, or any
+value that cannot be encoded as the documented copied graph; such values return
+`UnsupportedValue` rather than being stringified.
+
+### Exact local module identities
+
+`sessionPolicy.moduleImports` alone is not sufficient. Every declared import
+must have exactly one `sessionPolicy.moduleIdentities` entry:
+
+```json
+{
+  "name": "Example.Module",
+  "manifestPath": "Modules/Example.Module/Example.Module.psd1",
+  "version": "1.2.3",
+  "sha256": "<the same SHA-256 recorded for manifestPath in files>"
+}
+```
+
+Activation verifies the manifest file hash before CoreCLR starts, requires the
+identity manifest to reside beneath a declared `modulePaths` root, and reads its
+literal `ModuleVersion` without executing it. Session creation resolves a
+requested module name only through this identity and imports the exact pinned
+manifest, not a name found by ambient `PSModulePath`. Missing, duplicate,
+outside-root, mismatched-hash, or mismatched-version identities are rejected
+with `SessionPolicyViolation` or a manifest activation error.
+
+This is a local module identity contract, not a module sandbox or a PowerCLI
+claim. The manifest must hash every module file that needs payload-integrity
+coverage, and `win-x64` local built-in module smoke coverage is the only
+validated configuration. Do not enable PowerCLI, arbitrary module
+initialization, native loading, or remoting modules until their full payload
+dependency closure has separately passed this contract.
+
+### Credentials remain a hard rejection boundary
+
+There is no `PowerShellSecret`, `PowerShellCredential`, `SecureString`,
+password-specific parameter, or serialized credential path in this API.
+General string values remain ordinary DTO data and must never be used as a
+secret transport. Passing a credential to an arbitrary script would let that
+script write, encode, or throw it into ordinary result/error streams. A
+one-time ABI buffer does not solve that exfiltration problem, and accepting one
+would make the facade's redaction and zeroization guarantees false. RDM flows
+that require `PSCredential` remain on the existing SMA/process implementation.
+
+The threat model assumes the invoked payload script, a module it loads, and
+PowerShell formatting/error behavior are all capable of observing a bound
+credential. They can return it through output, an error, a progress message, a
+serialization transform, or process memory that cannot be synchronously
+zeroized from the parent. The native boundary therefore makes no promise that
+could be defeated by script behavior: it transfers no credential material,
+does not retain secret handles, and rejects the dedicated API before payload
+binding. This protects the DTO/snapshot contract, not a caller that manually
+places a password in a general string or script.
+
+### Bounded capability RPC and host interaction
+
+Capability RPC is feature-gated, disabled by default, and deliberately narrow.
+`PowerShellRuntime.RegisterCapabilities` copies an immutable set of at most 16
+definitions into Rust. Each definition has a canonical lowercase `rdm.*` or
+`host.*` name, exact argument arity and value-kind schemas, allowed response
+kinds, permissions, input/output byte caps, and a deadline. `WithCapabilities`
+attaches one registration to one builder invocation. The payload creates the
+temporary `$DpsCapabilities` only for that invocation and removes it before the
+result is returned.
+
+```csharp
+var definition = new PowerShellCapabilityDefinition(
+    "rdm.get-connection-name",
+    Array.Empty<PowerShellCapabilityArgumentSchema>(),
+    new[] { PowerShellValueKind.String },
+    PowerShellCapabilityPermission.Read,
+    maximumInputBytes: 64,
+    maximumOutputBytes: 256,
+    deadline: TimeSpan.FromSeconds(5));
+using var capabilities = runtime.RegisterCapabilities(new[]
+{
+    new PowerShellCapabilityBinding(definition, connectionNameHandler),
+});
+using var command = session.CreatePowerShell()
+    .AddScript("$DpsCapabilities.Invoke('rdm.get-connection-name')")
+    .WithCapabilities(capabilities);
+PowerShellInvocationResult result = command.Invoke();
+```
+
+The cross-boundary path is tagged `PowerShellValue` data only:
+
+```text
+script -> $DpsCapabilities.Invoke -> payload-local bridge -> Rust
+       -> static AOT-safe managed callback -> typed handler -> Rust -> script
+```
+
+The opaque registration ID maps only to the private immutable definition set.
+The payload cannot receive a parent CLR object, `GCHandle`, raw function
+pointer, delegate, member path, or arbitrary method name. Unknown names,
+duplicates, schema/type mismatches, malformed/deep/oversized values, inactive
+registrations, handler exceptions, and invalid response kinds fail rather than
+falling back to PowerShell reflection or string serialization. Diagnostics
+from a failed callback are intentionally generic.
+
+Dispatch is synchronous from the payload's point of view. Its deadline is
+capped by the registered definition; cancellation, stopping the operation, or
+unregistering a registration cancels the managed handler cooperatively and
+rejects a late response. Rust rejects any FFI call attempted from the same
+capability callback, preserving global operation serialization and avoiding a
+callback-to-session deadlock. Registrations use `SafeHandle` ownership, and
+disposal revokes new dispatches while cancellation is requested for active
+ones.
+
+`PowerShellHostInteraction` is a library of typed capability definitions:
+`host.write-text`, `host.report-progress`, `host.read-line`,
+`host.prompt-choice`, and `host.prompt-multiple-choice`. Handlers choose the
+actual UI policy. They accept only bounded text/property-bag/choice DTOs and
+never carry a credential or secure-string response. This reuses the capability
+mechanism; there is no second callback vtable, direct console I/O, or `PSHost`
+surface.
+
+This remains intentionally unlike a generic `RDM`/`Core`/`connection` object
+bridge. Put copied `Result`, `Core`, and `connection` data in session
+variables. Promote only a reviewed operation, such as the example
+`rdm.get-connection-name` or `rdm.report-status`, to an enumerated capability.
+Scripts cannot call arbitrary proxy methods or obtain the original managed
+objects.
+
+### One-shot administrative command pilot
+
+The first additive RDM pilot is a local, no-credential `Stop-Computer` or
+`Restart-Computer` command. Use `-WhatIf` in development and CI; real reboot or
+shutdown execution must require an application-owned feature flag and explicit
+operator approval.
+
+```csharp
+using var cancellation = new CancellationTokenSource();
+cancellation.CancelAfter(TimeSpan.FromSeconds(15));
+using PowerShell command = runtime.Create()
+    .AddCommand("Restart-Computer")
+    .AddParameter("ComputerName", computerName)
+    .AddParameter("WhatIf");
+
+try
+{
+    PowerShellInvocationResult result = await command.InvokeAsync(cancellation.Token);
+    foreach (PowerShellInvocationError error in result.Errors.Records)
+    {
+        Console.Error.WriteLine(error.Message);
+    }
+}
+catch (PowerShellInvocationException exception)
+{
+    foreach (PowerShellInvocationError error in exception.InvocationResult.Errors.Records)
+    {
+        Console.Error.WriteLine(error.Message);
+    }
+    throw;
+}
+```
+
+The caller owns activation, cancellation, and disposal; it contains no
+`System.Management.Automation` reference. A destructive path is not part of
+this repository's normal tests.
+
+## Explicit limitations
+
+This is not binary or source compatible with the full PowerShell SDK. The
+facade cannot transfer live `PSObject`, runspace, delegate, custom `PSHost`, or
+arbitrary CLR object values. It exposes no SMA types. Secret and credential
+transfer is an explicit rejection boundary:
+`PowerShellSecretTransfer.Policy` is `Rejected` and
+`PowerShellSecretTransfer.ThrowNotSupported()` throws a typed exception.
+`SecureString`, `PSCredential`, raw serialized credentials, and secret DTOs
+are deliberately not accepted. Because arbitrary PowerShell can expose any
+input it receives, this facade cannot truthfully guarantee secret redaction,
+serializer safety, or zeroable managed credential lifetime. Do not put secrets
+in tagged values or session variables; snapshots are copied general output, not
+a secret store. Snapshot values are
+intentionally copied data rather than live objects: they do not provide
+arbitrary property access, opaque object handles, callbacks, secret transfer,
+pools, remoting, or generic CLR object serialization.
+
+Sessions do not accept live `PSHost` values, arbitrary callbacks/delegates, credentials,
+runspace connection information, remoting transports/providers, nested live
+PowerShell, steppable pipelines, generic CLR values, or arbitrary initial
+session-state objects. Capability callbacks are registered immutable DTO
+handlers only; there is no host callback vtable, callback rooting,
+prompt/credential callback, or arbitrary delegate/object bridge. Custom
+remoting and actual session pools remain permanent non-goals until a separate
+bounded architecture proves their lifecycle and concurrency semantics.
+
+Only an explicit payload root is supported. The FFI initialization path does not
+resolve `pwsh` from `PATH`. The activation manifest and its SHA-256 pin must
+come from application-controlled deployment configuration, not from the
+payload being selected.
+
+## Package preview
+
+`Devolutions.PowerShell.Ffi` is a `win-x64` preview package. Its Rust cdylib is
+published as the normal RID asset
+`runtimes/win-x64/native/devolutions_pwsh_ffi.dll`, but is inert by default;
+consumers must set both `RuntimeIdentifier` to `win-x64` and
+`DevolutionsPowerShellFfiEnabled=true` to stage it beside the executable. The
+package deliberately does not carry a PowerShell payload.
+
+The package includes
+`contentFiles/any/any/devolutions-pwsh-payload.manifest.template.json` as a
+schema template only. Replace every placeholder after staging or installing
+the external payload, write the completed manifest outside an immutable
+PowerShell installation when needed, hash the final manifest bytes, and store
+that hash in the application's protected deployment configuration. Do not ship
+the template as a trusted manifest and do not rely on a file merely being
+present.
+
+### RDM packaging and rollout contract
+
+The RDM caller must opt in to `win-x64` native staging, deploy the selected
+PowerShell payload and every approved module separately, produce a completed
+hash-pinned manifest, and pass the manifest path and SHA-256 through
+application-controlled configuration. The RDM application must not add a
+transitive `System.Management.Automation`, `Microsoft.PowerShell.SDK`, or
+payload runtime asset to the NativeAOT facade path. Activation reports a
+deterministic incompatibility if another selected payload/runtime already owns
+the process.
+
+`win-arm64`, Linux, and macOS are unvalidated for this package and must not be
+advertised as supported until each has RID packaging and a real NativeAOT
+activation smoke test. The current module identity smoke test covers only exact
+manifest-pinned local built-in modules; it does not prove PowerCLI or binary
+module support.
+
+Adopt this as an additive RDM feature-flagged pilot:
+
+1. Start with `RemoteToolsManager` one-shot local administrative commands in
+   safe `-WhatIf`/mocked contract tests.
+2. Move value-only custom resolver and script flows only after their state fits
+   copied variables and their credential requirement is absent.
+3. Add persistent approved-module local sessions only after their actual
+   payload/module dependencies are exercised.
+4. Keep existing SMA-backed paths for live RDM object injection,
+   `PSObject.BaseObject`, typed generic invoke/PowerCLI, remoting, SSH/WinRM,
+   and process-host scenarios.
+
+The non-negotiable non-goals are live SMA identity, `PSObject.BaseObject`,
+generic typed invocation, `PSDataCollection` live events, custom
+`PSHost`/`PSCmdlet`/provider/remoting inheritance, private
+`RemoteSessionNamedPipeServer` reflection and `Enter-PSHostProcess`, PSRP/WSMan
+or SSH custom transport, and transparent binary PowerShell-module proxies.
+
+## Validation
+
+Build the managed bindings before Rust because `pwsh-host` embeds the Release
+bindings assembly:
+
+```powershell
+dotnet build dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj -c Release
+cargo test -p devolutions-pwsh-ffi --all-targets
+
+$env:PWSH_FFI_PAYLOAD = 'C:\Program Files\PowerShell\7'
+cargo test -p devolutions-pwsh-ffi explicit_payload_round_trip_uses_the_exported_abi -- --ignored
+cargo test -p devolutions-pwsh-ffi explicit_payload_async_operations_are_terminal_and_lifetime_safe -- --ignored
+cargo test -p devolutions-pwsh-ffi explicit_payload_lifecycle_stress_enforces_serialization_and_lifetime_contracts -- --ignored
+cargo test -p devolutions-pwsh-ffi explicit_payload_increment_6_sessions_are_bounded_and_lifetime_safe -- --ignored
+
+dotnet publish dotnet/ffi-sample/FfiSample.csproj -c Release
+./dotnet/ffi-sample/bin/Release/net8.0/win-x64/publish/FfiSample.exe <payload> <manifest> <manifest-sha256>
+```
+
+The ignored Rust test and NativeAOT sample require a real payload root containing
+`pwsh.dll`, `pwsh.runtimeconfig.json`, and
+`System.Management.Automation.dll`.

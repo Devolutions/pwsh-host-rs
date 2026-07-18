@@ -31,6 +31,24 @@ pub type FnPowerShellAddStatement = unsafe extern "system" fn(handle: PowerShell
 
 pub type FnPowerShellInvoke = unsafe extern "system" fn(handle: PowerShellHandle);
 
+pub type FnPowerShellInvokeToUtf8 = unsafe extern "system" fn(
+    handle: PowerShellHandle,
+    buffer: *mut libc::c_uchar,
+    buffer_len: i32,
+    required_len: *mut i32,
+) -> i32;
+
+pub type FnPowerShellGetInvocationErrorCount = unsafe extern "system" fn(handle: PowerShellHandle) -> i32;
+
+pub type FnPowerShellCopyInvocationErrorFieldToUtf8 = unsafe extern "system" fn(
+    handle: PowerShellHandle,
+    error_index: i32,
+    field: i32,
+    buffer: *mut libc::c_uchar,
+    buffer_len: i32,
+    required_len: *mut i32,
+) -> i32;
+
 pub type FnPowerShellClear = unsafe extern "system" fn(handle: PowerShellHandle);
 
 pub type FnPowerShellExportToXml =
@@ -109,6 +127,9 @@ pub struct ApiPs74 {
     pub add_script_fn: *const libc::c_void,
     pub add_statement_fn: *const libc::c_void,
     pub invoke_fn: *const libc::c_void,
+    pub invoke_to_utf8_fn: *const libc::c_void,
+    pub get_invocation_error_count_fn: *const libc::c_void,
+    pub copy_invocation_error_field_to_utf8_fn: *const libc::c_void,
     pub clear_fn: *const libc::c_void,
     pub export_to_xml_fn: *const libc::c_void,
     pub export_to_json_fn: *const libc::c_void,
@@ -132,6 +153,9 @@ pub struct ApiPs74 {
 
 pub type FnBindingsGetApiPs74 = unsafe extern "system" fn() -> *const ApiPs74;
 
+pub type FnBindingsGetAbiVersion = unsafe extern "system" fn() -> i32;
+
+#[derive(Clone, Copy)]
 pub struct Bindings {
     pub create_fn: FnPowerShellCreate,
     pub add_argument_string_fn: FnPowerShellAddArgumentString,
@@ -142,6 +166,9 @@ pub struct Bindings {
     pub add_script_fn: FnPowerShellAddScript,
     pub add_statement_fn: FnPowerShellAddStatement,
     pub invoke_fn: FnPowerShellInvoke,
+    pub invoke_to_utf8_fn: FnPowerShellInvokeToUtf8,
+    pub get_invocation_error_count_fn: FnPowerShellGetInvocationErrorCount,
+    pub copy_invocation_error_field_to_utf8_fn: FnPowerShellCopyInvocationErrorFieldToUtf8,
     pub clear_fn: FnPowerShellClear,
     pub export_to_xml_fn: FnPowerShellExportToXml,
     pub export_to_json_fn: FnPowerShellExportToJson,
@@ -187,6 +214,21 @@ impl Bindings {
             unsafe { std::mem::transmute(fn_ptr) }
         };
 
+        let get_abi_version_fn: FnBindingsGetAbiVersion = {
+            let fn_ptr = get_function_pointer(
+                fn_loader,
+                pdcstr!("NativeHost.Bindings, Devolutions.PowerShell.SDK.Bindings"),
+                pdcstr!("Bindings_GetAbiVersion"),
+            )?;
+            unsafe { std::mem::transmute(fn_ptr) }
+        };
+        if unsafe { get_abi_version_fn() } != 2 {
+            return Err(Error::IO(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported managed PowerShell bindings ABI version",
+            )));
+        }
+
         let api = unsafe {
             let api_ptr = get_api_fn();
             assert!(!api_ptr.is_null());
@@ -203,6 +245,11 @@ impl Bindings {
             add_script_fn: unsafe { std::mem::transmute(api.add_script_fn) },
             add_statement_fn: unsafe { std::mem::transmute(api.add_statement_fn) },
             invoke_fn: unsafe { std::mem::transmute(api.invoke_fn) },
+            invoke_to_utf8_fn: unsafe { std::mem::transmute(api.invoke_to_utf8_fn) },
+            get_invocation_error_count_fn: unsafe { std::mem::transmute(api.get_invocation_error_count_fn) },
+            copy_invocation_error_field_to_utf8_fn: unsafe {
+                std::mem::transmute(api.copy_invocation_error_field_to_utf8_fn)
+            },
             clear_fn: unsafe { std::mem::transmute(api.clear_fn) },
             export_to_xml_fn: unsafe { std::mem::transmute(api.export_to_xml_fn) },
             export_to_json_fn: unsafe { std::mem::transmute(api.export_to_json_fn) },

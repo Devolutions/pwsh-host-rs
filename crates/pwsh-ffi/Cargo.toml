@@ -1,0 +1,15 @@
+[package]
+name = "devolutions-pwsh-ffi"
+version = "0.1.0"
+edition = "2018"
+license = "MIT/Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pwsh-host = { path = "../pwsh-host" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
