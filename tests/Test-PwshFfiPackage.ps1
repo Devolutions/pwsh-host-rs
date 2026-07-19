@@ -8,6 +8,8 @@ param(
 
     [string]$Configuration = 'Release',
 
+    [string[]]$ExpectedRuntimeIdentifiers = @('win-x64'),
+
     [switch]$KeepWorkspace
 )
 
@@ -32,6 +34,20 @@ function Get-MultiPwshVersion {
 }
 
 $multiPwshVersion = Get-MultiPwshVersion
+$sdkNativeAssets = @{
+    'win-x64' = 'multi-pwsh-sdk.dll'
+    'win-arm64' = 'multi-pwsh-sdk.dll'
+    'linux-x64' = 'libmulti-pwsh-sdk.so'
+    'linux-arm64' = 'libmulti-pwsh-sdk.so'
+    'linux-arm' = 'libmulti-pwsh-sdk.so'
+    'osx-x64' = 'libmulti-pwsh-sdk.dylib'
+    'osx-arm64' = 'libmulti-pwsh-sdk.dylib'
+}
+foreach ($runtimeIdentifier in $ExpectedRuntimeIdentifiers) {
+    if (-not $sdkNativeAssets.ContainsKey($runtimeIdentifier)) {
+        throw "Unsupported SDK runtime identifier expected by this test: $runtimeIdentifier"
+    }
+}
 if ([string]::IsNullOrWhiteSpace($PackageSource)) {
     $PackageSource = Join-Path $repoRoot 'artifacts\sdk-nuget'
 }
@@ -206,12 +222,15 @@ try {
     $archivePaths = [System.Collections.Generic.HashSet[string]]::new(
         [string[]]($archive.Entries | ForEach-Object FullName),
         [System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($requiredPath in @(
+    $requiredPaths = @(
         'README.md',
         'buildTransitive/Devolutions.MultiPwsh.Sdk.targets',
         'contentFiles/any/any/devolutions-pwsh-payload.manifest.template.json',
-        'lib/net8.0/Devolutions.MultiPwsh.Sdk.dll',
-        'runtimes/win-x64/native/multi-pwsh-sdk.dll')) {
+        'lib/net8.0/Devolutions.MultiPwsh.Sdk.dll')
+    foreach ($runtimeIdentifier in $ExpectedRuntimeIdentifiers) {
+        $requiredPaths += "runtimes/$runtimeIdentifier/native/$($sdkNativeAssets[$runtimeIdentifier])"
+    }
+    foreach ($requiredPath in $requiredPaths) {
         if (-not $archivePaths.Contains($requiredPath)) {
             throw "Package is missing required entry: $requiredPath"
         }

@@ -748,14 +748,16 @@ payload being selected.
 
 ## Package preview
 
-`Devolutions.MultiPwsh.Sdk` is a `win-x64` preview package. Its Rust cdylib is
-published as the normal RID asset
-`runtimes/win-x64/native/multi-pwsh-sdk.dll`, but is inert by default;
-consumers must set both `RuntimeIdentifier` to `win-x64` and
-`DevolutionsMultiPwshSdkEnabled=true` to stage it beside the executable. The
-package deliberately does not carry a PowerShell payload. Its NuGet version
-and native DLL `FileVersion`/`ProductVersion` match the `multi-pwsh` CLI
-release version.
+`Devolutions.MultiPwsh.Sdk` is a preview package with native assets for the
+same release RIDs as `Devolutions.MultiPwsh.Cli`: `win-x64`, `win-arm64`,
+`linux-x64`, `linux-arm64`, `linux-arm`, `osx-x64`, and `osx-arm64`. The Rust
+cdylib is inert by default; consumers set a matching `RuntimeIdentifier` and
+`DevolutionsMultiPwshSdkEnabled=true` to stage that RID's native library beside
+the executable. The package deliberately does not carry a PowerShell payload.
+Its NuGet version and Windows native DLL `FileVersion`/`ProductVersion` match
+the `multi-pwsh` CLI release version. Only the `win-x64` RID currently has
+end-to-end NativeAOT payload smoke coverage; publishing another asset is not a
+claim that its payload activation topology has been validated.
 
 The package includes
 `contentFiles/any/any/devolutions-pwsh-payload.manifest.template.json` as a
@@ -777,9 +779,9 @@ payload runtime asset to the NativeAOT facade path. Activation reports a
 deterministic incompatibility if another selected payload/runtime already owns
 the process.
 
-`win-arm64`, Linux, and macOS are unvalidated for this package and must not be
-advertised as supported until each has RID packaging and a real NativeAOT
-activation smoke test. The current module identity smoke test covers only exact
+`win-arm64`, Linux, and macOS have packaged native assets but remain unvalidated
+for payload activation and must not be advertised as supported until each has a
+real NativeAOT activation smoke test. The current module identity smoke test covers only exact
 manifest-pinned local built-in modules; it does not prove PowerCLI or binary
 module support.
 

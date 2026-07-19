@@ -12,7 +12,7 @@
     <RepositoryType>git</RepositoryType>
     <PackageTags>PowerShell;NativeAOT;FFI;experimental</PackageTags>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
-    <PackageReleaseNotes>win-x64 only. Native deployment is opt-in. PowerShell is not included; activation requires a hash-pinned payload manifest.</PackageReleaseNotes>
+    <PackageReleaseNotes>Native deployment is opt-in. PowerShell is not included; activation requires a hash-pinned payload manifest. Windows x64 is the current end-to-end validated runtime.</PackageReleaseNotes>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
     <EnableAotAnalyzer>true</EnableAotAnalyzer>
@@ -35,14 +35,46 @@
           PackagePath="contentFiles\any\any\"
           Visible="false" />
     <None Include="$(PwshFfiNativeLibrary)"
+          Condition="'$(PwshFfiNativeStagingRoot)' == ''"
           Pack="true"
           PackagePath="runtimes\win-x64\native\multi-pwsh-sdk.dll"
           Visible="false" />
   </ItemGroup>
 
+  <ItemGroup Condition="'$(PwshFfiNativeStagingRoot)' != ''">
+    <None Include="$(PwshFfiNativeStagingRoot)\win-x64\multi-pwsh-sdk.dll"
+          Pack="true"
+          PackagePath="runtimes\win-x64\native\multi-pwsh-sdk.dll"
+          Visible="false" />
+    <None Include="$(PwshFfiNativeStagingRoot)\win-arm64\multi-pwsh-sdk.dll"
+          Pack="true"
+          PackagePath="runtimes\win-arm64\native\multi-pwsh-sdk.dll"
+          Visible="false" />
+    <None Include="$(PwshFfiNativeStagingRoot)\linux-x64\libmulti-pwsh-sdk.so"
+          Pack="true"
+          PackagePath="runtimes\linux-x64\native\libmulti-pwsh-sdk.so"
+          Visible="false" />
+    <None Include="$(PwshFfiNativeStagingRoot)\linux-arm64\libmulti-pwsh-sdk.so"
+          Pack="true"
+          PackagePath="runtimes\linux-arm64\native\libmulti-pwsh-sdk.so"
+          Visible="false" />
+    <None Include="$(PwshFfiNativeStagingRoot)\linux-arm\libmulti-pwsh-sdk.so"
+          Pack="true"
+          PackagePath="runtimes\linux-arm\native\libmulti-pwsh-sdk.so"
+          Visible="false" />
+    <None Include="$(PwshFfiNativeStagingRoot)\osx-x64\libmulti-pwsh-sdk.dylib"
+          Pack="true"
+          PackagePath="runtimes\osx-x64\native\libmulti-pwsh-sdk.dylib"
+          Visible="false" />
+    <None Include="$(PwshFfiNativeStagingRoot)\osx-arm64\libmulti-pwsh-sdk.dylib"
+          Pack="true"
+          PackagePath="runtimes\osx-arm64\native\libmulti-pwsh-sdk.dylib"
+          Visible="false" />
+  </ItemGroup>
+
   <Target Name="BuildPwshFfiNativeAsset"
           BeforeTargets="GenerateNuspec"
-          Condition="'$(BuildPwshFfiNativeAsset)' != 'false'">
+          Condition="'$(BuildPwshFfiNativeAsset)' != 'false' and '$(PwshFfiNativeStagingRoot)' == ''">
     <Exec Command="cargo build --profile $(PwshFfiCargoProfile) -p devolutions-pwsh-ffi"
           WorkingDirectory="$(RepositoryRoot)"
           EnvironmentVariables="RUSTFLAGS=$(PwshFfiRustFlags)" />

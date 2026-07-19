@@ -1,6 +1,9 @@
 <Project>
   <PropertyGroup>
-    <DevolutionsMultiPwshSdkNativeAsset>$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\multi-pwsh-sdk.dll</DevolutionsMultiPwshSdkNativeAsset>
+    <DevolutionsMultiPwshSdkNativeFileName Condition="'$(RuntimeIdentifier)' == 'win-x64' or '$(RuntimeIdentifier)' == 'win-arm64'">multi-pwsh-sdk.dll</DevolutionsMultiPwshSdkNativeFileName>
+    <DevolutionsMultiPwshSdkNativeFileName Condition="'$(RuntimeIdentifier)' == 'linux-x64' or '$(RuntimeIdentifier)' == 'linux-arm64' or '$(RuntimeIdentifier)' == 'linux-arm'">libmulti-pwsh-sdk.so</DevolutionsMultiPwshSdkNativeFileName>
+    <DevolutionsMultiPwshSdkNativeFileName Condition="'$(RuntimeIdentifier)' == 'osx-x64' or '$(RuntimeIdentifier)' == 'osx-arm64'">libmulti-pwsh-sdk.dylib</DevolutionsMultiPwshSdkNativeFileName>
+    <DevolutionsMultiPwshSdkNativeAsset>$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\$(DevolutionsMultiPwshSdkNativeFileName)</DevolutionsMultiPwshSdkNativeAsset>
   </PropertyGroup>
 
   <Target Name="RemoveDevolutionsMultiPwshSdkNativeCopyLocalAsset"
@@ -8,11 +11,11 @@
           Condition="'$(DevolutionsMultiPwshSdkEnabled)' != 'true'">
     <ItemGroup>
       <NativeCopyLocalItems Remove="@(NativeCopyLocalItems)"
-                            Condition="'%(NativeCopyLocalItems.Filename)%(NativeCopyLocalItems.Extension)' == 'multi-pwsh-sdk.dll'" />
+                            Condition="'%(NativeCopyLocalItems.Filename)%(NativeCopyLocalItems.Extension)' == 'multi-pwsh-sdk.dll' or '%(NativeCopyLocalItems.Filename)%(NativeCopyLocalItems.Extension)' == 'libmulti-pwsh-sdk.so' or '%(NativeCopyLocalItems.Filename)%(NativeCopyLocalItems.Extension)' == 'libmulti-pwsh-sdk.dylib'" />
       <_ResolvedCopyLocalBuildAssets Remove="@(_ResolvedCopyLocalBuildAssets)"
-                                     Condition="'%(_ResolvedCopyLocalBuildAssets.Filename)%(_ResolvedCopyLocalBuildAssets.Extension)' == 'multi-pwsh-sdk.dll'" />
+                                     Condition="'%(_ResolvedCopyLocalBuildAssets.Filename)%(_ResolvedCopyLocalBuildAssets.Extension)' == 'multi-pwsh-sdk.dll' or '%(_ResolvedCopyLocalBuildAssets.Filename)%(_ResolvedCopyLocalBuildAssets.Extension)' == 'libmulti-pwsh-sdk.so' or '%(_ResolvedCopyLocalBuildAssets.Filename)%(_ResolvedCopyLocalBuildAssets.Extension)' == 'libmulti-pwsh-sdk.dylib'" />
       <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
-                               Condition="'%(ReferenceCopyLocalPaths.Filename)%(ReferenceCopyLocalPaths.Extension)' == 'multi-pwsh-sdk.dll'" />
+                               Condition="'%(ReferenceCopyLocalPaths.Filename)%(ReferenceCopyLocalPaths.Extension)' == 'multi-pwsh-sdk.dll' or '%(ReferenceCopyLocalPaths.Filename)%(ReferenceCopyLocalPaths.Extension)' == 'libmulti-pwsh-sdk.so' or '%(ReferenceCopyLocalPaths.Filename)%(ReferenceCopyLocalPaths.Extension)' == 'libmulti-pwsh-sdk.dylib'" />
     </ItemGroup>
   </Target>
 
@@ -21,15 +24,15 @@
           Condition="'$(DevolutionsMultiPwshSdkEnabled)' != 'true'">
     <ItemGroup>
       <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
-                             Condition="'%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'multi-pwsh-sdk.dll'" />
+                             Condition="'%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'multi-pwsh-sdk.dll' or '%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'libmulti-pwsh-sdk.so' or '%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'libmulti-pwsh-sdk.dylib'" />
     </ItemGroup>
   </Target>
 
   <Target Name="ResolveDevolutionsMultiPwshSdkNativeAsset"
           BeforeTargets="CopyFilesToOutputDirectory"
           Condition="'$(DevolutionsMultiPwshSdkEnabled)' == 'true'">
-    <Error Condition="'$(RuntimeIdentifier)' != 'win-x64'"
-          Text="Devolutions.MultiPwsh.Sdk is currently packaged only for win-x64. Set RuntimeIdentifier to win-x64 or remove DevolutionsMultiPwshSdkEnabled." />
+    <Error Condition="'$(DevolutionsMultiPwshSdkNativeFileName)' == ''"
+          Text="Devolutions.MultiPwsh.Sdk supports win-x64, win-arm64, linux-x64, linux-arm64, linux-arm, osx-x64, and osx-arm64. Set RuntimeIdentifier to a packaged RID or remove DevolutionsMultiPwshSdkEnabled." />
     <Error Condition="!Exists('$(DevolutionsMultiPwshSdkNativeAsset)')"
           Text="The packaged multi-pwsh-sdk native asset was not found." />
     <Copy SourceFiles="$(DevolutionsMultiPwshSdkNativeAsset)"

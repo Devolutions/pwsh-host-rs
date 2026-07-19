@@ -4,8 +4,10 @@ Experimental `net8.0` NativeAOT facade for an in-process PowerShell payload
 hosted by the `multi-pwsh-sdk.dll` Rust library.
 Its public C# types remain in the `Devolutions.PowerShell.Ffi` namespace.
 
-This package ships only the `win-x64` native FFI asset. It does not include
-PowerShell. Activate an explicit PowerShell payload with a hash-pinned manifest:
+This package ships native FFI assets for `win-x64`, `win-arm64`, `linux-x64`,
+`linux-arm64`, `linux-arm`, `osx-x64`, and `osx-arm64`. It does not include
+PowerShell. Only `win-x64` currently has end-to-end NativeAOT payload smoke
+coverage. Activate an explicit PowerShell payload with a hash-pinned manifest:
 
 ```csharp
 using Devolutions.PowerShell.Ffi;
@@ -43,10 +45,10 @@ CoreCLR is an experimental deployment condition, not a generally supported
 
 Native deployment is inert by default even for a matching RID. Set
 `DevolutionsMultiPwshSdkEnabled=true` to stage the package's
-`runtimes/win-x64/native/multi-pwsh-sdk.dll` beside the application. The
-package never embeds a PowerShell payload. Its native asset uses a static MSVC
-runtime and the dedicated unwind-enabled `ffi-release` Rust profile, so native
-panic containment remains effective at the ABI boundary.
+RID-specific native library beside the application. The package never
+embeds a PowerShell payload. Windows native assets use a static MSVC runtime
+and the dedicated unwind-enabled `ffi-release` Rust profile, so native panic
+containment remains effective at the ABI boundary.
 The SDK NuGet version and the native DLL `FileVersion`/`ProductVersion` match
 the `multi-pwsh` CLI release version.
 
