@@ -150,6 +150,15 @@ public sealed unsafe class PowerShellSession : IDisposable
     }
 
     /// <summary>
+    /// Replaces a named session variable with a copied property-bag DTO.
+    /// </summary>
+    public void SetPropertyBag(string name, IEnumerable<KeyValuePair<string, PowerShellValue>> properties)
+    {
+        ArgumentNullException.ThrowIfNull(properties);
+        SetVariable(name, PowerShellValue.PropertyBag(properties));
+    }
+
+    /// <summary>
     /// Removes a named copied-value session variable.
     /// </summary>
     public bool RemoveVariable(string name)
@@ -245,6 +254,49 @@ public sealed unsafe class PowerShellSession : IDisposable
         }
     }
 
+    /// <summary>
+    /// Retrieves a copied property-bag DTO from a named session variable.
+    /// </summary>
+    public bool TryGetPropertyBag(
+        string name,
+        out IReadOnlyDictionary<string, PowerShellValue>? properties)
+    {
+        if (!TryGetVariable(name, out PowerShellValue? value))
+        {
+            properties = null;
+            return false;
+        }
+        if (value is not { Kind: PowerShellValueKind.PropertyBag })
+        {
+            throw new InvalidOperationException("The named session variable is not a copied property bag.");
+        }
+
+        properties = value.GetPropertyBag();
+        return true;
+    }
+
+    /// <summary>
+    /// Invokes a copied script recipe in this session and reads its named copied
+    /// result variable after synchronous completion.
+    /// </summary>
+    public PowerShellSessionScriptResult InvokeAndReadVariable(
+        PowerShellScriptRecipe recipe,
+        string resultVariableName,
+        PowerShellCommandPolicy? policy = null)
+    {
+        ArgumentNullException.ThrowIfNull(recipe);
+        ValidateVariableName(resultVariableName);
+        policy?.Validate(recipe);
+        using PowerShell powerShell = CreatePowerShell();
+        recipe.Apply(powerShell);
+        PowerShellInvocationResult invocation = PowerShellRuntime.InvokeRecipe(
+            powerShell,
+            recipe.ResultSchema,
+            recipe.Timeout);
+        bool found = TryGetVariable(resultVariableName, out PowerShellValue? value);
+        return new PowerShellSessionScriptResult(invocation, found, value);
+    }
+
     public void Dispose()
     {
         handle.Dispose();
@@ -283,4 +335,23 @@ public sealed unsafe class PowerShellSession : IDisposable
 
         return (PowerShellSessionState)value;
     }
+}
+
+public sealed class PowerShellSessionScriptResult
+{
+    internal PowerShellSessionScriptResult(
+        PowerShellInvocationResult invocation,
+        bool hasValue,
+        PowerShellValue? value)
+    {
+        Invocation = invocation;
+        HasValue = hasValue;
+        Value = value;
+    }
+
+    public PowerShellInvocationResult Invocation { get; }
+
+    public bool HasValue { get; }
+
+    public PowerShellValue? Value { get; }
 }

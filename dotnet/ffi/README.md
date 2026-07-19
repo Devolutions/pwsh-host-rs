@@ -88,6 +88,14 @@ pipeline context. Per-error terminal status is intentionally unavailable:
 Results also expose a monotonic invocation ID, terminal state, and `HadErrors`
 metadata without exposing any SMA type.
 
+`runtime.ParseScriptParameters(script)` supports script-editor parameter
+metadata without executing `script`. It returns copied parameter DTOs (name,
+declared type/default-expression spelling, mandatory flag, description/help
+text, and `ValidateSet` entries) or copied syntax-error DTOs; it never exposes
+SMA AST/token objects. The API accepts at most 64 KiB of source and fails rather
+than truncating more than 16 parameters, 16 `ValidateSet` values, or 16 parse
+errors.
+
 `PowerShellSnapshotSerializer` provides deterministic version-1 UTF-8 JSON for
 storage or display of immutable invocation results. Documents are capped at
 1 MiB and reject unknown members, invalid versions, malformed tagged values,
@@ -145,6 +153,33 @@ if (session.TryGetVariable("connection", out PowerShellValue? connectionSnapshot
 a pending/running async invocation, and they return `UnsupportedValue` rather
 than stringifying a value that cannot be copied. Do not use these APIs for
 credentials, live RDM proxy objects, or callback objects.
+
+`PowerShellCommandRecipe` and `PowerShellScriptRecipe` provide bounded,
+declarative one-shot calls. An optional `PowerShellResultSchema` rejects output
+that has the wrong count, copied scalar kind, required property, error state, or
+truncation. `PowerShellRuntime.Invoke` and `InvokeAsync` apply recipe timeouts
+through the existing cancellation model. `PowerShellCommandPolicy` is an
+application allowlist/size guardrail only; it is not a PowerShell sandbox and
+cannot make approved arbitrary script source safe.
+
+`PowerShellSnapshotReader.GetCompleteProperties` rejects truncated snapshots
+before returning their copied property bag, and
+`CreateDisplaySnapshot` returns copied text for each stream plus an explicit
+completeness flag. `PowerShellSession.SetPropertyBag`,
+`TryGetPropertyBag`, and `InvokeAndReadVariable` support value-only session
+result DTO flows; they never retrieve a live `PSObject`.
+
+`ParseScriptParameters` also projects bounded aliases, parameter-set name and
+position/pipeline flags, and `ValidatePattern`, `ValidateRange`,
+`ValidateLength`, and `ValidateCount` argument spelling. The combined output
+is capped at 32 metadata records, so it fails rather than silently truncating.
+
+`PowerShellRdmCapabilities` supplies opt-in schemas for
+`rdm.get-connection-name`, `rdm.get-connection-display`, and
+`rdm.report-status`; applications must still register their own handlers.
+`PowerShellHostInteraction.ParseProgressUpdate` validates an explicit copied
+`host.report-progress` property bag (including ID and range fields), rather
+than inferring progress from stream display text.
 
 Raw ABI releases consume their handles, so a repeated raw release or later use
 returns `InvalidHandle`. Public `Dispose` methods are idempotent; their

@@ -415,6 +415,178 @@ void VerifyCopiedValueReaders()
     Require(rejectedArrayRead, "Property bags must not be read as arrays.");
 }
 
+void VerifyScriptParameterMetadata(PowerShellRuntime runtime)
+{
+    PowerShellScriptParseResult metadata = runtime.ParseScriptParameters(
+        "param([Alias('N')][Parameter(Mandatory = `$true, HelpMessage = 'help', ParameterSetName = 'ByName', Position = 1, ValueFromPipelineByPropertyName = `$true)][Description('description')][ValidateSet('one', 'two')][ValidatePattern('^[a-z]+`$')][ValidateRange(1, 10)][string]`$Name = 'default')");
+    PowerShellScriptParameterMetadata parameter = metadata.Parameters.Single();
+    Require(
+        !metadata.HasErrors &&
+        parameter.Name == "Name" &&
+        (parameter.TypeName == "string" || parameter.TypeName == "System.String") &&
+        parameter.DefaultValueExpression == "'default'" &&
+        parameter.IsMandatory &&
+        parameter.Description == "description" &&
+        parameter.HelpMessage == "help" &&
+        parameter.ValidateSetValues.SequenceEqual(new[] { "one", "two" }) &&
+        parameter.Aliases.SequenceEqual(new[] { "N" }) &&
+        parameter.ParameterSets.Count == 1 &&
+        parameter.ParameterSets[0].Name == "ByName" &&
+        parameter.ParameterSets[0].Position == 1 &&
+        parameter.ParameterSets[0].ValueFromPipelineByPropertyName &&
+        parameter.Validations.Any(validation =>
+            validation.Name == "ValidatePattern" &&
+            validation.Arguments.SequenceEqual(new[] { "^[a-z]+$" })) &&
+        parameter.Validations.Any(validation =>
+            validation.Name == "ValidateRange" &&
+            validation.Arguments.SequenceEqual(new[] { "1", "10" })),
+        "Copied script parameter metadata did not preserve the declared parameter contract.");
+
+    PowerShellScriptParseResult nonExecuting = runtime.ParseScriptParameters(
+        "param([string]`$Value) throw 'caller source must not execute'");
+    Require(
+        !nonExecuting.HasErrors &&
+        nonExecuting.Parameters.Count == 1 &&
+        nonExecuting.Parameters[0].Name == "Value",
+        "Script metadata parsing executed caller-provided source.");
+
+    PowerShellScriptParseResult invalid = runtime.ParseScriptParameters("param([string]`$Name");
+    Require(
+        invalid.HasErrors &&
+        invalid.Parameters.Count == 0 &&
+        invalid.Errors.Count != 0 &&
+        invalid.Errors[0].EndOffset >= invalid.Errors[0].StartOffset,
+        "Script parser errors were not returned as bounded copied DTOs.");
+
+    try
+    {
+        _ = runtime.ParseScriptParameters(new string('x', 64 * 1024 + 1));
+        throw new InvalidOperationException("Oversized script metadata input was accepted.");
+    }
+    catch (ArgumentOutOfRangeException)
+    {
+    }
+}
+
+void VerifyProgressUpdate()
+{
+    PowerShellProgressUpdate progress = PowerShellHostInteraction.ParseProgressUpdate(
+        PowerShellValue.PropertyBag(
+        [
+            new KeyValuePair<string, PowerShellValue>("ActivityId", PowerShellValue.SignedInteger(7)),
+            new KeyValuePair<string, PowerShellValue>("ParentActivityId", PowerShellValue.SignedInteger(-1)),
+            new KeyValuePair<string, PowerShellValue>("Activity", PowerShellValue.String("Deploying")),
+            new KeyValuePair<string, PowerShellValue>("StatusDescription", PowerShellValue.String("Staging payload")),
+            new KeyValuePair<string, PowerShellValue>("CurrentOperation", PowerShellValue.String("Copy")),
+            new KeyValuePair<string, PowerShellValue>("PercentComplete", PowerShellValue.SignedInteger(50)),
+            new KeyValuePair<string, PowerShellValue>("SecondsRemaining", PowerShellValue.SignedInteger(12)),
+            new KeyValuePair<string, PowerShellValue>("IsCompleted", PowerShellValue.Boolean(false)),
+        ]));
+    Require(
+        progress.ActivityId == 7 &&
+        progress.ParentActivityId == -1 &&
+        progress.Activity == "Deploying" &&
+        progress.PercentComplete == 50 &&
+        progress.SecondsRemaining == 12 &&
+        !progress.IsCompleted,
+        "Typed host progress validation did not preserve the copied progress update.");
+
+    try
+    {
+        _ = PowerShellHostInteraction.ParseProgressUpdate(
+            PowerShellValue.PropertyBag(
+            [
+                new KeyValuePair<string, PowerShellValue>("ActivityId", PowerShellValue.SignedInteger(1)),
+                new KeyValuePair<string, PowerShellValue>("Activity", PowerShellValue.String("Invalid")),
+                new KeyValuePair<string, PowerShellValue>("PercentComplete", PowerShellValue.SignedInteger(101)),
+            ]));
+        throw new InvalidOperationException("Out-of-range host progress was accepted.");
+    }
+    catch (ArgumentException)
+    {
+    }
+}
+
+async Task VerifyRecipesSchemasAndPoliciesAsync(PowerShellRuntime runtime)
+{
+    var outputSchema = new PowerShellResultSchema(
+        minimumOutputRecords: 1,
+        maximumOutputRecords: 1,
+        allowedScalarKinds: [PowerShellValueKind.String]);
+    PowerShellInvocationResult commandResult = runtime.Invoke(
+        new PowerShellCommandRecipe(
+            "Write-Output",
+            [new KeyValuePair<string, PowerShellValue>("InputObject", PowerShellValue.String("recipe-output"))],
+            outputSchema));
+    Require(
+        commandResult.Output.Records.Count == 1 &&
+        commandResult.Output.Records[0].DisplayText == "recipe-output",
+        "A bounded command recipe did not produce its declared copied result.");
+
+    PowerShellInvocationResult objectResult = runtime.Invoke(
+        new PowerShellScriptRecipe("[pscustomobject]@{ Name = 'snapshot'; Count = 2 }"));
+    PowerShellObjectSnapshot objectSnapshot = objectResult.Output.Records.Single();
+    IReadOnlyDictionary<string, PowerShellValue> properties = PowerShellSnapshotReader.GetCompleteProperties(objectSnapshot);
+    PowerShellDisplaySnapshot display = PowerShellSnapshotReader.CreateDisplaySnapshot(objectResult);
+    Require(
+        properties["Name"].TryGetString(out string? name) &&
+        name == "snapshot" &&
+        properties["Count"].TryGetSignedInteger(out long count) &&
+        count == 2 &&
+        display.IsComplete &&
+        display.Output.Single() == objectSnapshot.DisplayText,
+        "Snapshot readers did not preserve a complete copied property bag and display DTO.");
+
+    try
+    {
+        _ = runtime.Invoke(
+            new PowerShellScriptRecipe(
+                "'wrong-scalar'",
+                new PowerShellResultSchema(allowedScalarKinds: [PowerShellValueKind.SignedInteger])));
+        throw new InvalidOperationException("A result schema accepted an incompatible copied scalar.");
+    }
+    catch (InvalidOperationException)
+    {
+    }
+    try
+    {
+        _ = new PowerShellResultSchema(allowedScalarKinds: [PowerShellValueKind.PropertyBag]);
+        throw new InvalidOperationException("A result schema accepted a non-scalar value kind.");
+    }
+    catch (ArgumentException)
+    {
+    }
+
+    var policy = new PowerShellCommandPolicy(allowedCommands: ["Write-Output"]);
+    try
+    {
+        _ = runtime.Invoke(new PowerShellCommandRecipe("Get-Date"), policy);
+        throw new InvalidOperationException("An advisory command policy accepted a non-allowlisted command.");
+    }
+    catch (InvalidOperationException)
+    {
+    }
+    try
+    {
+        _ = runtime.Invoke(new PowerShellScriptRecipe("'blocked script'"), policy);
+        throw new InvalidOperationException("An advisory command policy accepted script source by default.");
+    }
+    catch (InvalidOperationException)
+    {
+    }
+    try
+    {
+        _ = await runtime.InvokeAsync(
+            new PowerShellScriptRecipe(
+                "Start-Sleep -Seconds 5",
+                timeout: TimeSpan.FromMilliseconds(50)));
+        throw new InvalidOperationException("A timed recipe returned a successful result.");
+    }
+    catch (OperationCanceledException)
+    {
+    }
+}
+
 async Task VerifyCancellationAndDisposeAsync()
 {
     using (var cancellation = new CancellationTokenSource())
@@ -509,6 +681,9 @@ if (args.Length != 3)
 PowerShellRuntime runtime = PowerShellRuntime.Activate(
    new PowerShellPayloadActivationOptions(args[0], args[1], args[2]));
 VerifyCopiedValueReaders();
+VerifyScriptParameterMetadata(runtime);
+VerifyProgressUpdate();
+await VerifyRecipesSchemasAndPoliciesAsync(runtime);
 const string SecretMarker = "ffi-secret-marker-not-accepted";
 Require(
    PowerShellSecretTransfer.Policy == PowerShellSecretTransferPolicy.Rejected &&
@@ -741,14 +916,7 @@ sessionResult.Output.Records[4].DisplayText != "Stop" ||
     return 1;
 }
 
-PowerShellCapabilityDefinition connectionNameDefinition = new(
-    "rdm.get-connection-name",
-    Array.Empty<PowerShellCapabilityArgumentSchema>(),
-    new[] { PowerShellValueKind.String },
-    PowerShellCapabilityPermission.Read,
-    maximumInputBytes: 64,
-    maximumOutputBytes: 256,
-    deadline: TimeSpan.FromSeconds(5));
+PowerShellCapabilityDefinition connectionNameDefinition = PowerShellRdmCapabilities.GetConnectionName;
 using (PowerShellCapabilitySet capabilities = runtime.RegisterCapabilities(new[]
 {
     new PowerShellCapabilityBinding(connectionNameDefinition, new ConnectionNameCapability()),
@@ -956,6 +1124,24 @@ Require(
     resultCount!.TryGetSignedInteger(out long resultCountValue) &&
     resultCountValue == 2,
     "A value-only script result did not return as a copied session-variable DTO.");
+Require(
+    session.TryGetPropertyBag("FfiResult", out IReadOnlyDictionary<string, PowerShellValue>? resultProperties) &&
+    resultProperties is not null &&
+    resultProperties["Status"].TryGetString(out string? copiedResultStatus) &&
+    copiedResultStatus == "completed",
+    "The session property-bag convenience API did not return a copied DTO.");
+PowerShellSessionScriptResult recipeVariableResult = session.InvokeAndReadVariable(
+    new PowerShellScriptRecipe("`$FfiRecipeResult = [pscustomobject]@{ Status = 'recipe'; Count = 3 }"),
+    "FfiRecipeResult",
+    new PowerShellCommandPolicy(allowScripts: true));
+Require(
+    recipeVariableResult.Invocation.Output.Records.Count == 0 &&
+    recipeVariableResult.HasValue &&
+    recipeVariableResult.Value is { Kind: PowerShellValueKind.PropertyBag } &&
+    recipeVariableResult.Value.TryGetProperty("Status", out PowerShellValue? recipeStatus) &&
+    recipeStatus!.TryGetString(out string? recipeStatusText) &&
+    recipeStatusText == "recipe",
+    "The session recipe result-variable helper did not return a copied result DTO.");
 Require(
     session.RemoveVariable("FfiCopied") &&
     !session.RemoveVariable("FfiCopied") &&

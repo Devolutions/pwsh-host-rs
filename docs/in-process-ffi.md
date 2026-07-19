@@ -396,6 +396,7 @@ below is the current implementation status for RDM-facing work.
 | --- | --- | --- |
 | Explicit payload activation, hostfxr startup, one runtime per process | Implemented | Hash-pinned manifest activation and an opaque `PowerShellRuntime`; only `win-x64` has NativeAOT smoke evidence. |
 | Script or named-command execution with scalar parameters | Implemented | `AddScript`, `AddCommand`, `AddParameter`, and bounded `PowerShellValue` inputs. No raw `object`, `PSObject`, or `SecureString` overload exists. |
+| Script parameter declarations and syntax errors | Implemented, copied-only | `PowerShellRuntime.ParseScriptParameters` passes the input to payload-local `Parser.ParseInput` as data, never executable pipeline text. It returns bounded parameter/parse-error DTOs, not SMA AST or token objects. |
 | Output, errors, diagnostics, warning/progress streams | Implemented | Immutable bounded `PowerShellInvocationResult` snapshots. Safe scalar and property-bag projections are read through typed copied-value readers, never live SMA collections. |
 | Timeout, cancellation, async completion, deterministic disposal | Implemented | `InvokeAsync(CancellationToken)`, `BeginInvoke`, `Wait`, `Stop`, and `SafeHandle` ownership. Cancellation wins and never returns a partial success result. |
 | Long-lived local state | Implemented | Opaque local `PowerShellSession` plus serialized builders. It is not a pool or a remoting session. |
@@ -404,6 +405,20 @@ below is the current implementation status for RDM-facing work.
 | `PSCredential` parameter | Intentionally unsupported | Arbitrary scripts can emit or transform a supplied credential. The DTO result model cannot guarantee redaction or a zeroable managed lifetime. |
 | Enumerated RDM capability calls and bounded host interaction | Implemented, opt-in | A registered `PowerShellCapabilitySet` makes only declared typed calls available through the temporary payload-local `$DpsCapabilities` object. `PowerShellHostInteraction` supplies schemas for text, progress, line, and choice interactions; it is not a `PSHost` proxy. |
 | PowerCLI typed return objects, PSRP/WinRM/SSH, pools, and transports | Unsupported | Retain the existing SMA/process paths. No CLR type, transport, or live session crosses the facade. |
+
+A local package-swap assessment of RDM's
+`Windows/RemoteDesktopManager/Business` project confirmed this is not a
+drop-in replacement for `Devolutions.PowerShell.SDK`. That project directly
+uses SMA parser AST/token types and `Collection<PSObject>` output. The copied
+parser metadata API above supports an RDM migration of the former, but it
+cannot preserve public SMA AST/token signatures. The latter must migrate to
+RDM-owned DTOs from `PowerShellInvocationResult` snapshots. Existing RDM
+custom actions that set live `Connection`, `RDM`, `Core`, or `Result` objects
+on a `Runspace`; VMware PowerCLI code that retains live runspaces/typed
+`PSObject` base objects; and interactive/remoting code using `PSHost`,
+`PSCredential`, `PSSession`, or connection-info types remain incompatible.
+They require a separate RDM migration or an existing SMA-backed path, never an
+SMA forwarding assembly or generic proxy bridge.
 
 ### Copied session variables
 
@@ -431,6 +446,24 @@ byte-array readers, together with `GetArray`, `GetPropertyBag`, and
 display text or snapshot JSON. Arrays and property bags always return copied,
 immutable collections; bytes are cloned on every read.
 
+### Script parameter metadata
+
+`PowerShellRuntime.ParseScriptParameters(script)` supports RDM script-editor
+metadata without a facade reference to `System.Management.Automation.Language`.
+The supplied script is an argument to a fixed payload-local
+`Parser.ParseInput` helper and is never executed. On success the immutable DTO
+contains each parameter's name, declared type spelling, default-expression
+spelling, mandatory flag, description/help text, `ValidateSet` entries, aliases,
+parameter-set name/position/pipeline flags, and copied
+`ValidatePattern`/`ValidateRange`/`ValidateLength`/`ValidateCount` argument
+spelling. On syntax failure it returns copied message, error-ID, and
+source-offset DTOs instead of parameters. The API rejects scripts above 64 KiB
+and fails rather than truncating more than 16 parameters, 16 total
+`ValidateSet` values, eight aliases/parameter sets/validations per parameter,
+four validation arguments, 32 combined metadata records, or 16 parse errors.
+It deliberately does not return tokens, AST nodes, evaluated attribute
+expressions, or arbitrary parser objects.
+
 Output projection is deliberately narrower than input values. A
 `PowerShellObjectSnapshot` can contain either one scalar or a property bag of
 up to 16 scalar properties. Callers must check `IsPropertyBagTruncated` and
@@ -452,6 +485,13 @@ This is an application-owned projection contract. It is not a substitute for
 `PSObject.BaseObject`, adapted members, methods, PowerCLI CLR types, or generic
 typed invocation.
 
+`PowerShellSnapshotReader.GetCompleteProperties` makes the completeness check
+mandatory before returning a property bag, while
+`PowerShellSnapshotReader.CreateDisplaySnapshot` builds an immutable copied
+text view of every output/stream channel and reports whether it is complete.
+Neither helper recreates an SMA object, parses CLIXML as a CLR graph, or treats
+display text as a typed DTO.
+
 ### Replacing injected RDM data
 
 Value-only scripts can migrate their former injected objects into explicit
@@ -459,8 +499,10 @@ copied variables: for example, `FfiConnection`, `FfiCoreOptions`, and
 `FfiResult`. The caller sets input bags before invoking a session builder. A
 script may replace `FfiResult` with a scalar-only `PSCustomObject` or
 hashtable, and the caller retrieves its bounded property-bag snapshot with
-`TryGetVariable` after the invocation completes. The package NativeAOT
-contract covers this update/readback flow.
+`TryGetVariable` or `TryGetPropertyBag` after the invocation completes.
+`SetPropertyBag` and `InvokeAndReadVariable` are convenience APIs for this
+same copied-only flow. The package NativeAOT contract covers this update/readback
+flow.
 
 The old object's methods do not migrate this way. A reviewed operation that
 needs parent-side behavior must instead be a named `rdm.*` capability with
@@ -498,6 +540,42 @@ claim. The complete-closure requirement hashes every regular module file, and
 validated configuration. Do not enable PowerCLI, arbitrary module
 initialization, native loading, or remoting modules until their full payload
 dependency closure has separately passed this contract.
+
+### Declarative recipes and result schemas
+
+`PowerShellCommandRecipe` describes one bounded command name plus copied
+parameters; `PowerShellScriptRecipe` describes bounded source text. Both accept
+an optional timeout and `PowerShellResultSchema`. `PowerShellRuntime.Invoke`
+and `InvokeAsync` apply the timeout using the normal cancellation contract; a
+timed-out recipe has no successful partial result.
+
+The schema verifies output record bounds, an optional allowed copied scalar
+kind set, required copied property names, error policy, and snapshot
+completeness. It rejects a missing, wrong-kind, or truncated result rather than
+silently treating display strings as data. This is intended for migration
+adapters that already own the expected DTO contract, not as a general result
+deserializer.
+
+`PowerShellCommandPolicy` is an opt-in application guardrail for recipe command
+allowlists, parameter counts, script opt-in, and source size. It is explicitly
+not a PowerShell sandbox: once arbitrary script source is allowed, that script
+retains the full authority of its payload session. Applications must keep their
+real authorization, payload manifest, session policy, and capability decisions
+outside this advisory policy.
+
+### Payload-owned module adapter contract
+
+A future adapter for a specific reviewed module must be payload-owned and
+manifest-pinned: its exact `.psd1`, version, hash, dependencies, and native
+closure belong in the selected payload manifest. Its public contract may accept
+and return only documented copied `PowerShellValue` DTOs and may use only
+explicitly registered capability names. It must prove its target payload and
+module closure through a NativeAOT package smoke before being advertised.
+
+This is not a generic module bridge. It cannot expose PowerCLI CLR objects,
+remoting/PSRP, credentials, live RDM objects, arbitrary callbacks, or an
+ambient `PSModulePath`. Any such behavior requires a separately designed
+boundary rather than an exception to this contract.
 
 ### Credentials remain a hard rejection boundary
 
@@ -581,6 +659,16 @@ actual UI policy. They accept only bounded text/property-bag/choice DTOs and
 never carry a credential or secure-string response. This reuses the capability
 mechanism; there is no second callback vtable, direct console I/O, or `PSHost`
 surface.
+
+`PowerShellRdmCapabilities` provides harmless standard schemas for
+`rdm.get-connection-name`, `rdm.get-connection-display`, and
+`rdm.report-status`; callers opt in by registering handlers and no capability
+is available merely because its definition exists. For
+`host.report-progress`, handlers can use
+`PowerShellHostInteraction.ParseProgressUpdate` to validate explicit copied
+`ActivityId`, `ParentActivityId`, activity/status text, percentage, remaining
+seconds, and completion fields. It intentionally never derives typed progress
+from a generic progress-stream display string.
 
 This remains intentionally unlike a generic `RDM`/`Core`/`connection` object
 bridge. Put copied `Result`, `Core`, and `connection` data in session

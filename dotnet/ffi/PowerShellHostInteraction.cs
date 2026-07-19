@@ -2,6 +2,15 @@ namespace Devolutions.PowerShell.Ffi;
 
 public static class PowerShellHostInteraction
 {
+    /// <summary>
+    /// Validates a copied <c>host.report-progress</c> property bag without parsing
+    /// generic stream display text.
+    /// </summary>
+    public static PowerShellProgressUpdate ParseProgressUpdate(PowerShellValue value)
+    {
+        return PowerShellProgressUpdate.Parse(value);
+    }
+
     public static PowerShellCapabilityDefinition WriteText { get; } = new(
         "host.write-text",
         [new PowerShellCapabilityArgumentSchema([PowerShellValueKind.String])],
