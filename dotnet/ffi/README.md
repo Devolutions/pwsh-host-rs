@@ -7,7 +7,10 @@ Its public C# types remain in the `Devolutions.PowerShell.Ffi` namespace.
 This package ships native FFI assets for `win-x64`, `win-arm64`, `linux-x64`,
 `linux-arm64`, `linux-arm`, `osx-x64`, and `osx-arm64`. It does not include
 PowerShell. Only `win-x64` currently has end-to-end NativeAOT payload smoke
-coverage. Activate an explicit PowerShell payload with a hash-pinned manifest:
+coverage. Release CI also runs a package-consumer ABI smoke on `win-x64`,
+`linux-x64`, `osx-x64`, and `osx-arm64`; that verifies native-library loading,
+the ABI export, and RID-specific staging, not payload activation. Activate an
+explicit PowerShell payload with a hash-pinned manifest:
 
 ```csharp
 using Devolutions.PowerShell.Ffi;

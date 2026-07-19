@@ -754,6 +754,9 @@ same release RIDs as `Devolutions.MultiPwsh.Cli`: `win-x64`, `win-arm64`,
 cdylib is inert by default; consumers set a matching `RuntimeIdentifier` and
 `DevolutionsMultiPwshSdkEnabled=true` to stage that RID's native library beside
 the executable. The package deliberately does not carry a PowerShell payload.
+Release CI consumes the package and ABI-smokes native staging/loading on
+`win-x64`, `linux-x64`, `osx-x64`, and `osx-arm64`; this does not validate
+PowerShell payload activation on those platforms.
 Its NuGet version and Windows native DLL `FileVersion`/`ProductVersion` match
 the `multi-pwsh` CLI release version. Only the `win-x64` RID currently has
 end-to-end NativeAOT payload smoke coverage; publishing another asset is not a

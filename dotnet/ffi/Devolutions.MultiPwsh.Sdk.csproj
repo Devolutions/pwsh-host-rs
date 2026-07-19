@@ -23,6 +23,8 @@
     <PwshFfiRustFlags Condition="'$(RUSTFLAGS)' == ''">-C target-feature=+crt-static</PwshFfiRustFlags>
     <PwshFfiRustFlags Condition="'$(RUSTFLAGS)' != ''">$(RUSTFLAGS) -C target-feature=+crt-static</PwshFfiRustFlags>
     <PwshFfiNativeLibrary Condition="'$(PwshFfiNativeLibrary)' == ''">$(RepositoryRoot)\target\$(PwshFfiCargoProfile)\multi_pwsh_sdk.dll</PwshFfiNativeLibrary>
+    <PwshFfiNativeRuntimeIdentifier Condition="'$(PwshFfiNativeRuntimeIdentifier)' == ''">win-x64</PwshFfiNativeRuntimeIdentifier>
+    <PwshFfiNativeFileName Condition="'$(PwshFfiNativeFileName)' == ''">multi-pwsh-sdk.dll</PwshFfiNativeFileName>
   </PropertyGroup>
 
   <ItemGroup>
@@ -37,7 +39,7 @@
     <None Include="$(PwshFfiNativeLibrary)"
           Condition="'$(PwshFfiNativeStagingRoot)' == ''"
           Pack="true"
-          PackagePath="runtimes\win-x64\native\multi-pwsh-sdk.dll"
+          PackagePath="runtimes\$(PwshFfiNativeRuntimeIdentifier)\native\$(PwshFfiNativeFileName)"
           Visible="false" />
   </ItemGroup>
 

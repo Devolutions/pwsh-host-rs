@@ -707,6 +707,50 @@ jobs:
           path: artifacts/sdk-nuget/*.nupkg
           if-no-files-found: error
 
+  smoke-sdk-native-assets:
+    name: Smoke SDK native asset (${{ matrix.runtime_id }})
+    runs-on: ${{ matrix.os }}
+    needs:
+      - validate
+      - validate-sdk-package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            runtime_id: win-x64
+          - os: ubuntu-latest
+            runtime_id: linux-x64
+          - os: macos-13
+            runtime_id: osx-x64
+          - os: macos-14
+            runtime_id: osx-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.checkout_ref }}
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Download SDK NuGet package artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: sdk-nuget
+          path: artifacts/sdk-nuget
+
+      - name: Smoke test staged native SDK asset
+        shell: pwsh
+        run: |
+          pwsh -NoLogo -NoProfile -File (Resolve-Path 'tests\Test-PwshFfiNativeAsset.ps1') `
+            -PackageSource (Resolve-Path 'artifacts\sdk-nuget') `
+            -PackageVersion '${{ needs.validate.outputs.release_version }}' `
+            -RuntimeIdentifier '${{ matrix.runtime_id }}'
+
   publish:
     name: Publish GitHub release
     runs-on: ubuntu-latest
@@ -715,6 +759,7 @@ jobs:
       - build
       - sign-windows
       - validate-sdk-package
+      - smoke-sdk-native-assets
 
     steps:
       - name: Checkout

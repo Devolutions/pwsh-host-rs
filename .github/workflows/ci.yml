@@ -316,6 +316,79 @@ jobs:
              -PackageSource (Resolve-Path 'artifacts/sdk-nuget') `
              -PowerShellPayloadDirectory $payloadDirectory
 
+  sdk-native-asset:
+    name: SDK native asset smoke (${{ matrix.runtime_id }})
+    runs-on: ${{ matrix.os }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            runtime_id: win-x64
+            native_file: multi_pwsh_sdk.dll
+            packaged_file: multi-pwsh-sdk.dll
+          - os: ubuntu-latest
+            runtime_id: linux-x64
+            native_file: libmulti_pwsh_sdk.so
+            packaged_file: libmulti-pwsh-sdk.so
+          - os: macos-13
+            runtime_id: osx-x64
+            native_file: libmulti_pwsh_sdk.dylib
+            packaged_file: libmulti-pwsh-sdk.dylib
+          - os: macos-14
+            runtime_id: osx-arm64
+            native_file: libmulti_pwsh_sdk.dylib
+            packaged_file: libmulti-pwsh-sdk.dylib
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Configure static MSVC runtime
+        if: matrix.runtime_id == 'win-x64'
+        shell: pwsh
+        run: |
+          "RUSTFLAGS=-C target-feature=+crt-static" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build and pack SDK native asset
+        shell: pwsh
+        run: |
+          cargo build --locked --profile ffi-release --package devolutions-pwsh-ffi
+          if ($LASTEXITCODE -ne 0) { throw 'SDK native library build failed.' }
+
+          $versionMatch = Select-String -Path 'crates\multi-pwsh\Cargo.toml' -Pattern '^version = "([^"]+)"$' | Select-Object -First 1
+          if ($null -eq $versionMatch) { throw 'Unable to read the multi-pwsh version.' }
+          $version = $versionMatch.Matches[0].Groups[1].Value
+          $nativeLibrary = Join-Path (Resolve-Path '.') "target\ffi-release\${{ matrix.native_file }}"
+
+          dotnet pack dotnet\ffi\Devolutions.MultiPwsh.Sdk.csproj -c Release `
+              -p:PackageVersion="$version" `
+              -p:PwshFfiNativeLibrary="$nativeLibrary" `
+              -p:PwshFfiNativeRuntimeIdentifier="${{ matrix.runtime_id }}" `
+              -p:PwshFfiNativeFileName="${{ matrix.packaged_file }}" `
+              -p:BuildPwshFfiNativeAsset=false `
+              -o artifacts\sdk-nuget
+          if ($LASTEXITCODE -ne 0) { throw 'SDK package creation failed.' }
+
+      - name: Smoke test staged native SDK asset
+        shell: pwsh
+        run: |
+          pwsh -NoLogo -NoProfile -File (Resolve-Path 'tests\Test-PwshFfiNativeAsset.ps1') `
+              -PackageSource (Resolve-Path 'artifacts\sdk-nuget') `
+              -RuntimeIdentifier '${{ matrix.runtime_id }}'
+
   nuget-apphost-linux:
     name: NuGet CLI AppHost smoke (Linux)
     runs-on: ubuntu-latest
