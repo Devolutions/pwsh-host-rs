@@ -1,7 +1,7 @@
 # Devolutions.MultiPwsh.Sdk
 
 Experimental `net8.0` NativeAOT facade for an in-process PowerShell payload
-hosted by the `devolutions_multi_pwsh_sdk_native` Rust library.
+hosted by the `multi-pwsh-sdk.dll` Rust library.
 Its public C# types remain in the `Devolutions.PowerShell.Ffi` namespace.
 
 This package ships only the `win-x64` native FFI asset. It does not include
@@ -43,11 +43,12 @@ CoreCLR is an experimental deployment condition, not a generally supported
 
 Native deployment is inert by default even for a matching RID. Set
 `DevolutionsMultiPwshSdkEnabled=true` to stage the package's
-`runtimes/win-x64/native/devolutions_multi_pwsh_sdk_native.dll` beside the
-application. The
+`runtimes/win-x64/native/multi-pwsh-sdk.dll` beside the application. The
 package never embeds a PowerShell payload. Its native asset uses a static MSVC
 runtime and the dedicated unwind-enabled `ffi-release` Rust profile, so native
 panic containment remains effective at the ABI boundary.
+The SDK NuGet version and the native DLL `FileVersion`/`ProductVersion` match
+the `multi-pwsh` CLI release version.
 
 The facade requires native ABI v2 and obtains a bounded diagnostic from the
 specific native call that failed. Its `SafeHandle` wrapper keeps a native handle

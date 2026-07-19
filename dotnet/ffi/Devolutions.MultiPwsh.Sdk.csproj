@@ -3,7 +3,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <AssemblyName>Devolutions.MultiPwsh.Sdk</AssemblyName>
     <PackageId>Devolutions.MultiPwsh.Sdk</PackageId>
-    <PackageVersion Condition="'$(PackageVersion)' == ''">0.1.0</PackageVersion>
+    <PackageVersion Condition="'$(PackageVersion)' == ''">0.14.2</PackageVersion>
     <Authors>Devolutions</Authors>
     <Description>Experimental hash-pinned PowerShell payload facade for the in-process NativeAOT Devolutions Rust FFI.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -22,7 +22,7 @@
     <PwshFfiCargoProfile Condition="'$(PwshFfiCargoProfile)' == ''">ffi-release</PwshFfiCargoProfile>
     <PwshFfiRustFlags Condition="'$(RUSTFLAGS)' == ''">-C target-feature=+crt-static</PwshFfiRustFlags>
     <PwshFfiRustFlags Condition="'$(RUSTFLAGS)' != ''">$(RUSTFLAGS) -C target-feature=+crt-static</PwshFfiRustFlags>
-    <PwshFfiNativeLibrary Condition="'$(PwshFfiNativeLibrary)' == ''">$(RepositoryRoot)\target\$(PwshFfiCargoProfile)\devolutions_multi_pwsh_sdk_native.dll</PwshFfiNativeLibrary>
+    <PwshFfiNativeLibrary Condition="'$(PwshFfiNativeLibrary)' == ''">$(RepositoryRoot)\target\$(PwshFfiCargoProfile)\multi_pwsh_sdk.dll</PwshFfiNativeLibrary>
   </PropertyGroup>
 
   <ItemGroup>
@@ -36,7 +36,7 @@
           Visible="false" />
     <None Include="$(PwshFfiNativeLibrary)"
           Pack="true"
-          PackagePath="runtimes\win-x64\native\"
+          PackagePath="runtimes\win-x64\native\multi-pwsh-sdk.dll"
           Visible="false" />
   </ItemGroup>
 

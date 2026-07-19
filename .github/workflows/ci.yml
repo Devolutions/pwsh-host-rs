@@ -301,8 +301,11 @@ jobs:
       - name: Dry-run pack NativeAOT SDK
         shell: pwsh
         run: |
+          $multiPwshVersionMatch = Select-String -Path 'crates\multi-pwsh\Cargo.toml' -Pattern '^version = "([^"]+)"$' | Select-Object -First 1
+          if ($null -eq $multiPwshVersionMatch) { throw 'Unable to read the multi-pwsh version.' }
+          $multiPwshVersion = $multiPwshVersionMatch.Matches[0].Groups[1].Value
           dotnet pack dotnet/ffi/Devolutions.MultiPwsh.Sdk.csproj -c Release `
-            -p:PackageVersion="0.0.0-ci.$env:GITHUB_RUN_NUMBER" `
+            -p:PackageVersion="$multiPwshVersion" `
             -o artifacts/sdk-nuget
 
       - name: Run isolated NativeAOT SDK package consumer

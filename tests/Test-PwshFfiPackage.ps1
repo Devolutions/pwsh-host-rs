@@ -20,6 +20,18 @@ if (-not $IsWindows -or [System.Runtime.InteropServices.RuntimeInformation]::Pro
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $packageId = 'Devolutions.MultiPwsh.Sdk'
+
+function Get-MultiPwshVersion {
+    $manifestPath = Join-Path $repoRoot 'crates\multi-pwsh\Cargo.toml'
+    $match = Select-String -Path $manifestPath -Pattern '^version = "([^"]+)"$' | Select-Object -First 1
+    if ($null -eq $match) {
+        throw "Unable to read the multi-pwsh version from $manifestPath"
+    }
+
+    return $match.Matches[0].Groups[1].Value
+}
+
+$multiPwshVersion = Get-MultiPwshVersion
 if ([string]::IsNullOrWhiteSpace($PackageSource)) {
     $PackageSource = Join-Path $repoRoot 'artifacts\sdk-nuget'
 }
@@ -185,6 +197,9 @@ if ($null -eq $package) {
 if ([string]::IsNullOrWhiteSpace($PackageVersion)) {
     $PackageVersion = $package.BaseName.Substring("$packageId.".Length)
 }
+if ($PackageVersion -ne $multiPwshVersion) {
+    throw "$packageId version $PackageVersion must match multi-pwsh version $multiPwshVersion"
+}
 
 $archive = [System.IO.Compression.ZipFile]::OpenRead($package.FullName)
 try {
@@ -196,13 +211,13 @@ try {
         'buildTransitive/Devolutions.MultiPwsh.Sdk.targets',
         'contentFiles/any/any/devolutions-pwsh-payload.manifest.template.json',
         'lib/net8.0/Devolutions.MultiPwsh.Sdk.dll',
-        'runtimes/win-x64/native/devolutions_multi_pwsh_sdk_native.dll')) {
+        'runtimes/win-x64/native/multi-pwsh-sdk.dll')) {
         if (-not $archivePaths.Contains($requiredPath)) {
             throw "Package is missing required entry: $requiredPath"
         }
     }
 
-    $nativeEntry = $archive.GetEntry('runtimes/win-x64/native/devolutions_multi_pwsh_sdk_native.dll')
+    $nativeEntry = $archive.GetEntry('runtimes/win-x64/native/multi-pwsh-sdk.dll')
     if ($null -eq $nativeEntry) {
         throw 'Package native FFI asset could not be opened.'
     }
@@ -266,7 +281,7 @@ try {
 
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $inertProject, '--configfile', $nugetConfig)
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('build', $inertProject, '--no-restore', '-c', $Configuration)
-    $inertNativeAsset = Join-Path $inertProjectDirectory "bin\$Configuration\net8.0\win-x64\devolutions_multi_pwsh_sdk_native.dll"
+    $inertNativeAsset = Join-Path $inertProjectDirectory "bin\$Configuration\net8.0\win-x64\multi-pwsh-sdk.dll"
     if (Test-Path $inertNativeAsset -PathType Leaf) {
         throw "FFI native assets must be inert by default, but found $inertNativeAsset"
     }
@@ -1175,9 +1190,15 @@ sealed class CancellableCapability : IPowerShellCapabilityHandler, IDisposable
 
     $publishDirectory = Join-Path $consumerDirectory "bin\$Configuration\net8.0\win-x64\publish"
     $consumerExe = Join-Path $publishDirectory 'FfiPackageConsumer.exe'
-    $nativeAsset = Join-Path $publishDirectory 'devolutions_multi_pwsh_sdk_native.dll'
+    $nativeAsset = Join-Path $publishDirectory 'multi-pwsh-sdk.dll'
     if (-not (Test-Path $consumerExe -PathType Leaf) -or -not (Test-Path $nativeAsset -PathType Leaf)) {
         throw 'The published package consumer is missing its executable or native FFI asset.'
+    }
+    $nativeVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($nativeAsset)
+    if ($nativeVersion.FileVersion -ne $multiPwshVersion -or
+        $nativeVersion.ProductVersion -ne $multiPwshVersion -or
+        $nativeVersion.OriginalFilename -ne 'multi-pwsh-sdk.dll') {
+        throw "The packaged SDK native asset version metadata does not match multi-pwsh $multiPwshVersion."
     }
 
     Invoke-CheckedCommand -FilePath $consumerExe -ArgumentList @($payloadDirectory, $manifestPath, $manifestSha256)

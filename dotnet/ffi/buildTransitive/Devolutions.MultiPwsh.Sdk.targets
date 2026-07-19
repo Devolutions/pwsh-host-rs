@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <DevolutionsMultiPwshSdkNativeAsset>$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\devolutions_multi_pwsh_sdk_native.dll</DevolutionsMultiPwshSdkNativeAsset>
+    <DevolutionsMultiPwshSdkNativeAsset>$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\multi-pwsh-sdk.dll</DevolutionsMultiPwshSdkNativeAsset>
   </PropertyGroup>
 
   <Target Name="RemoveDevolutionsMultiPwshSdkNativeCopyLocalAsset"
@@ -8,11 +8,11 @@
           Condition="'$(DevolutionsMultiPwshSdkEnabled)' != 'true'">
     <ItemGroup>
       <NativeCopyLocalItems Remove="@(NativeCopyLocalItems)"
-                            Condition="'%(NativeCopyLocalItems.Filename)%(NativeCopyLocalItems.Extension)' == 'devolutions_multi_pwsh_sdk_native.dll'" />
+                            Condition="'%(NativeCopyLocalItems.Filename)%(NativeCopyLocalItems.Extension)' == 'multi-pwsh-sdk.dll'" />
       <_ResolvedCopyLocalBuildAssets Remove="@(_ResolvedCopyLocalBuildAssets)"
-                                     Condition="'%(_ResolvedCopyLocalBuildAssets.Filename)%(_ResolvedCopyLocalBuildAssets.Extension)' == 'devolutions_multi_pwsh_sdk_native.dll'" />
+                                     Condition="'%(_ResolvedCopyLocalBuildAssets.Filename)%(_ResolvedCopyLocalBuildAssets.Extension)' == 'multi-pwsh-sdk.dll'" />
       <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
-                               Condition="'%(ReferenceCopyLocalPaths.Filename)%(ReferenceCopyLocalPaths.Extension)' == 'devolutions_multi_pwsh_sdk_native.dll'" />
+                               Condition="'%(ReferenceCopyLocalPaths.Filename)%(ReferenceCopyLocalPaths.Extension)' == 'multi-pwsh-sdk.dll'" />
     </ItemGroup>
   </Target>
 
@@ -21,7 +21,7 @@
           Condition="'$(DevolutionsMultiPwshSdkEnabled)' != 'true'">
     <ItemGroup>
       <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
-                             Condition="'%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'devolutions_multi_pwsh_sdk_native.dll'" />
+                             Condition="'%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'multi-pwsh-sdk.dll'" />
     </ItemGroup>
   </Target>
 
@@ -31,7 +31,7 @@
     <Error Condition="'$(RuntimeIdentifier)' != 'win-x64'"
           Text="Devolutions.MultiPwsh.Sdk is currently packaged only for win-x64. Set RuntimeIdentifier to win-x64 or remove DevolutionsMultiPwshSdkEnabled." />
     <Error Condition="!Exists('$(DevolutionsMultiPwshSdkNativeAsset)')"
-          Text="The packaged devolutions_multi_pwsh_sdk_native asset was not found." />
+          Text="The packaged multi-pwsh-sdk native asset was not found." />
     <Copy SourceFiles="$(DevolutionsMultiPwshSdkNativeAsset)"
           DestinationFolder="$(OutDir)"
           SkipUnchangedFiles="true" />

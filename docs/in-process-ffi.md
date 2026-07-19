@@ -662,11 +662,12 @@ payload being selected.
 
 `Devolutions.MultiPwsh.Sdk` is a `win-x64` preview package. Its Rust cdylib is
 published as the normal RID asset
-`runtimes/win-x64/native/devolutions_multi_pwsh_sdk_native.dll`, but is inert
-by default;
+`runtimes/win-x64/native/multi-pwsh-sdk.dll`, but is inert by default;
 consumers must set both `RuntimeIdentifier` to `win-x64` and
 `DevolutionsMultiPwshSdkEnabled=true` to stage it beside the executable. The
-package deliberately does not carry a PowerShell payload.
+package deliberately does not carry a PowerShell payload. Its NuGet version
+and native DLL `FileVersion`/`ProductVersion` match the `multi-pwsh` CLI
+release version.
 
 The package includes
 `contentFiles/any/any/devolutions-pwsh-payload.manifest.template.json` as a

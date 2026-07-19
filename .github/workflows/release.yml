@@ -109,14 +109,15 @@ jobs:
 
           multi_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/multi-pwsh/Cargo.toml | head -n 1)"
           host_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pwsh-host/Cargo.toml | head -n 1)"
+          ffi_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pwsh-ffi/Cargo.toml | head -n 1)"
 
-          if [[ -z "${multi_version}" || -z "${host_version}" ]]; then
+          if [[ -z "${multi_version}" || -z "${host_version}" || -z "${ffi_version}" ]]; then
             echo "Failed to read crate versions from Cargo.toml files." >&2
             exit 1
           fi
 
-          if [[ "${multi_version}" != "${host_version}" ]]; then
-            echo "Crate versions do not match: multi-pwsh=${multi_version}, pwsh-host=${host_version}" >&2
+          if [[ "${multi_version}" != "${host_version}" || "${multi_version}" != "${ffi_version}" ]]; then
+            echo "Crate versions do not match: multi-pwsh=${multi_version}, pwsh-host=${host_version}, pwsh-ffi=${ffi_version}" >&2
             exit 1
           fi
 
@@ -331,12 +332,19 @@ jobs:
           path: target/${{ matrix.target }}/release/${{ matrix.multi_binary }}
           if-no-files-found: error
 
+      - name: Stage unsigned Windows x64 SDK native library
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          New-Item -Path sdk-stage -ItemType Directory -Force | Out-Null
+          Copy-Item -Path target\ffi-release\multi_pwsh_sdk.dll -Destination sdk-stage\multi-pwsh-sdk.dll -Force
+
       - name: Upload unsigned Windows x64 SDK native library
         if: matrix.target == 'x86_64-pc-windows-msvc'
         uses: actions/upload-artifact@v6
         with:
           name: multi-pwsh-sdk-unsigned-win-x64
-          path: target/ffi-release/devolutions_multi_pwsh_sdk_native.dll
+          path: sdk-stage/multi-pwsh-sdk.dll
           if-no-files-found: error
 
       - name: Stage NuGet runtime artifact
@@ -480,7 +488,7 @@ jobs:
           $binaries = @(
             @{ Rid = 'win-x64'; Path = 'work/win-x64/multi-pwsh.exe' },
             @{ Rid = 'win-arm64'; Path = 'work/win-arm64/multi-pwsh.exe' },
-            @{ Rid = 'win-x64'; Path = 'work/sdk-win-x64/devolutions_multi_pwsh_sdk_native.dll' }
+            @{ Rid = 'win-x64'; Path = 'work/sdk-win-x64/multi-pwsh-sdk.dll' }
           )
 
           foreach ($binary in $binaries) {
@@ -566,7 +574,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: multi-pwsh-sdk-signed-win-x64
-          path: work/sdk-win-x64/devolutions_multi_pwsh_sdk_native.dll
+          path: work/sdk-win-x64/multi-pwsh-sdk.dll
           if-no-files-found: error
 
   validate-sdk-package:
@@ -604,7 +612,7 @@ jobs:
         env:
           PACKAGE_VERSION: ${{ needs.validate.outputs.release_version }}
         run: |
-          $nativeLibrary = Resolve-Path 'sdk-stage\devolutions_multi_pwsh_sdk_native.dll'
+          $nativeLibrary = Resolve-Path 'sdk-stage\multi-pwsh-sdk.dll'
           dotnet pack dotnet\ffi\Devolutions.MultiPwsh.Sdk.csproj -c Release `
             -p:PackageVersion="$env:PACKAGE_VERSION" `
             -p:PwshFfiNativeLibrary="$nativeLibrary" `

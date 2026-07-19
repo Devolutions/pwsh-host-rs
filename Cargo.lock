@@ -232,12 +232,13 @@ dependencies = [
 
 [[package]]
 name = "devolutions-pwsh-ffi"
-version = "0.1.0"
+version = "0.14.2"
 dependencies = [
  "pwsh-host",
  "serde",
  "serde_json",
  "sha2",
+ "winresource",
 ]
 
 [[package]]
