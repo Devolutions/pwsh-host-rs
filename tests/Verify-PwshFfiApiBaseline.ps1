@@ -169,8 +169,8 @@ function Assert-AbiRejected {
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$facadeProject = Join-Path $repoRoot 'dotnet\ffi\Devolutions.PowerShell.Ffi.csproj'
-$facadeAssembly = Join-Path $repoRoot 'dotnet\ffi\bin\Release\net8.0\Devolutions.PowerShell.Ffi.dll'
+$facadeProject = Join-Path $repoRoot 'dotnet\ffi\Devolutions.MultiPwsh.Sdk.csproj'
+$facadeAssembly = Join-Path $repoRoot 'dotnet\ffi\bin\Release\net8.0\Devolutions.MultiPwsh.Sdk.dll'
 $bindingsProject = Join-Path $repoRoot 'dotnet\bindings\Devolutions.PowerShell.SDK.Bindings.csproj'
 $bindingsAssembly = Join-Path $repoRoot 'dotnet\bindings\bin\Release\net8.0\Devolutions.PowerShell.SDK.Bindings.dll'
 $headerPath = Join-Path $repoRoot 'crates\pwsh-ffi\include\devolutions_pwsh_ffi.h'

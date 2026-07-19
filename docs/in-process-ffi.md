@@ -660,11 +660,12 @@ payload being selected.
 
 ## Package preview
 
-`Devolutions.PowerShell.Ffi` is a `win-x64` preview package. Its Rust cdylib is
+`Devolutions.MultiPwsh.Sdk` is a `win-x64` preview package. Its Rust cdylib is
 published as the normal RID asset
-`runtimes/win-x64/native/devolutions_pwsh_ffi.dll`, but is inert by default;
+`runtimes/win-x64/native/devolutions_multi_pwsh_sdk_native.dll`, but is inert
+by default;
 consumers must set both `RuntimeIdentifier` to `win-x64` and
-`DevolutionsPowerShellFfiEnabled=true` to stage it beside the executable. The
+`DevolutionsMultiPwshSdkEnabled=true` to stage it beside the executable. The
 package deliberately does not carry a PowerShell payload.
 
 The package includes

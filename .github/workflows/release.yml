@@ -265,7 +265,7 @@ jobs:
         run: |
           cargo build --locked --release --package multi-pwsh --bin multi-pwsh --target "${{ matrix.target }}"
 
-      - name: Build Windows x64 FFI library
+      - name: Build Windows x64 SDK native library
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
@@ -331,12 +331,12 @@ jobs:
           path: target/${{ matrix.target }}/release/${{ matrix.multi_binary }}
           if-no-files-found: error
 
-      - name: Upload unsigned Windows x64 FFI library
+      - name: Upload unsigned Windows x64 SDK native library
         if: matrix.target == 'x86_64-pc-windows-msvc'
         uses: actions/upload-artifact@v6
         with:
-          name: pwsh-ffi-unsigned-win-x64
-          path: target/ffi-release/devolutions_pwsh_ffi.dll
+          name: multi-pwsh-sdk-unsigned-win-x64
+          path: target/ffi-release/devolutions_multi_pwsh_sdk_native.dll
           if-no-files-found: error
 
       - name: Stage NuGet runtime artifact
@@ -385,11 +385,11 @@ jobs:
           name: multi-pwsh-unsigned-win-arm64
           path: work/win-arm64
 
-      - name: Download unsigned Windows x64 FFI library
+      - name: Download unsigned Windows x64 SDK native library
         uses: actions/download-artifact@v7
         with:
-          name: pwsh-ffi-unsigned-win-x64
-          path: work/ffi-win-x64
+          name: multi-pwsh-sdk-unsigned-win-x64
+          path: work/sdk-win-x64
 
       - name: Resolve signing mode
         id: signing_mode
@@ -480,7 +480,7 @@ jobs:
           $binaries = @(
             @{ Rid = 'win-x64'; Path = 'work/win-x64/multi-pwsh.exe' },
             @{ Rid = 'win-arm64'; Path = 'work/win-arm64/multi-pwsh.exe' },
-            @{ Rid = 'win-x64'; Path = 'work/ffi-win-x64/devolutions_pwsh_ffi.dll' }
+            @{ Rid = 'win-x64'; Path = 'work/sdk-win-x64/devolutions_multi_pwsh_sdk_native.dll' }
           )
 
           foreach ($binary in $binaries) {
@@ -562,15 +562,15 @@ jobs:
           path: nuget-stage/win-arm64/*
           if-no-files-found: error
 
-      - name: Upload signed Windows x64 FFI library
+      - name: Upload signed Windows x64 SDK native library
         uses: actions/upload-artifact@v6
         with:
-          name: pwsh-ffi-signed-win-x64
-          path: work/ffi-win-x64/devolutions_pwsh_ffi.dll
+          name: multi-pwsh-sdk-signed-win-x64
+          path: work/sdk-win-x64/devolutions_multi_pwsh_sdk_native.dll
           if-no-files-found: error
 
-  validate-ffi-package:
-    name: Validate NativeAOT FFI package
+  validate-sdk-package:
+    name: Dry-run NativeAOT SDK package
     runs-on: windows-latest
     needs:
       - validate
@@ -593,35 +593,35 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: ./scripts/Install-PowerShell74ForCi.ps1
 
-      - name: Download signed Windows x64 FFI library
+      - name: Download signed Windows x64 SDK native library
         uses: actions/download-artifact@v7
         with:
-          name: pwsh-ffi-signed-win-x64
-          path: ffi-stage
+          name: multi-pwsh-sdk-signed-win-x64
+          path: sdk-stage
 
-      - name: Pack and smoke test signed NativeAOT FFI package
+      - name: Dry-run pack and smoke test signed NativeAOT SDK package
         shell: pwsh
         env:
           PACKAGE_VERSION: ${{ needs.validate.outputs.release_version }}
         run: |
-          $nativeLibrary = Resolve-Path 'ffi-stage\devolutions_pwsh_ffi.dll'
-          dotnet pack dotnet\ffi\Devolutions.PowerShell.Ffi.csproj -c Release `
+          $nativeLibrary = Resolve-Path 'sdk-stage\devolutions_multi_pwsh_sdk_native.dll'
+          dotnet pack dotnet\ffi\Devolutions.MultiPwsh.Sdk.csproj -c Release `
             -p:PackageVersion="$env:PACKAGE_VERSION" `
             -p:PwshFfiNativeLibrary="$nativeLibrary" `
             -p:BuildPwshFfiNativeAsset=false `
-            -o artifacts\ffi-nuget
-          if ($LASTEXITCODE -ne 0) { throw 'FFI package creation failed.' }
+            -o artifacts\sdk-nuget
+          if ($LASTEXITCODE -ne 0) { throw 'SDK package creation failed.' }
 
           pwsh -NoLogo -NoProfile -File (Resolve-Path 'tests\Test-PwshFfiPackage.ps1') `
-            -PackageSource (Resolve-Path 'artifacts\ffi-nuget') `
+            -PackageSource (Resolve-Path 'artifacts\sdk-nuget') `
             -PackageVersion "$env:PACKAGE_VERSION" `
             -PowerShellPayloadDirectory (Split-Path -Parent $env:PwshExePath)
 
-      - name: Upload FFI NuGet package artifact
+      - name: Upload SDK NuGet package artifact
         uses: actions/upload-artifact@v6
         with:
-          name: ffi-nuget
-          path: artifacts/ffi-nuget/*.nupkg
+          name: sdk-nuget
+          path: artifacts/sdk-nuget/*.nupkg
           if-no-files-found: error
 
   publish:
@@ -631,7 +631,7 @@ jobs:
       - validate
       - build
       - sign-windows
-      - validate-ffi-package
+      - validate-sdk-package
 
     steps:
       - name: Checkout
@@ -733,10 +733,10 @@ jobs:
           $cliNugetPackages = Get-ChildItem -Path artifacts/native-nuget -Filter 'Devolutions.MultiPwsh.Cli.*.nupkg' |
             Sort-Object Name |
             ForEach-Object { $_.FullName }
-          $ffiNugetPackages = Get-ChildItem -Path dist -Recurse -Filter 'Devolutions.PowerShell.Ffi.*.nupkg' |
+          $sdkNugetPackages = Get-ChildItem -Path dist -Recurse -Filter 'Devolutions.MultiPwsh.Sdk.*.nupkg' |
             Sort-Object Name |
             ForEach-Object { $_.FullName }
-          $nugetPackages = @($cliNugetPackages) + @($ffiNugetPackages)
+          $nugetPackages = @($cliNugetPackages) + @($sdkNugetPackages)
 
           if (-not $zipFiles) {
             throw 'No release archives found under dist'
@@ -745,8 +745,8 @@ jobs:
           if (-not $cliNugetPackages) {
             throw 'No CLI NuGet package was produced.'
           }
-          if (-not $ffiNugetPackages) {
-            throw 'No NativeAOT FFI NuGet package was produced.'
+          if (-not $sdkNugetPackages) {
+            throw 'No NativeAOT SDK NuGet package was produced.'
           }
 
           gh release view "$env:RELEASE_TAG" *> $null
@@ -816,11 +816,11 @@ jobs:
           name: native-nuget
           path: dist
 
-      - name: Download NativeAOT FFI NuGet package artifact
+      - name: Download NativeAOT SDK NuGet package artifact
         if: steps.publish_mode.outputs.dry_run == 'true' || steps.publish_mode.outputs.has_login_user == 'true'
         uses: actions/download-artifact@v7
         with:
-          name: ffi-nuget
+          name: sdk-nuget
           path: dist
 
       - name: Install .NET SDK
@@ -855,7 +855,7 @@ jobs:
 
           $packagePatterns = @(
             'Devolutions.MultiPwsh.Cli.*.nupkg',
-            'Devolutions.PowerShell.Ffi.*.nupkg'
+            'Devolutions.MultiPwsh.Sdk.*.nupkg'
           )
 
           $packages = @()

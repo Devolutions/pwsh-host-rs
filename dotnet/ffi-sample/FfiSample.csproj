@@ -10,12 +10,12 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\ffi\Devolutions.PowerShell.Ffi.csproj" />
+    <ProjectReference Include="..\ffi\Devolutions.MultiPwsh.Sdk.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
     <RepositoryRoot>$(MSBuildThisFileDirectory)..\..</RepositoryRoot>
-    <PwshFfiNativeLibrary>$(RepositoryRoot)\target\release\devolutions_pwsh_ffi.dll</PwshFfiNativeLibrary>
+    <PwshFfiNativeLibrary>$(RepositoryRoot)\target\release\devolutions_multi_pwsh_sdk_native.dll</PwshFfiNativeLibrary>
   </PropertyGroup>
 
   <Target Name="BuildAndStagePwshFfiNativeLibrary" BeforeTargets="Publish">

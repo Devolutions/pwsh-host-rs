@@ -115,7 +115,7 @@ internal struct NativeSessionPoolOptions
 
 internal static unsafe partial class NativeMethods
 {
-    internal const string LibraryName = "devolutions_pwsh_ffi";
+    internal const string LibraryName = "devolutions_multi_pwsh_sdk_native";
 
     [LibraryImport(LibraryName, EntryPoint = "dps_pwsh_get_abi_info")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

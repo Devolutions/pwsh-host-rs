@@ -19,9 +19,9 @@ if (-not $IsWindows -or [System.Runtime.InteropServices.RuntimeInformation]::Pro
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$packageId = 'Devolutions.PowerShell.Ffi'
+$packageId = 'Devolutions.MultiPwsh.Sdk'
 if ([string]::IsNullOrWhiteSpace($PackageSource)) {
-    $PackageSource = Join-Path $repoRoot 'artifacts\ffi-nuget'
+    $PackageSource = Join-Path $repoRoot 'artifacts\sdk-nuget'
 }
 elseif (-not [System.IO.Path]::IsPathRooted($PackageSource)) {
     $PackageSource = Join-Path $repoRoot $PackageSource
@@ -193,16 +193,16 @@ try {
         [System.StringComparer]::OrdinalIgnoreCase)
     foreach ($requiredPath in @(
         'README.md',
-        'buildTransitive/Devolutions.PowerShell.Ffi.targets',
+        'buildTransitive/Devolutions.MultiPwsh.Sdk.targets',
         'contentFiles/any/any/devolutions-pwsh-payload.manifest.template.json',
-        'lib/net8.0/Devolutions.PowerShell.Ffi.dll',
-        'runtimes/win-x64/native/devolutions_pwsh_ffi.dll')) {
+        'lib/net8.0/Devolutions.MultiPwsh.Sdk.dll',
+        'runtimes/win-x64/native/devolutions_multi_pwsh_sdk_native.dll')) {
         if (-not $archivePaths.Contains($requiredPath)) {
             throw "Package is missing required entry: $requiredPath"
         }
     }
 
-    $nativeEntry = $archive.GetEntry('runtimes/win-x64/native/devolutions_pwsh_ffi.dll')
+    $nativeEntry = $archive.GetEntry('runtimes/win-x64/native/devolutions_multi_pwsh_sdk_native.dll')
     if ($null -eq $nativeEntry) {
         throw 'Package native FFI asset could not be opened.'
     }
@@ -266,7 +266,7 @@ try {
 
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $inertProject, '--configfile', $nugetConfig)
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('build', $inertProject, '--no-restore', '-c', $Configuration)
-    $inertNativeAsset = Join-Path $inertProjectDirectory "bin\$Configuration\net8.0\win-x64\devolutions_pwsh_ffi.dll"
+    $inertNativeAsset = Join-Path $inertProjectDirectory "bin\$Configuration\net8.0\win-x64\devolutions_multi_pwsh_sdk_native.dll"
     if (Test-Path $inertNativeAsset -PathType Leaf) {
         throw "FFI native assets must be inert by default, but found $inertNativeAsset"
     }
@@ -283,7 +283,7 @@ try {
     <SelfContained>true</SelfContained>
     <PublishAot>true</PublishAot>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <DevolutionsPowerShellFfiEnabled>true</DevolutionsPowerShellFfiEnabled>
+    <DevolutionsMultiPwshSdkEnabled>true</DevolutionsMultiPwshSdkEnabled>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="$packageId" Version="$PackageVersion" />
@@ -1175,7 +1175,7 @@ sealed class CancellableCapability : IPowerShellCapabilityHandler, IDisposable
 
     $publishDirectory = Join-Path $consumerDirectory "bin\$Configuration\net8.0\win-x64\publish"
     $consumerExe = Join-Path $publishDirectory 'FfiPackageConsumer.exe'
-    $nativeAsset = Join-Path $publishDirectory 'devolutions_pwsh_ffi.dll'
+    $nativeAsset = Join-Path $publishDirectory 'devolutions_multi_pwsh_sdk_native.dll'
     if (-not (Test-Path $consumerExe -PathType Leaf) -or -not (Test-Path $nativeAsset -PathType Leaf)) {
         throw 'The published package consumer is missing its executable or native FFI asset.'
     }

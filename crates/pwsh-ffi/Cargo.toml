@@ -6,6 +6,7 @@ license = "MIT/Apache-2.0"
 publish = false
 
 [lib]
+name = "devolutions_multi_pwsh_sdk_native"
 crate-type = ["cdylib"]
 
 [dependencies]

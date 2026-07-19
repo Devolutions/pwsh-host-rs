@@ -265,8 +265,8 @@ jobs:
             -PackageSource (Resolve-Path 'artifacts\native-nuget') `
             -RuntimeIdentifier 'win-x64'
 
-  nativeaot-ffi:
-    name: NativeAOT FFI package smoke (Windows)
+  nativeaot-sdk:
+    name: NativeAOT SDK package dry run (Windows)
     runs-on: windows-latest
     needs: test
 
@@ -298,17 +298,19 @@ jobs:
           $env:PWSH_FFI_PAYLOAD = Split-Path -Parent $env:PwshExePath
           cargo test -p devolutions-pwsh-ffi -- --ignored
 
-      - name: Pack NativeAOT FFI facade
+      - name: Dry-run pack NativeAOT SDK
         shell: pwsh
         run: |
-          dotnet pack dotnet/ffi/Devolutions.PowerShell.Ffi.csproj -c Release -o artifacts/ffi-nuget
+          dotnet pack dotnet/ffi/Devolutions.MultiPwsh.Sdk.csproj -c Release `
+            -p:PackageVersion="0.0.0-ci.$env:GITHUB_RUN_NUMBER" `
+            -o artifacts/sdk-nuget
 
-      - name: Run isolated NativeAOT FFI package consumer
+      - name: Run isolated NativeAOT SDK package consumer
         shell: pwsh
         run: |
           $payloadDirectory = Split-Path -Parent $env:PwshExePath
           pwsh -NoLogo -NoProfile -File (Resolve-Path 'tests/Test-PwshFfiPackage.ps1') `
-             -PackageSource (Resolve-Path 'artifacts/ffi-nuget') `
+             -PackageSource (Resolve-Path 'artifacts/sdk-nuget') `
              -PowerShellPayloadDirectory $payloadDirectory
 
   nuget-apphost-linux:

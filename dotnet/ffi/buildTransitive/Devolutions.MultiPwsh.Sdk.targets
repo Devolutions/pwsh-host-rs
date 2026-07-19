@@ -1,0 +1,47 @@
+<Project>
+  <PropertyGroup>
+    <DevolutionsMultiPwshSdkNativeAsset>$(MSBuildThisFileDirectory)..\runtimes\win-x64\native\devolutions_multi_pwsh_sdk_native.dll</DevolutionsMultiPwshSdkNativeAsset>
+  </PropertyGroup>
+
+  <Target Name="RemoveDevolutionsMultiPwshSdkNativeCopyLocalAsset"
+          AfterTargets="ResolveLockFileCopyLocalFiles"
+          Condition="'$(DevolutionsMultiPwshSdkEnabled)' != 'true'">
+    <ItemGroup>
+      <NativeCopyLocalItems Remove="@(NativeCopyLocalItems)"
+                            Condition="'%(NativeCopyLocalItems.Filename)%(NativeCopyLocalItems.Extension)' == 'devolutions_multi_pwsh_sdk_native.dll'" />
+      <_ResolvedCopyLocalBuildAssets Remove="@(_ResolvedCopyLocalBuildAssets)"
+                                     Condition="'%(_ResolvedCopyLocalBuildAssets.Filename)%(_ResolvedCopyLocalBuildAssets.Extension)' == 'devolutions_multi_pwsh_sdk_native.dll'" />
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+                               Condition="'%(ReferenceCopyLocalPaths.Filename)%(ReferenceCopyLocalPaths.Extension)' == 'devolutions_multi_pwsh_sdk_native.dll'" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="RemoveDevolutionsMultiPwshSdkPublishedAsset"
+          AfterTargets="ComputeFilesToPublish"
+          Condition="'$(DevolutionsMultiPwshSdkEnabled)' != 'true'">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+                             Condition="'%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'devolutions_multi_pwsh_sdk_native.dll'" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="ResolveDevolutionsMultiPwshSdkNativeAsset"
+          BeforeTargets="CopyFilesToOutputDirectory"
+          Condition="'$(DevolutionsMultiPwshSdkEnabled)' == 'true'">
+    <Error Condition="'$(RuntimeIdentifier)' != 'win-x64'"
+          Text="Devolutions.MultiPwsh.Sdk is currently packaged only for win-x64. Set RuntimeIdentifier to win-x64 or remove DevolutionsMultiPwshSdkEnabled." />
+    <Error Condition="!Exists('$(DevolutionsMultiPwshSdkNativeAsset)')"
+          Text="The packaged devolutions_multi_pwsh_sdk_native asset was not found." />
+    <Copy SourceFiles="$(DevolutionsMultiPwshSdkNativeAsset)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="PublishDevolutionsMultiPwshSdkNativeAsset"
+          AfterTargets="Publish"
+          Condition="'$(DevolutionsMultiPwshSdkEnabled)' == 'true'">
+    <Copy SourceFiles="$(DevolutionsMultiPwshSdkNativeAsset)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+</Project>
