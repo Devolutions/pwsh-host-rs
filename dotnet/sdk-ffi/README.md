@@ -9,13 +9,25 @@ This package ships native FFI assets for `win-x64`, `win-arm64`, `linux-x64`,
 PowerShell. Only `win-x64` currently has end-to-end NativeAOT payload smoke
 coverage. Release CI also runs a package-consumer ABI smoke on `win-x64`,
 `linux-x64`, `osx-x64`, and `osx-arm64`; that verifies native-library loading,
-the ABI export, and RID-specific staging, not payload activation. Activate an
-explicit PowerShell payload with a hash-pinned manifest:
+the ABI export, and RID-specific staging, not payload activation.
+
+By default, activation locates `pwsh` on `PATH` and loads its containing
+payload directory. Supply a directory to select a payload explicitly; neither
+direct activation mode reads a manifest:
 
 ```csharp
 using Devolutions.PowerShell.Ffi;
 
-PowerShellRuntime runtime = PowerShellRuntime.Activate(
+PowerShellRuntime defaultRuntime = PowerShellRuntime.Activate();
+PowerShellRuntime selectedRuntime = PowerShellRuntime.Activate(payloadDirectory);
+```
+
+Direct activation deliberately leaves payload provenance and file integrity to
+the application. For a deployment that needs verified, race-resistant payload
+staging, opt in to hash-pinned manifest activation:
+
+```csharp
+PowerShellRuntime verifiedRuntime = PowerShellRuntime.Activate(
     new PowerShellPayloadActivationOptions(
         payloadDirectory,
         manifestPath,
@@ -27,10 +39,7 @@ every regular file recursively beneath the selected payload root, including
 nested module dependencies. The package provides
 `contentFiles/any/any/devolutions-pwsh-payload.manifest.template.json`; it is a
 template, not a trusted manifest. Store the final manifest SHA-256 in
-application-controlled deployment configuration. `PowerShell.Initialize(string)`
-and `PowerShellRuntime.Activate(string)` are obsolete unsafe local-development
-compatibility overloads; they require the conventional manifest beside the
-payload but do not pin it.
+application-controlled deployment configuration.
 
 Enable native-asset staging in the consuming project:
 
@@ -67,9 +76,8 @@ file hash, PowerShell/.NET/hostfxr versions, and bindings ABI/features before
 a fresh process-owned staging directory and loads only from that directory.
 The staging directory remains owned for process runtime lifetime; a hostile
 same-account process with filesystem access remains outside this boundary. It
-does not validate signatures. `UnsafeUntrustedLocalDevelopment` is an explicitly
-unsafe, direct local-load opt-in that accepts an unpinned manifest and does not
-enforce complete closure; it is not appropriate for deployment.
+does not validate signatures. `UnsafeUntrustedLocalDevelopment` is retained only as an obsolete compatibility
+factory for unpinned-manifest activation; it is not appropriate for deployment.
 
 `PowerShellValue` is the only way to pass non-string values. It supports
 bounded primitive values, bytes, arrays, and property bags that become copied
@@ -120,9 +128,10 @@ start.
 reusable local-runspace session. `PowerShellSessionConfiguration` supplies
 copied tagged initial variables, module imports/paths, a working directory,
 environment values, and the `Default`/`Restricted` execution-policy subset.
-All module paths, working directories, import names, and environment keys must
-be explicitly allowlisted by the activated manifest's `sessionPolicy`; omitted
-or empty policy lists deny that configuration. Paths are absolute existing
+Hash-pinned activation allowlists module paths, working directories, import
+names, and environment keys through the manifest's `sessionPolicy`; omitted or
+empty policy lists deny that configuration. Direct activation also denies that
+extended session configuration. Paths are absolute existing
 directories, imports are names resolved beneath approved module paths, and
 current-runspace sessions reject every configuration field. This is not a
 general `InitialSessionState` or arbitrary module-loading API. `GetSnapshot`

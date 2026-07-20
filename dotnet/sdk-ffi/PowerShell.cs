@@ -48,6 +48,7 @@ public sealed unsafe class PowerShell : IDisposable
     private const uint MaxSequenceRecords = MaxRecordsPerStream * StreamCount;
     private const nuint MaxResultFieldUtf8Bytes = 16 * 1024;
     private const nuint MaxResultValueBytes = 16 * 1024;
+    private const nuint MaxPayloadPathUtf8Bytes = 32 * 1024;
 
     private readonly PowerShellHandle handle;
 
@@ -60,13 +61,33 @@ public sealed unsafe class PowerShell : IDisposable
 
     public static ulong FeatureFlags => GetAbiInfo().FeatureFlags;
 
-    [Obsolete("Use Initialize(PowerShellPayloadActivationOptions) with a hash-pinned manifest. This overload is unsafe local development compatibility only.")]
+    public static void Initialize()
+    {
+        EnsureSupportedAbi();
+        byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+        NativeCallResult result = NativeCall.CreateResult(diagnostic);
+        int status = NativeMethods.InitializeFromPath(&result);
+        NativeCall.ThrowIfFailed(status, result, diagnostic);
+    }
+
     public static void Initialize(string payloadDirectory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(payloadDirectory);
-        Initialize(PowerShellPayloadActivationOptions.UnsafeUntrustedLocalDevelopment(
-            payloadDirectory,
-            Path.Combine(payloadDirectory, "devolutions-pwsh-payload.json")));
+        EnsureSupportedAbi();
+        byte[] payloadBytes = EncodeUtf8(payloadDirectory);
+        fixed (byte* payloadPointer = payloadBytes)
+        {
+            byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+            NativeCallResult result = NativeCall.CreateResult(diagnostic);
+            int status = NativeMethods.Initialize(
+                new NativeUtf8Span
+                {
+                    Data = payloadBytes.Length == 0 ? null : payloadPointer,
+                    Length = (nuint)payloadBytes.Length,
+                },
+                &result);
+            NativeCall.ThrowIfFailed(status, result, diagnostic);
+        }
     }
 
     public static void Initialize(PowerShellPayloadActivationOptions options)
@@ -105,6 +126,47 @@ public sealed unsafe class PowerShell : IDisposable
             int status = NativeMethods.InitializePayload(&activation, &result);
             NativeCall.ThrowIfFailed(status, result, diagnostic);
         }
+    }
+
+    internal static string GetActivePayloadDirectory()
+    {
+        EnsureSupportedAbi();
+        byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+        NativeCallResult result = NativeCall.CreateResult(diagnostic);
+        nuint requiredLength = 0;
+        int status = NativeMethods.GetPayloadPath(null, 0, &requiredLength, &result);
+        if (status != Success && status != BufferTooSmall)
+        {
+            NativeCall.ThrowIfFailed(status, result, diagnostic);
+        }
+
+        if (requiredLength > MaxPayloadPathUtf8Bytes)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned an unbounded payload path.");
+        }
+
+        byte[] payloadPath = new byte[checked((int)requiredLength)];
+        fixed (byte* payloadPathPointer = payloadPath)
+        {
+            result = NativeCall.CreateResult(diagnostic);
+            status = NativeMethods.GetPayloadPath(
+                payloadPathPointer,
+                (nuint)payloadPath.Length,
+                &requiredLength,
+                &result);
+            NativeCall.ThrowIfFailed(status, result, diagnostic);
+        }
+
+        if (requiredLength != (nuint)payloadPath.Length)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI changed the active payload path while it was being read.");
+        }
+
+        return Encoding.UTF8.GetString(payloadPath);
     }
 
     public static PowerShell Create()

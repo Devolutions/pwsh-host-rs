@@ -125,9 +125,21 @@ internal static unsafe partial class NativeMethods
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int Initialize(NativeUtf8Span payloadPath, NativeCallResult* result);
 
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_initialize_from_path")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int InitializeFromPath(NativeCallResult* result);
+
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_initialize_payload")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int InitializePayload(NativePayloadActivation* activation, NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_get_payload_path_utf8")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int GetPayloadPath(
+        byte* buffer,
+        nuint bufferLength,
+        nuint* requiredLength,
+        NativeCallResult* result);
 
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_create")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

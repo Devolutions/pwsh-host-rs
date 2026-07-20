@@ -6,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
 pub const MANIFEST_FILE_NAME: &str = "devolutions-pwsh-payload.json";
 pub const REQUIRED_BINDINGS_ABI_VERSION: u32 = 2;
 pub const REQUIRED_BINDINGS_FEATURES: u64 = (1 << 8) | (1 << 13) | (1 << 14) | (1 << 15) | (1 << 16);
@@ -51,6 +52,8 @@ pub struct ValidationRequest<'a> {
 
 pub struct ValidatedPayload {
     pub payload_root: PathBuf,
+    pub manifest_path: PathBuf,
+    pub manifest_sha256: String,
     pub session_policy: SessionPolicy,
     files: Vec<ValidatedFile>,
 }
@@ -166,13 +169,13 @@ pub fn validate(request: ValidationRequest<'_>) -> Result<ValidatedPayload, Vali
     let payload_root = canonical_directory(request.payload_path, "payload directory")?;
     let manifest_path = canonical_file(request.manifest_path, "payload manifest")?;
     let manifest_bytes = read_manifest(&manifest_path)?;
+    let actual_manifest_sha256 = sha256_bytes(&manifest_bytes);
 
     match request.trust_policy {
         TrustPolicy::RequireHashPinnedManifest => {
             let expected_hash =
                 normalize_sha256(request.manifest_sha256, "manifest SHA-256").map_err(ValidationError::Untrusted)?;
-            let actual_hash = sha256_bytes(&manifest_bytes);
-            if expected_hash != actual_hash {
+            if expected_hash != actual_manifest_sha256 {
                 return Err(ValidationError::HashMismatch(
                     "payload manifest SHA-256 does not match the activation pin".to_owned(),
                 ));
@@ -202,9 +205,15 @@ pub fn validate(request: ValidationRequest<'_>) -> Result<ValidatedPayload, Vali
 
     Ok(ValidatedPayload {
         payload_root,
+        manifest_path,
+        manifest_sha256: actual_manifest_sha256,
         session_policy,
         files,
     })
+}
+
+pub fn validate_direct_payload(payload_path: &str) -> Result<PathBuf, ValidationError> {
+    canonical_directory(payload_path, "payload directory")
 }
 
 impl PayloadStaging {
@@ -1251,8 +1260,6 @@ fn windows_product_version(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 pub fn create_test_manifest(payload_root: &Path) -> (PathBuf, String) {
-    static NEXT_MANIFEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
     let payload_root = fs::canonicalize(payload_root).unwrap();
     let mut paths = collect_regular_file_paths(&payload_root, false)
         .unwrap()
@@ -1294,11 +1301,10 @@ pub fn create_test_manifest(payload_root: &Path) -> (PathBuf, String) {
             "allowSymlinks": false,
         },
     });
-    let manifest_directory = std::env::current_dir().unwrap().join("target").join(format!(
-        "pwsh-sdk-ffi-test-manifest-{}-{}",
-        std::process::id(),
-        NEXT_MANIFEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
+    let manifest_directory = std::env::current_dir()
+        .unwrap()
+        .join("target")
+        .join(format!("pwsh-sdk-ffi-test-manifest-{}", std::process::id()));
     fs::create_dir_all(&manifest_directory).unwrap();
     let manifest_path = manifest_directory.join(MANIFEST_FILE_NAME);
     let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
@@ -1490,6 +1496,8 @@ mod tests {
         working_directories.insert(canonical_root.clone());
         let staged = stage(ValidatedPayload {
             payload_root: canonical_root.clone(),
+            manifest_path: root.join("manifest.json"),
+            manifest_sha256: String::new(),
             session_policy: SessionPolicy {
                 module_paths,
                 working_directories,
@@ -1548,6 +1556,8 @@ mod tests {
         assert!(matches!(
             stage(ValidatedPayload {
                 payload_root: canonical_root,
+                manifest_path: root.join("manifest.json"),
+                manifest_sha256: String::new(),
                 session_policy: SessionPolicy::default(),
                 files,
             }),

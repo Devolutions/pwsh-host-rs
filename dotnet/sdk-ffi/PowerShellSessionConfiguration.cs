@@ -4,8 +4,8 @@ namespace Devolutions.PowerShell.Ffi;
 
 /// <summary>
 /// Copied, bounded configuration for a newly owned local session.
-/// Module paths, imports, working directory, and environment keys must also be approved
-/// by the hash-pinned payload manifest's sessionPolicy.
+/// Module paths, imports, working directory, and environment keys require
+/// hash-pinned payload activation and approval by its manifest's sessionPolicy.
 /// </summary>
 public sealed class PowerShellSessionConfiguration
 {

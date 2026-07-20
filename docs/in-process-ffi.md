@@ -21,9 +21,10 @@ PowerShell runtime versions, or runtime unloading in the same process.
 
 ## Lifecycle and ABI
 
-- `multi_pwsh_initialize_payload` is process-global and accepts one canonical
-  payload directory only. Repeating it with the same payload succeeds; selecting
-  a different payload returns `MULTI_PWSH_INCOMPATIBLE_PAYLOAD`.
+- The direct and manifest activation exports are process-global and accept one
+  canonical payload directory plus one activation identity. Repeating the same
+  activation succeeds; selecting a different payload, or changing between
+  direct and manifest activation, returns `MULTI_PWSH_INCOMPATIBLE_PAYLOAD`.
 - The native product ABI reports its compatible version and feature flags through
   `multi_pwsh_get_abi_info`; the managed package and native asset ship together
   and use the unversioned `multi_pwsh_*` exports. The injected managed function
@@ -65,8 +66,16 @@ PowerShell runtime versions, or runtime unloading in the same process.
 
 ## Payload trust and activation
 
-Production activation is deliberately **not** an existence check. Before
-loading `hostfxr`, `multi_pwsh_initialize_payload` canonicalizes the payload
+`PowerShellRuntime.Activate()` resolves `pwsh` from `PATH` and activates its
+containing payload directory. `PowerShellRuntime.Activate(payloadDirectory)`
+activates exactly the caller-selected directory. Neither direct activation mode
+reads `devolutions-pwsh-payload.json` or requires any other manifest: the
+application controls which PowerShell it trusts and bears responsibility for
+its provenance and integrity.
+
+For deployments that require a verified, race-resistant payload, hash-pinned
+activation is deliberately **not** an existence check. Before loading
+`hostfxr`, `multi_pwsh_initialize_payload` canonicalizes the payload
 and manifest paths, parses the manifest, verifies the caller-supplied SHA-256
 pin of the complete manifest bytes, checks the target RID/architecture, and
 SHA-256 verifies every declared file. A hash-pinned manifest must declare
@@ -162,13 +171,14 @@ a peer with the same account and sufficient filesystem access can still modify
 it after verification, so this is not a defense against a hostile same-account
 process. Protect the account and its temporary directory accordingly.
 
-`PowerShellPayloadActivationOptions.UnsafeUntrustedLocalDevelopment` exists
-only for an explicit local-development opt-in: it still requires and validates
-a manifest and its declared file hashes, but accepts no manifest pin, does not
-require complete closure, and loads the local payload directly. An attacker
-who can replace the manifest or payload can subvert it. Do not use that mode
-for deployment. The obsolete string overloads use this unsafe mode with the
-conventional `devolutions-pwsh-payload.json` beside the payload.
+There is no conventional manifest lookup beside the payload. Direct activation
+uses the requested payload directory or the `pwsh` runtime selected from
+`PATH`; it has no manifest-derived session policy, so extended session
+configuration remains denied. The obsolete
+`PowerShellPayloadActivationOptions.UnsafeUntrustedLocalDevelopment` factory
+retains the older unpinned-manifest behavior for compatibility only. An attacker
+who can replace that manifest or payload can subvert it; do not use it for
+deployment.
 
 ### Async operations and cancellation
 
@@ -375,9 +385,11 @@ tagged-value envelopes, oversized values, and invalid stream totals. It never
 deserializes into PowerShell, SMA, a parent CLR object, or an arbitrary CLR
 type.
 
-Call `PowerShellRuntime.Activate(new PowerShellPayloadActivationOptions(
-payloadDirectory, manifestPath, manifestSha256))` for a typed, hash-pinned
-activation object, then use `runtime.Create()` (or the equivalent
+Call `PowerShellRuntime.Activate()` to select `pwsh` from `PATH`, or
+`PowerShellRuntime.Activate(payloadDirectory)` to select an explicit payload.
+Use `PowerShellRuntime.Activate(new PowerShellPayloadActivationOptions(
+payloadDirectory, manifestPath, manifestSha256))` only when opting into
+hash-pinned activation. Then use `runtime.Create()` (or the equivalent
 `PowerShell.Create()` process-global entry point) to construct builders. The
 runtime object reports the selected paths, trust policy, and negotiated
 ABI/features; it does not permit selecting a second payload or unloading the
@@ -390,7 +402,7 @@ below is the current implementation status for RDM-facing work.
 
 | RDM need | Status | FFI replacement and boundary |
 | --- | --- | --- |
-| Explicit payload activation, hostfxr startup, one runtime per process | Implemented | Hash-pinned manifest activation and an opaque `PowerShellRuntime`; only `win-x64` has NativeAOT smoke evidence. |
+| Explicit payload activation, hostfxr startup, one runtime per process | Implemented | Direct payload or `PATH` activation, with optional hash-pinned manifest staging, and an opaque `PowerShellRuntime`; only `win-x64` has NativeAOT smoke evidence. |
 | Script or named-command execution with scalar parameters | Implemented | `AddScript`, `AddCommand`, `AddParameter`, and bounded `PowerShellValue` inputs. No raw `object`, `PSObject`, or `SecureString` overload exists. |
 | Script parameter declarations and syntax errors | Implemented, copied-only | `PowerShellRuntime.ParseScriptParameters` passes the input to payload-local `Parser.ParseInput` as data, never executable pipeline text. It returns bounded parameter/parse-error DTOs, not SMA AST or token objects. |
 | Output, errors, diagnostics, warning/progress streams | Implemented | Immutable bounded `PowerShellInvocationResult` snapshots. Safe scalar and property-bag projections are read through typed copied-value readers, never live SMA collections. |
@@ -758,9 +770,9 @@ the `multi-pwsh` CLI release version. Only the `win-x64` RID currently has
 end-to-end NativeAOT payload smoke coverage; publishing another asset is not a
 claim that its payload activation topology has been validated.
 
-The package includes
+The package includes the optional hash-pinned activation template
 `contentFiles/any/any/devolutions-pwsh-payload.manifest.template.json` as a
-schema template only. Replace every placeholder after staging or installing
+schema template only. When opting into verified staging, replace every placeholder after installing
 the external payload, write the completed manifest outside an immutable
 PowerShell installation when needed, hash the final manifest bytes, and store
 that hash in the application's protected deployment configuration. Do not ship
@@ -818,6 +830,9 @@ cargo test -p pwsh-sdk-ffi explicit_payload_lifecycle_stress_enforces_serializat
 cargo test -p pwsh-sdk-ffi explicit_payload_increment_6_sessions_are_bounded_and_lifetime_safe -- --ignored
 
 dotnet publish dotnet/nativeaot-sample/NativeAotFfiSample.csproj -c Release
+./dotnet/nativeaot-sample/bin/Release/net8.0/win-x64/publish/NativeAotFfiSample.exe
+# Or select a payload explicitly, with an optional hash-pinned manifest:
+./dotnet/nativeaot-sample/bin/Release/net8.0/win-x64/publish/NativeAotFfiSample.exe <payload>
 ./dotnet/nativeaot-sample/bin/Release/net8.0/win-x64/publish/NativeAotFfiSample.exe <payload> <manifest> <manifest-sha256>
 ```
 

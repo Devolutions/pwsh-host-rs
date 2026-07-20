@@ -195,6 +195,7 @@ facade:field:Devolutions.PowerShell.Ffi.PowerShellOperationState::Devolutions.Po
 facade:field:Devolutions.PowerShell.Ffi.PowerShellOperationState::Devolutions.PowerShell.Ffi.PowerShellOperationState Pending
 facade:field:Devolutions.PowerShell.Ffi.PowerShellOperationState::Devolutions.PowerShell.Ffi.PowerShellOperationState Running
 facade:field:Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy::Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy HashPinnedManifest
+facade:field:Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy::Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy Direct
 facade:field:Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy::Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy UnsafeUntrustedLocalDevelopment
 facade:field:Devolutions.PowerShell.Ffi.PowerShellRunspaceMode::Devolutions.PowerShell.Ffi.PowerShellRunspaceMode CurrentRunspace
 facade:field:Devolutions.PowerShell.Ffi.PowerShellRunspaceMode::Devolutions.PowerShell.Ffi.PowerShellRunspaceMode NewRunspace
@@ -259,6 +260,7 @@ facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::System.String InvokeText()
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::System.Threading.Tasks.Task`1[Devolutions.PowerShell.Ffi.PowerShellInvocationResult] InvokeAsync(System.Threading.CancellationToken)
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShell::Void Initialize()
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::Void Initialize(Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions)
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::Void Initialize(System.String)
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::Void Stop()
@@ -271,6 +273,7 @@ facade:method:Devolutions.PowerShell.Ffi.PowerShellInvocationOperation::Void Sto
 facade:method:Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions::Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions UnsafeUntrustedLocalDevelopment(System.String, System.String)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShell Create()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellRuntime Activate(Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellRuntime Activate()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellRuntime Activate(System.String)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellSession CreateSession(Devolutions.PowerShell.Ffi.PowerShellSessionOptions)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellSessionPool CreateSessionPool(Devolutions.PowerShell.Ffi.PowerShellSessionPoolOptions)
@@ -461,6 +464,7 @@ facade:type:Devolutions.PowerShell.Ffi.PowerShellValue
 facade:type:Devolutions.PowerShell.Ffi.PowerShellValueConversionException
 facade:type:Devolutions.PowerShell.Ffi.PowerShellValueKind
 native:multi_pwsh_get_abi_info
+native:multi_pwsh_get_payload_path_utf8
 native:multi_pwsh_add_argument_utf8
 native:multi_pwsh_add_argument_value
 native:multi_pwsh_add_command_utf8
@@ -479,6 +483,7 @@ native:multi_pwsh_copy_invocation_error_field_utf8
 native:multi_pwsh_create
 native:multi_pwsh_get_invocation_error_count
 native:multi_pwsh_initialize_payload
+native:multi_pwsh_initialize_from_path
 native:multi_pwsh_initialize_utf8
 native:multi_pwsh_invoke
 native:multi_pwsh_invoke_async

@@ -38,6 +38,7 @@ public sealed class PowerShellPayloadActivationOptions
 
     public PowerShellPayloadTrustPolicy TrustPolicy { get; }
 
+    [Obsolete("Use PowerShell.Initialize or PowerShellRuntime.Activate for direct payload activation without a manifest.")]
     public static PowerShellPayloadActivationOptions UnsafeUntrustedLocalDevelopment(
         string payloadDirectory,
         string manifestPath)
@@ -46,6 +47,6 @@ public sealed class PowerShellPayloadActivationOptions
             payloadDirectory,
             manifestPath,
             string.Empty,
-            PowerShellPayloadTrustPolicy.UnsafeUntrustedLocalDevelopment);
+            PowerShellPayloadTrustPolicy.Direct);
     }
 }

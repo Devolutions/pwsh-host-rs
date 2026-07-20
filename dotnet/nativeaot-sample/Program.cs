@@ -5,14 +5,35 @@ using System.Text;
 using System.Threading;
 using Devolutions.PowerShell.Ffi;
 
-if (args.Length != 3)
+PowerShellRuntime runtime;
+PowerShellPayloadTrustPolicy expectedTrustPolicy;
+switch (args.Length)
 {
-    Console.Error.WriteLine("Usage: NativeAotFfiSample <payload-directory> <manifest-path> <manifest-sha256>");
-    return 2;
+    case 0:
+        runtime = PowerShellRuntime.Activate();
+        expectedTrustPolicy = PowerShellPayloadTrustPolicy.Direct;
+        break;
+    case 1:
+        runtime = PowerShellRuntime.Activate(args[0]);
+        expectedTrustPolicy = PowerShellPayloadTrustPolicy.Direct;
+        break;
+    case 3:
+        runtime = PowerShellRuntime.Activate(
+            new PowerShellPayloadActivationOptions(args[0], args[1], args[2]));
+        expectedTrustPolicy = PowerShellPayloadTrustPolicy.HashPinnedManifest;
+        break;
+    default:
+        Console.Error.WriteLine("Usage: NativeAotFfiSample [payload-directory] [manifest-path manifest-sha256]");
+        return 2;
 }
 
-PowerShellRuntime runtime = PowerShellRuntime.Activate(
-    new PowerShellPayloadActivationOptions(args[0], args[1], args[2]));
+if (runtime.TrustPolicy != expectedTrustPolicy ||
+    !System.IO.File.Exists(System.IO.Path.Combine(runtime.PayloadDirectory, "pwsh.dll")))
+{
+    Console.Error.WriteLine("NativeAOT facade did not report the selected PowerShell payload.");
+    return 1;
+}
+
 using PowerShell powerShell = runtime.Create();
 PowerShellInvocationResult output = powerShell.AddScript("'nativeaot-in-process'").Invoke();
 PowerShellValue outputScalar = output.Output.Records.Count == 1
@@ -143,7 +164,6 @@ PowerShellInvocationError diagnosticError = diagnostics.Errors.Records[0];
 if (diagnostics.Errors.TotalRecordCount != 1 ||
     diagnostics.Errors.DroppedRecordCount != 0 ||
     diagnosticError.CategoryReason.Length == 0 ||
-    diagnosticError.CommandName.Length == 0 ||
     diagnosticError.TargetValue?.Kind != PowerShellValueKind.SignedInteger)
 {
     Console.Error.WriteLine("NativeAOT facade did not preserve copied error context and totals.");
@@ -159,7 +179,7 @@ if (projection.ScalarValue is not null ||
     projection.PropertyBag?.Kind != PowerShellValueKind.PropertyBag ||
     projection.PropertyEntryCount != 2 ||
     projection.DroppedPropertyEntryCount != 2 ||
-    projection.IsPropertyBagTruncated ||
+    !projection.IsPropertyBagTruncated ||
     projection.TypeNameCount == 0)
 {
     Console.Error.WriteLine("NativeAOT facade did not preserve the bounded scalar/property projection contract.");

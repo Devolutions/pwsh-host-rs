@@ -14,10 +14,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use payload::{PayloadStaging, SessionPolicy, TrustPolicy, ValidationError, ValidationRequest, MANIFEST_FILE_NAME};
+use payload::{PayloadStaging, SessionPolicy, TrustPolicy, ValidationError, ValidationRequest};
 use pwsh_host::{
-    FfiBindingError, FfiInvocationResult, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot,
-    FfiSnapshotValue, HostedRuntime,
+    find_pwsh_dir, FfiBindingError, FfiInvocationResult, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent,
+    FfiSessionSnapshot, FfiSnapshotValue, HostedRuntime,
 };
 
 const ABI_VERSION: u32 = 2;
@@ -236,6 +236,7 @@ struct State {
     runtime: Option<Arc<HostedRuntime>>,
     session_policy: Option<Arc<SessionPolicy>>,
     activation_source_root: Option<PathBuf>,
+    activation_identity: Option<ActivationIdentity>,
     payload_staging: Option<PayloadStaging>,
     sessions: HashMap<u64, Arc<Session>>,
     runspace_sessions: HashMap<u64, Arc<RunspaceSession>>,
@@ -247,6 +248,16 @@ struct State {
     next_operation_handle: u64,
     next_runspace_session_handle: u64,
     next_capability_handle: u64,
+}
+
+#[derive(Eq, PartialEq)]
+enum ActivationIdentity {
+    Direct,
+    Manifest {
+        manifest_path: PathBuf,
+        manifest_sha256: String,
+        trust_policy: TrustPolicy,
+    },
 }
 
 struct Session {
@@ -539,6 +550,7 @@ impl Default for State {
             runtime: None,
             session_policy: None,
             activation_source_root: None,
+            activation_identity: None,
             payload_staging: None,
             sessions: HashMap::new(),
             runspace_sessions: HashMap::new(),
@@ -2073,13 +2085,72 @@ fn initialize_payload(
     })
     .map_err(validation_failure)?;
     let source_payload_path = validated.payload_root.clone();
+    let activation_identity = ActivationIdentity::Manifest {
+        manifest_path: validated.manifest_path.clone(),
+        manifest_sha256: validated.manifest_sha256.clone(),
+        trust_policy,
+    };
+    let (payload_path, session_policy, staging) = match trust_policy {
+        TrustPolicy::RequireHashPinnedManifest => {
+            let staged = payload::stage(validated).map_err(validation_failure)?;
+            (staged.payload_root, staged.session_policy, Some(staged.staging))
+        }
+        TrustPolicy::AllowUntrustedLocalDevelopment => (validated.payload_root, validated.session_policy, None),
+    };
+    initialize_runtime(
+        source_payload_path,
+        activation_identity,
+        payload_path,
+        session_policy,
+        staging,
+    )
+}
+
+#[allow(clippy::arc_with_non_send_sync)]
+fn initialize_direct_payload(payload_path: &str) -> Result<Status, (Status, String)> {
+    let source_payload_path = payload::validate_direct_payload(payload_path).map_err(validation_failure)?;
+    initialize_runtime(
+        source_payload_path.clone(),
+        ActivationIdentity::Direct,
+        source_payload_path,
+        SessionPolicy::default(),
+        None,
+    )
+}
+
+fn initialize_from_path() -> Result<Status, (Status, String)> {
+    let payload_path = find_pwsh_dir().ok_or_else(|| {
+        (
+            Status::HostFailure,
+            "PowerShell was not found on PATH; provide an explicit payload directory instead".to_owned(),
+        )
+    })?;
+    let payload_path = payload_path.to_str().ok_or_else(|| {
+        (
+            Status::HostFailure,
+            "the PowerShell payload selected from PATH is not valid UTF-8".to_owned(),
+        )
+    })?;
+    initialize_direct_payload(payload_path)
+}
+
+#[allow(clippy::arc_with_non_send_sync)]
+fn initialize_runtime(
+    source_payload_path: PathBuf,
+    activation_identity: ActivationIdentity,
+    payload_path: PathBuf,
+    session_policy: SessionPolicy,
+    staging: Option<PayloadStaging>,
+) -> Result<Status, (Status, String)> {
     let mut state = match state().lock() {
         Ok(state) => state,
         Err(poisoned) => poisoned.into_inner(),
     };
 
     if let Some(runtime) = &state.runtime {
-        return if state.activation_source_root.as_ref() == Some(&source_payload_path) {
+        return if state.activation_source_root.as_ref() == Some(&source_payload_path)
+            && state.activation_identity.as_ref() == Some(&activation_identity)
+        {
             Ok(Status::Success)
         } else {
             let selected_path = state
@@ -2097,36 +2168,33 @@ fn initialize_payload(
         };
     }
 
-    let (payload_path, session_policy, staging) = match trust_policy {
-        TrustPolicy::RequireHashPinnedManifest => {
-            let staged = payload::stage(validated).map_err(validation_failure)?;
-            (staged.payload_root, staged.session_policy, Some(staged.staging))
-        }
-        TrustPolicy::AllowUntrustedLocalDevelopment => (validated.payload_root, validated.session_policy, None),
-    };
     let runtime =
         HostedRuntime::new_for_pwsh_dir(&payload_path).map_err(|error| (Status::HostFailure, error.to_string()))?;
     state.runtime = Some(Arc::new(runtime));
     state.session_policy = Some(Arc::new(session_policy));
     state.activation_source_root = Some(source_payload_path);
+    state.activation_identity = Some(activation_identity);
     state.payload_staging = staging;
     Ok(Status::Success)
 }
 
-fn initialize_unsafe_local_development(payload_path: &str) -> Result<Status, (Status, String)> {
-    let manifest_path = PathBuf::from(payload_path).join(MANIFEST_FILE_NAME);
-    let manifest_path = manifest_path.to_str().ok_or_else(|| {
+fn active_payload_path() -> Result<String, (Status, String)> {
+    let state = match state().lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let payload_path = state.activation_source_root.as_deref().ok_or_else(|| {
         (
-            Status::InvalidArgument,
-            "default local development manifest path is not valid UTF-8".to_owned(),
+            Status::NotInitialized,
+            "PowerShell runtime is not initialized".to_owned(),
         )
     })?;
-    initialize_payload(
-        payload_path,
-        manifest_path,
-        "",
-        TrustPolicy::AllowUntrustedLocalDevelopment,
-    )
+    payload_path.to_str().map(str::to_owned).ok_or_else(|| {
+        (
+            Status::HostFailure,
+            "the initialized PowerShell payload path is not valid UTF-8".to_owned(),
+        )
+    })
 }
 
 fn validation_failure(error: ValidationError) -> (Status, String) {
@@ -2997,8 +3065,13 @@ pub unsafe extern "C" fn multi_pwsh_initialize_utf8(payload_path: Utf8Span, resu
                 "payload path must be UTF-8 without NUL".to_owned(),
             )
         })?;
-        initialize_unsafe_local_development(payload_path)
+        initialize_direct_payload(payload_path)
     })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_initialize_from_path(result: *mut CallResult) -> i32 {
+    v2_call(result, initialize_from_path)
 }
 
 #[no_mangle]
@@ -3039,6 +3112,27 @@ pub unsafe extern "C" fn multi_pwsh_initialize_payload(
         })?;
         let trust_policy = parse_trust_policy((*activation).trust_policy)?;
         initialize_payload(payload_path, manifest_path, manifest_sha256, trust_policy)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_get_payload_path_utf8(
+    buffer: *mut u8,
+    buffer_len: usize,
+    required_len: *mut usize,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        let payload_path = active_payload_path()?;
+        let status = write_utf8(buffer, buffer_len, required_len, &payload_path);
+        match status {
+            Status::Success | Status::BufferTooSmall => Ok(status),
+            Status::InvalidArgument => Err((
+                Status::InvalidArgument,
+                "payload path output buffer arguments are invalid".to_owned(),
+            )),
+            _ => unreachable!(),
+        }
     })
 }
 

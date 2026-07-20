@@ -2,13 +2,18 @@ namespace Devolutions.PowerShell.Ffi;
 
 public sealed class PowerShellRuntime
 {
-    private PowerShellRuntime(uint abiVersion, ulong featureFlags, PowerShellPayloadActivationOptions activation)
+    private PowerShellRuntime(
+        uint abiVersion,
+        ulong featureFlags,
+        string payloadDirectory,
+        string manifestPath,
+        PowerShellPayloadTrustPolicy trustPolicy)
     {
         AbiVersion = abiVersion;
         FeatureFlags = featureFlags;
-        PayloadDirectory = activation.PayloadDirectory;
-        ManifestPath = activation.ManifestPath;
-        TrustPolicy = activation.TrustPolicy;
+        PayloadDirectory = payloadDirectory;
+        ManifestPath = manifestPath;
+        TrustPolicy = trustPolicy;
     }
 
     public uint AbiVersion { get; }
@@ -21,20 +26,36 @@ public sealed class PowerShellRuntime
 
     public PowerShellPayloadTrustPolicy TrustPolicy { get; }
 
+    public static PowerShellRuntime Activate()
+    {
+        PowerShell.Initialize();
+        return CreateActivatedRuntime(string.Empty, PowerShellPayloadTrustPolicy.Direct);
+    }
+
     public static PowerShellRuntime Activate(PowerShellPayloadActivationOptions activation)
     {
         ArgumentNullException.ThrowIfNull(activation);
         PowerShell.Initialize(activation);
-        return new PowerShellRuntime(PowerShell.AbiVersion, PowerShell.FeatureFlags, activation);
+        return CreateActivatedRuntime(activation.ManifestPath, activation.TrustPolicy);
     }
 
-    [Obsolete("Use Activate(PowerShellPayloadActivationOptions) with a hash-pinned manifest. This overload is unsafe local development compatibility only.")]
     public static PowerShellRuntime Activate(string payloadDirectory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(payloadDirectory);
-        return Activate(PowerShellPayloadActivationOptions.UnsafeUntrustedLocalDevelopment(
-            payloadDirectory,
-            Path.Combine(payloadDirectory, "devolutions-pwsh-payload.json")));
+        PowerShell.Initialize(payloadDirectory);
+        return CreateActivatedRuntime(string.Empty, PowerShellPayloadTrustPolicy.Direct);
+    }
+
+    private static PowerShellRuntime CreateActivatedRuntime(
+        string manifestPath,
+        PowerShellPayloadTrustPolicy trustPolicy)
+    {
+        return new PowerShellRuntime(
+            PowerShell.AbiVersion,
+            PowerShell.FeatureFlags,
+            PowerShell.GetActivePayloadDirectory(),
+            manifestPath,
+            trustPolicy);
     }
 
     public PowerShell Create()
