@@ -1,18 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>Devolutions.MultiPwsh.Sdk</AssemblyName>
     <PackageId>Devolutions.MultiPwsh.Sdk</PackageId>
     <PackageVersion Condition="'$(PackageVersion)' == ''">0.14.2</PackageVersion>
     <Authors>Devolutions</Authors>
-    <Description>Experimental dynamically selected PowerShell payload facade with optional hash-pinned staging for the in-process NativeAOT Devolutions Rust FFI.</Description>
+    <Description>Experimental dynamically selected PowerShell payload facade for the in-process NativeAOT Devolutions Rust FFI.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <RepositoryUrl>https://github.com/Devolutions/multi-pwsh</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageTags>PowerShell;NativeAOT;FFI;experimental</PackageTags>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
-    <PackageReleaseNotes>Native deployment is opt-in. PowerShell is not included; activation selects pwsh from PATH by default or accepts an explicit payload directory. Hash-pinned payload manifests remain available as an opt-in hardening mode. Windows x64 is the current end-to-end validated runtime.</PackageReleaseNotes>
+    <PackageReleaseNotes>Native deployment is opt-in. PowerShell is not included; activation selects pwsh from PATH by default or accepts an explicit payload directory. Windows x64 is the current end-to-end validated runtime.</PackageReleaseNotes>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
     <EnableAotAnalyzer>true</EnableAotAnalyzer>
@@ -32,10 +32,6 @@
     <None Include="buildTransitive\Devolutions.MultiPwsh.Sdk.targets"
           Pack="true"
           PackagePath="buildTransitive\" />
-    <Content Include="devolutions-pwsh-payload.manifest.template.json"
-             Pack="true"
-             PackagePath="contentFiles\any\any\"
-             Visible="false" />
     <None Include="$(PwshFfiNativeLibrary)"
           Condition="'$(PwshFfiNativeStagingRoot)' == ''"
           Pack="true"

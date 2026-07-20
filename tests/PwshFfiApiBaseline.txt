@@ -116,10 +116,6 @@ facade:property:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate::Int64 Paren
 facade:property:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate::Int32 PercentComplete
 facade:property:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate::Int64 SecondsRemaining
 facade:property:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate::System.String StatusDescription
-facade:type:Devolutions.PowerShell.Ffi.PowerShellRdmCapabilities
-facade:property:Devolutions.PowerShell.Ffi.PowerShellRdmCapabilities::Devolutions.PowerShell.Ffi.PowerShellCapabilityDefinition GetConnectionDisplay
-facade:property:Devolutions.PowerShell.Ffi.PowerShellRdmCapabilities::Devolutions.PowerShell.Ffi.PowerShellCapabilityDefinition GetConnectionName
-facade:property:Devolutions.PowerShell.Ffi.PowerShellRdmCapabilities::Devolutions.PowerShell.Ffi.PowerShellCapabilityDefinition ReportStatus
 facade:type:Devolutions.PowerShell.Ffi.PowerShellResultSchema
 facade:ctor:Devolutions.PowerShell.Ffi.PowerShellResultSchema::Void .ctor(Int32, Int32, System.Collections.Generic.IEnumerable`1[Devolutions.PowerShell.Ffi.PowerShellValueKind], System.Collections.Generic.IEnumerable`1[System.String], Boolean, Boolean)
 facade:property:Devolutions.PowerShell.Ffi.PowerShellResultSchema::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellValueKind] AllowedScalarKinds
@@ -160,7 +156,6 @@ facade:type:Devolutions.PowerShell.Ffi.PowerShellSnapshotReader
 facade:method:Devolutions.PowerShell.Ffi.PowerShellSnapshotReader::System.Collections.Generic.IReadOnlyDictionary`2[System.String,Devolutions.PowerShell.Ffi.PowerShellValue] GetCompleteProperties(Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellSnapshotReader::Boolean TryGetProperty(Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot, System.String, Devolutions.PowerShell.Ffi.PowerShellValue ByRef)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellSnapshotReader::Devolutions.PowerShell.Ffi.PowerShellDisplaySnapshot CreateDisplaySnapshot(Devolutions.PowerShell.Ffi.PowerShellInvocationResult)
-facade:ctor:Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions::Void .ctor(System.String, System.String, System.String)
 facade:ctor:Devolutions.PowerShell.Ffi.PowerShellSessionConfiguration::Void .ctor(System.Collections.Generic.IEnumerable`1[System.Collections.Generic.KeyValuePair`2[System.String,Devolutions.PowerShell.Ffi.PowerShellValue]], System.Collections.Generic.IEnumerable`1[System.String], System.Collections.Generic.IEnumerable`1[System.String], System.String, System.Collections.Generic.IEnumerable`1[System.Collections.Generic.KeyValuePair`2[System.String,System.String]], Devolutions.PowerShell.Ffi.PowerShellSessionExecutionPolicy)
 facade:ctor:Devolutions.PowerShell.Ffi.PowerShellSessionOptions::Void .ctor(Devolutions.PowerShell.Ffi.PowerShellRunspaceMode, Devolutions.PowerShell.Ffi.PowerShellSessionInitialConfiguration, Devolutions.PowerShell.Ffi.PowerShellSessionHistoryMode, Devolutions.PowerShell.Ffi.PowerShellSessionPreference, Devolutions.PowerShell.Ffi.PowerShellSessionPreference, Devolutions.PowerShell.Ffi.PowerShellSessionPreference, Devolutions.PowerShell.Ffi.PowerShellSessionPreference, Devolutions.PowerShell.Ffi.PowerShellSessionPreference, System.String, Devolutions.PowerShell.Ffi.PowerShellSessionConfiguration)
 facade:ctor:Devolutions.PowerShell.Ffi.PowerShellSessionPoolOptions::Void .ctor(UInt32, UInt32)
@@ -176,12 +171,7 @@ facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerSh
 facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus OperationCancelled
 facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus OperationNotTerminal
 facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus Panic
-facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus PayloadHashMismatch
-facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus PayloadIncompatible
-facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus PayloadManifestInvalid
-facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus PayloadUntrusted
 facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus Success
-facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus SessionPolicyViolation
 facade:field:Devolutions.PowerShell.Ffi.PowerShellSecretTransferPolicy::Devolutions.PowerShell.Ffi.PowerShellSecretTransferPolicy Rejected
 facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionExecutionPolicy::Devolutions.PowerShell.Ffi.PowerShellSessionExecutionPolicy Default
 facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionExecutionPolicy::Devolutions.PowerShell.Ffi.PowerShellSessionExecutionPolicy Restricted
@@ -194,9 +184,6 @@ facade:field:Devolutions.PowerShell.Ffi.PowerShellOperationState::Devolutions.Po
 facade:field:Devolutions.PowerShell.Ffi.PowerShellOperationState::Devolutions.PowerShell.Ffi.PowerShellOperationState Failed
 facade:field:Devolutions.PowerShell.Ffi.PowerShellOperationState::Devolutions.PowerShell.Ffi.PowerShellOperationState Pending
 facade:field:Devolutions.PowerShell.Ffi.PowerShellOperationState::Devolutions.PowerShell.Ffi.PowerShellOperationState Running
-facade:field:Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy::Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy HashPinnedManifest
-facade:field:Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy::Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy Direct
-facade:field:Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy::Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy UnsafeUntrustedLocalDevelopment
 facade:field:Devolutions.PowerShell.Ffi.PowerShellRunspaceMode::Devolutions.PowerShell.Ffi.PowerShellRunspaceMode CurrentRunspace
 facade:field:Devolutions.PowerShell.Ffi.PowerShellRunspaceMode::Devolutions.PowerShell.Ffi.PowerShellRunspaceMode NewRunspace
 facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionHistoryMode::Devolutions.PowerShell.Ffi.PowerShellSessionHistoryMode Disabled
@@ -261,7 +248,6 @@ facade:method:Devolutions.PowerShell.Ffi.PowerShell::System.String InvokeText()
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::System.Threading.Tasks.Task`1[Devolutions.PowerShell.Ffi.PowerShellInvocationResult] InvokeAsync(System.Threading.CancellationToken)
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::Void Dispose()
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::Void Initialize()
-facade:method:Devolutions.PowerShell.Ffi.PowerShell::Void Initialize(Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions)
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::Void Initialize(System.String)
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::Void Stop()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellInvocationOperation::Devolutions.PowerShell.Ffi.PowerShellInvocationOperationStatus Poll()
@@ -270,9 +256,7 @@ facade:method:Devolutions.PowerShell.Ffi.PowerShellInvocationOperation::Devoluti
 facade:method:Devolutions.PowerShell.Ffi.PowerShellInvocationOperation::System.Threading.Tasks.Task`1[Devolutions.PowerShell.Ffi.PowerShellInvocationResult] GetResultAsync(System.Threading.CancellationToken)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellInvocationOperation::Void Dispose()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellInvocationOperation::Void Stop()
-facade:method:Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions::Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions UnsafeUntrustedLocalDevelopment(System.String, System.String)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShell Create()
-facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellRuntime Activate(Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellRuntime Activate()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellRuntime Activate(System.String)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellSession CreateSession(Devolutions.PowerShell.Ffi.PowerShellSessionOptions)
@@ -373,12 +357,6 @@ facade:property:Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot::UInt32 Drop
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot::UInt32 PropertyEntryCount
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot::UInt32 TypeNameCount
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot::UInt64 Sequence
-facade:property:Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions::Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy TrustPolicy
-facade:property:Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions::System.String ManifestPath
-facade:property:Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions::System.String ManifestSha256
-facade:property:Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions::System.String PayloadDirectory
-facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy TrustPolicy
-facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntime::System.String ManifestPath
 facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntime::System.String PayloadDirectory
 facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntime::UInt32 AbiVersion
 facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntime::UInt64 FeatureFlags
@@ -436,8 +414,6 @@ facade:type:Devolutions.PowerShell.Ffi.PowerShellInvocationResult
 facade:type:Devolutions.PowerShell.Ffi.PowerShellInvocationState
 facade:type:Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot
 facade:type:Devolutions.PowerShell.Ffi.PowerShellOperationState
-facade:type:Devolutions.PowerShell.Ffi.PowerShellPayloadActivationOptions
-facade:type:Devolutions.PowerShell.Ffi.PowerShellPayloadTrustPolicy
 facade:type:Devolutions.PowerShell.Ffi.PowerShellRunspaceMode
 facade:type:Devolutions.PowerShell.Ffi.PowerShellRuntime
 facade:type:Devolutions.PowerShell.Ffi.PowerShellSession
@@ -482,7 +458,6 @@ native:multi_pwsh_complete_input
 native:multi_pwsh_copy_invocation_error_field_utf8
 native:multi_pwsh_create
 native:multi_pwsh_get_invocation_error_count
-native:multi_pwsh_initialize_payload
 native:multi_pwsh_initialize_from_path
 native:multi_pwsh_initialize_utf8
 native:multi_pwsh_invoke

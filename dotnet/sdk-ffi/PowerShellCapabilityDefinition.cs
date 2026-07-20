@@ -21,7 +21,7 @@ public sealed class PowerShellCapabilityDefinition
         if (!IsCanonicalName(name))
         {
             throw new ArgumentException(
-                "Capability names must be canonical lowercase rdm.* or host.* identifiers with bounded dot or hyphen segments.",
+                "Capability names must be canonical lowercase namespace-qualified identifiers with bounded dot or hyphen segments.",
                 nameof(name));
         }
         ArgumentNullException.ThrowIfNull(arguments);
@@ -87,19 +87,23 @@ public sealed class PowerShellCapabilityDefinition
 
     internal static bool IsCanonicalName(string? value)
     {
-        if (string.IsNullOrEmpty(value) || value.Length > MaximumNameLength ||
-            !(value.StartsWith("rdm.", StringComparison.Ordinal) || value.StartsWith("host.", StringComparison.Ordinal)))
+        if (string.IsNullOrEmpty(value) || value.Length > MaximumNameLength)
         {
             return false;
         }
 
         bool previousSeparator = true;
+        bool hasNamespaceSeparator = false;
         foreach (char character in value)
         {
             bool separator = character is '.' or '-';
             if (!(character is >= 'a' and <= 'z' or >= '0' and <= '9' or '.' or '-'))
             {
                 return false;
+            }
+            if (character == '.')
+            {
+                hasNamespaceSeparator = true;
             }
             if (separator && previousSeparator)
             {
@@ -109,6 +113,6 @@ public sealed class PowerShellCapabilityDefinition
             previousSeparator = separator;
         }
 
-        return !previousSeparator;
+        return hasNamespaceSeparator && !previousSeparator;
     }
 }

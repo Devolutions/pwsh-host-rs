@@ -67,64 +67,11 @@ function Get-ManagedTypeName {
     $Type.FullName
 }
 
-function New-AbiInfo {
-    param(
-        [Parameter(Mandatory = $true)]
-        [Type]$AbiInfoType,
-
-        [Parameter(Mandatory = $true)]
-        [UInt64]$FeatureFlags,
-
-        [Parameter(Mandatory = $true)]
-        [UInt32]$AbiVersion,
-
-        [Parameter(Mandatory = $true)]
-        [UInt32]$MinimumCompatibleAbiVersion
-    )
-
-    $instance = [Activator]::CreateInstance($AbiInfoType)
-    $fieldFlags = [System.Reflection.BindingFlags]'Instance, NonPublic'
-    $AbiInfoType.GetField('Size', $fieldFlags).SetValue($instance, [UInt32]24)
-    $AbiInfoType.GetField('AbiVersion', $fieldFlags).SetValue($instance, $AbiVersion)
-    $AbiInfoType.GetField('FeatureFlags', $fieldFlags).SetValue($instance, $FeatureFlags)
-    $AbiInfoType.GetField('MinimumCompatibleAbiVersion', $fieldFlags).SetValue($instance, $MinimumCompatibleAbiVersion)
-    $AbiInfoType.GetField('Reserved', $fieldFlags).SetValue($instance, [UInt32]0)
-    $instance
-}
-
-function Assert-AbiRejected {
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.Reflection.MethodInfo]$EnsureSupportedAbi,
-
-        [Parameter(Mandatory = $true)]
-        $AbiInfo,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Description
-    )
-
-    try {
-        $EnsureSupportedAbi.Invoke($null, @($AbiInfo))
-    }
-    catch {
-        $exception = $_.Exception
-        while ($null -ne $exception) {
-            if ($exception -is [System.NotSupportedException]) {
-                return
-            }
-            $exception = $exception.InnerException
-        }
-
-        throw "$Description did not throw NotSupportedException."
-    }
-
-    throw "$Description was accepted."
-}
-
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $facadeProject = Join-Path $repoRoot 'dotnet\sdk-ffi\Devolutions.MultiPwsh.Sdk.csproj'
-$facadeAssembly = Join-Path $repoRoot 'dotnet\sdk-ffi\bin\Release\net8.0\Devolutions.MultiPwsh.Sdk.dll'
+$facadeAssembly = Join-Path $repoRoot 'dotnet\sdk-ffi\bin\Release\net10.0\Devolutions.MultiPwsh.Sdk.dll'
+$facadeInspectorProject = Join-Path $repoRoot 'tests\PwshFfiApiBaselineInspector\PwshFfiApiBaselineInspector.csproj'
+$facadeInspectorAssembly = Join-Path $repoRoot 'tests\PwshFfiApiBaselineInspector\bin\Release\net10.0\PwshFfiApiBaselineInspector.dll'
 $bindingsProject = Join-Path $repoRoot 'dotnet\bindings\Devolutions.PowerShell.SDK.Bindings.csproj'
 $bindingsAssembly = Join-Path $repoRoot 'dotnet\bindings\bin\Release\net8.0\Devolutions.PowerShell.SDK.Bindings.dll'
 $nativeMethodsPath = Join-Path $repoRoot 'dotnet\sdk-ffi\NativeMethods.cs'
@@ -138,6 +85,11 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Unable to build the FFI facade for ABI contract validation.'
 }
 
+& dotnet build $facadeInspectorProject -c Release --nologo
+if ($LASTEXITCODE -ne 0) {
+    throw 'Unable to build the .NET 10 FFI facade inspector.'
+}
+
 $bindingsBuildArguments = @('build', $bindingsProject, '-c', 'Release', '--nologo')
 if (-not [string]::IsNullOrWhiteSpace($PwshExePath)) {
     $bindingsBuildArguments += "-p:PwshExePath=$PwshExePath"
@@ -148,36 +100,21 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Unable to build the managed FFI binding table for ABI contract validation.'
 }
 
-$facadeAssemblyObject = [System.Reflection.Assembly]::LoadFrom($facadeAssembly)
 $bindingsAssemblyObject = [System.Reflection.Assembly]::LoadFrom($bindingsAssembly)
+$facadeInspection = @(& dotnet $facadeInspectorAssembly) | ConvertFrom-Json
 $forbiddenFacadeReferences = @(
-    $facadeAssemblyObject.GetReferencedAssemblies() |
+    $facadeInspection.References |
         Where-Object {
-            $_.Name -eq 'System.Management.Automation' -or
-            $_.Name -like 'Microsoft.PowerShell.*'
+            $_ -eq 'System.Management.Automation' -or
+            $_ -like 'Microsoft.PowerShell.*'
         }
 )
 if ($forbiddenFacadeReferences.Count -ne 0) {
-    throw "The NativeAOT facade must not reference SMA or Microsoft.PowerShell assemblies: $($forbiddenFacadeReferences.Name -join ', ')."
+    throw "The NativeAOT facade must not reference SMA or Microsoft.PowerShell assemblies: $($forbiddenFacadeReferences -join ', ')."
 }
-$flags = [System.Reflection.BindingFlags]'Public, Instance, Static, DeclaredOnly'
+$instanceFields = [System.Reflection.BindingFlags]'Instance, Public, NonPublic, DeclaredOnly'
 $actual = [System.Collections.Generic.List[string]]::new()
-
-foreach ($type in $facadeAssemblyObject.GetExportedTypes() | Sort-Object FullName) {
-    $actual.Add("facade:type:$($type.FullName)")
-    foreach ($constructor in $type.GetConstructors($flags) | Sort-Object ToString) {
-        $actual.Add("facade:ctor:$($type.FullName)::$constructor")
-    }
-    foreach ($property in $type.GetProperties($flags) | Sort-Object Name) {
-        $actual.Add("facade:property:$($type.FullName)::$property")
-    }
-    foreach ($method in $type.GetMethods($flags) | Where-Object { -not $_.IsSpecialName } | Sort-Object ToString) {
-        $actual.Add("facade:method:$($type.FullName)::$method")
-    }
-    foreach ($field in $type.GetFields($flags) | Where-Object { -not $_.IsSpecialName } | Sort-Object Name) {
-        $actual.Add("facade:field:$($type.FullName)::$field")
-    }
-}
+$facadeInspection.PublicBaseline | ForEach-Object { $actual.Add($_) }
 
 $bindingsForPublicBaseline = Get-Content -Path $ffiBindingsPath -Raw
 foreach ($match in [regex]::Matches($bindingsForPublicBaseline, '(?m)^\s*public static (?:unsafe )?(?:int|IntPtr)\s+([A-Za-z0-9_]+)\s*\(')) {
@@ -210,7 +147,6 @@ $expectedManagedStructs = [ordered]@{
     'NativeAbiInfo' = @{ Size = 24; Fields = @('Size|0|System.UInt32', 'AbiVersion|4|System.UInt32', 'FeatureFlags|8|System.UInt64', 'MinimumCompatibleAbiVersion|16|System.UInt32', 'Reserved|20|System.UInt32') }
     'NativeUtf8Span' = @{ Size = 16; Fields = @('Data|0|System.Byte*', 'Length|8|System.UIntPtr') }
     'NativeDataValue' = @{ Size = 32; Fields = @('Size|0|System.UInt32', 'Kind|4|System.UInt32', 'Flags|8|System.UInt32', 'Reserved|12|System.UInt32', 'Data|16|System.Byte*', 'DataLength|24|System.UIntPtr') }
-    'NativePayloadActivation' = @{ Size = 64; Fields = @('Size|0|System.UInt32', 'TrustPolicy|4|System.UInt32', 'Flags|8|System.UInt32', 'Reserved|12|System.UInt32', 'PayloadPath|16|Devolutions.PowerShell.Ffi.NativeUtf8Span', 'ManifestPath|32|Devolutions.PowerShell.Ffi.NativeUtf8Span', 'ManifestSha256|48|Devolutions.PowerShell.Ffi.NativeUtf8Span') }
     'NativeCallResult' = @{ Size = 48; Fields = @('Size|0|System.UInt32', 'Status|4|System.Int32', 'Flags|8|System.UInt32', 'Reserved|12|System.UInt32', 'Diagnostic|16|System.Byte*', 'DiagnosticCapacity|24|System.UIntPtr', 'DiagnosticRequired|32|System.UIntPtr', 'DiagnosticWritten|40|System.UIntPtr') }
     'NativeCapabilityRegistration' = @{ Size = 32; Fields = @('Size|0|System.UInt32', 'Flags|4|System.UInt32', 'Definitions|8|Devolutions.PowerShell.Ffi.NativeDataValue*', 'DispatchCallback|16|System.IntPtr', 'CancelCallback|24|System.IntPtr') }
     'NativeSessionOptions' = @{ Size = 216; Fields = @('Size|0|System.UInt32', 'RunspaceMode|4|System.UInt32', 'InitialConfiguration|8|System.UInt32', 'HistoryMode|12|System.UInt32', 'ErrorPreference|16|System.UInt32', 'WarningPreference|20|System.UInt32', 'VerbosePreference|24|System.UInt32', 'DebugPreference|28|System.UInt32', 'InformationPreference|32|System.UInt32', 'Flags|36|System.UInt32', 'Reserved|40|System.UInt32', 'AllowedModulePath|48|Devolutions.PowerShell.Ffi.NativeUtf8Span', 'ExecutionPolicy|64|System.UInt32', 'ConfigurationFlags|68|System.UInt32', 'InitialVariables|72|Devolutions.PowerShell.Ffi.NativeDataValue', 'ModuleImports|104|Devolutions.PowerShell.Ffi.NativeDataValue', 'AllowedModulePaths|136|Devolutions.PowerShell.Ffi.NativeDataValue', 'WorkingDirectory|168|Devolutions.PowerShell.Ffi.NativeUtf8Span', 'Environment|184|Devolutions.PowerShell.Ffi.NativeDataValue') }
@@ -219,30 +155,31 @@ $expectedManagedStructs = [ordered]@{
 }
 
 Assert-Sequence -Actual @(
-    $facadeAssemblyObject.GetTypes() |
-        Where-Object { $_.Namespace -eq 'Devolutions.PowerShell.Ffi' -and $_.IsValueType -and $_.Name.StartsWith('Native', [StringComparison]::Ordinal) } |
+    $facadeInspection.NativeStructs |
         ForEach-Object Name |
         Sort-Object
 ) -Expected @($expectedManagedStructs.Keys | Sort-Object) -Description 'Managed native interop structures'
 
-$instanceFields = [System.Reflection.BindingFlags]'Instance, Public, NonPublic, DeclaredOnly'
 foreach ($structName in $expectedManagedStructs.Keys) {
-    $managedType = $facadeAssemblyObject.GetType("Devolutions.PowerShell.Ffi.$structName", $true)
+    $managedType = @($facadeInspection.NativeStructs | Where-Object Name -eq $structName)
+    if ($managedType.Count -ne 1) {
+        throw "Managed ABI structure '$structName' is missing."
+    }
+    $managedType = $managedType[0]
     $contract = $expectedManagedStructs[$structName]
-    Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::SizeOf([Type]$managedType)) -Expected $contract.Size -Description "Managed ABI structure '$structName' size"
+    Assert-Equal -Actual $managedType.Size -Expected $contract.Size -Description "Managed ABI structure '$structName' size"
 
-    $actualFields = @($managedType.GetFields($instanceFields) | Sort-Object MetadataToken)
+    $actualFields = @($managedType.Fields)
     $expectedFields = @($contract.Fields)
     Assert-Equal -Actual $actualFields.Count -Expected $expectedFields.Count -Description "Managed ABI structure '$structName' field count"
     for ($index = 0; $index -lt $expectedFields.Count; $index++) {
         $name, $offset, $typeName = $expectedFields[$index] -split '\|'
         Assert-Equal -Actual $actualFields[$index].Name -Expected $name -Description "Managed ABI structure '$structName' field order"
-        Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::OffsetOf($managedType, $name).ToInt64()) -Expected ([Int64]$offset) -Description "Managed ABI structure '$structName.$name' offset"
-        Assert-Equal -Actual (Get-ManagedTypeName $actualFields[$index].FieldType) -Expected $typeName -Description "Managed ABI structure '$structName.$name' type"
+        Assert-Equal -Actual $actualFields[$index].Offset -Expected ([Int64]$offset) -Description "Managed ABI structure '$structName.$name' offset"
+        Assert-Equal -Actual $actualFields[$index].TypeName -Expected $typeName -Description "Managed ABI structure '$structName.$name' type"
     }
 }
 
-$facadeStatusType = $facadeAssemblyObject.GetType('Devolutions.PowerShell.Ffi.PowerShellFfiStatus', $true)
 $expectedFacadeStatuses = [ordered]@{
     'Success' = 0
     'BufferTooSmall' = 1
@@ -258,42 +195,18 @@ $expectedFacadeStatuses = [ordered]@{
     'UnsupportedValue' = -10
     'OperationCancelled' = -11
     'OperationNotTerminal' = -12
-    'PayloadManifestInvalid' = -13
-    'PayloadUntrusted' = -14
-    'PayloadHashMismatch' = -15
-    'PayloadIncompatible' = -16
     'UnsupportedCapability' = -17
-    'SessionPolicyViolation' = -18
 }
-$actualFacadeStatusNames = @([Enum]::GetNames($facadeStatusType))
+$actualFacadeStatusNames = @($facadeInspection.Statuses.PSObject.Properties.Name)
 Assert-Equal -Actual $actualFacadeStatusNames.Count -Expected $expectedFacadeStatuses.Count -Description 'Managed FFI status enumeration count'
 foreach ($statusName in $expectedFacadeStatuses.Keys) {
     if ($actualFacadeStatusNames -notcontains $statusName) {
         throw "Managed FFI status '$statusName' is missing."
     }
-    Assert-Equal -Actual ([Convert]::ToInt32([Enum]::Parse($facadeStatusType, $statusName))) -Expected $expectedFacadeStatuses[$statusName] -Description "Managed FFI status '$statusName'"
+    Assert-Equal -Actual ([Convert]::ToInt32($facadeInspection.Statuses.$statusName)) -Expected $expectedFacadeStatuses[$statusName] -Description "Managed FFI status '$statusName'"
 }
 
-$nativeMethodsType = $facadeAssemblyObject.GetType('Devolutions.PowerShell.Ffi.NativeMethods', $true)
-$staticNonPublic = [System.Reflection.BindingFlags]'Static, NonPublic, DeclaredOnly'
-$libraryImports = @(
-    $nativeMethodsType.GetMethods($staticNonPublic) |
-        ForEach-Object {
-            $method = $_
-            $libraryImport = @($method.GetCustomAttributesData() | Where-Object { $_.AttributeType.FullName -eq 'System.Runtime.InteropServices.LibraryImportAttribute' })
-            if ($libraryImport.Count -eq 1) {
-                $entryPoint = @($libraryImport[0].NamedArguments | Where-Object { $_.MemberName -eq 'EntryPoint' })
-                if ($entryPoint.Count -ne 1) {
-                    throw "Native import '$($method.Name)' has no explicit EntryPoint."
-                }
-                [pscustomobject]@{
-                    Method = $method
-                    EntryPoint = [string]$entryPoint[0].TypedValue.Value
-                }
-            }
-        } |
-        Where-Object { $null -ne $_ }
-)
+$libraryImports = @($facadeInspection.NativeImports)
 
 $sourceImportedExports = @(
     [regex]::Matches($nativeMethodsSource, '\[LibraryImport\(LibraryName,\s*EntryPoint\s*=\s*"(?<entryPoint>multi_pwsh_[a-z0-9_]+)"\)\]') |
@@ -303,7 +216,7 @@ Assert-Sequence -Actual @($libraryImports.EntryPoint | Sort-Object) -Expected @(
 Assert-Equal -Actual $libraryImports.Count -Expected ($sourceImportedExports | Select-Object -Unique).Count -Description 'Managed LibraryImport entry point count'
 
 foreach ($import in $libraryImports) {
-    Assert-Equal -Actual (Get-ManagedTypeName $import.Method.ReturnType) -Expected 'System.Int32' -Description "Managed import '$($import.EntryPoint)' return type"
+    Assert-Equal -Actual $import.ReturnType -Expected 'System.Int32' -Description "Managed import '$($import.EntryPoint)' return type"
 }
 
 $cdeclAttributes = [regex]::Matches($nativeMethodsSource, '\[\s*UnmanagedCallConv\s*\(\s*CallConvs\s*=\s*\[\s*typeof\s*\(\s*CallConvCdecl\s*\)\s*\]\s*\)\s*\]')
@@ -324,26 +237,6 @@ foreach ($import in $libraryImports) {
         throw "Rust export '$($import.EntryPoint)' is missing #[no_mangle] extern `"C`" linkage."
     }
 }
-
-$ensureSupportedAbi = $facadeAssemblyObject.GetType('Devolutions.PowerShell.Ffi.PowerShell', $true).GetMethod(
-    'EnsureSupportedAbi',
-    $staticNonPublic,
-    $null,
-    [Type[]]@($facadeAssemblyObject.GetType('Devolutions.PowerShell.Ffi.NativeAbiInfo', $true)),
-    $null)
-if ($null -eq $ensureSupportedAbi) {
-    throw 'The facade must retain an ABI validation overload that accepts NativeAbiInfo.'
-}
-
-$abiInfoType = $facadeAssemblyObject.GetType('Devolutions.PowerShell.Ffi.NativeAbiInfo', $true)
-$allRequiredFeatures = [UInt64]0x1FFFF
-$ensureSupportedAbi.Invoke($null, @(New-AbiInfo -AbiInfoType $abiInfoType -FeatureFlags $allRequiredFeatures -AbiVersion 2 -MinimumCompatibleAbiVersion 2))
-for ($bit = 0; $bit -le 16; $bit++) {
-    $withoutFeature = $allRequiredFeatures -bxor ([UInt64]1 -shl $bit)
-    Assert-AbiRejected -EnsureSupportedAbi $ensureSupportedAbi -AbiInfo (New-AbiInfo -AbiInfoType $abiInfoType -FeatureFlags $withoutFeature -AbiVersion 2 -MinimumCompatibleAbiVersion 2) -Description "Facade ABI validation without required feature bit $bit"
-}
-Assert-AbiRejected -EnsureSupportedAbi $ensureSupportedAbi -AbiInfo (New-AbiInfo -AbiInfoType $abiInfoType -FeatureFlags $allRequiredFeatures -AbiVersion 1 -MinimumCompatibleAbiVersion 1) -Description 'Facade ABI validation for an incompatible ABI version'
-Assert-AbiRejected -EnsureSupportedAbi $ensureSupportedAbi -AbiInfo (New-AbiInfo -AbiInfoType $abiInfoType -FeatureFlags $allRequiredFeatures -AbiVersion 2 -MinimumCompatibleAbiVersion 3) -Description 'Facade ABI validation for an incompatible minimum ABI version'
 
 $expectedTableSlots = @(
     @{ Field = 'PowerShell_Create'; Rust = 'create_fn'; Alias = 'FnFfiPowerShellCreate'; Method = 'FfiPowerShell_Create'; Signature = 'IntPtr*,FfiCallResult*,int' }

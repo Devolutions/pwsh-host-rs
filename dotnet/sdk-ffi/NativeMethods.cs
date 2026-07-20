@@ -42,18 +42,6 @@ internal unsafe struct NativeCapabilityRegistration
 }
 
 [StructLayout(LayoutKind.Sequential)]
-internal unsafe struct NativePayloadActivation
-{
-    internal uint Size;
-    internal uint TrustPolicy;
-    internal uint Flags;
-    internal uint Reserved;
-    internal NativeUtf8Span PayloadPath;
-    internal NativeUtf8Span ManifestPath;
-    internal NativeUtf8Span ManifestSha256;
-}
-
-[StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeCallResult
 {
     internal uint Size;
@@ -128,10 +116,6 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_initialize_from_path")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int InitializeFromPath(NativeCallResult* result);
-
-    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_initialize_payload")]
-    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial int InitializePayload(NativePayloadActivation* activation, NativeCallResult* result);
 
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_get_payload_path_utf8")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

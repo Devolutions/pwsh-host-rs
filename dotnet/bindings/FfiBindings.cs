@@ -1705,7 +1705,7 @@ namespace NativeHost
                 string[] fullModulePaths = NormalizeDirectories(allowedModulePaths, "Allowed module path");
                 if (fullModulePaths.Length != 0)
                 {
-                    // Rust supplies only staged, manifest-approved roots. This authorization
+                    // The application supplies only bounded module roots. This authorization
                     // manager permits external scripts only beneath those roots.
                     initialState.AuthorizationManager = new FfiApprovedModuleAuthorizationManager(fullModulePaths);
                 }

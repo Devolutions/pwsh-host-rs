@@ -5,15 +5,11 @@ public sealed class PowerShellRuntime
     private PowerShellRuntime(
         uint abiVersion,
         ulong featureFlags,
-        string payloadDirectory,
-        string manifestPath,
-        PowerShellPayloadTrustPolicy trustPolicy)
+        string payloadDirectory)
     {
         AbiVersion = abiVersion;
         FeatureFlags = featureFlags;
         PayloadDirectory = payloadDirectory;
-        ManifestPath = manifestPath;
-        TrustPolicy = trustPolicy;
     }
 
     public uint AbiVersion { get; }
@@ -22,40 +18,25 @@ public sealed class PowerShellRuntime
 
     public string PayloadDirectory { get; }
 
-    public string ManifestPath { get; }
-
-    public PowerShellPayloadTrustPolicy TrustPolicy { get; }
-
     public static PowerShellRuntime Activate()
     {
         PowerShell.Initialize();
-        return CreateActivatedRuntime(string.Empty, PowerShellPayloadTrustPolicy.Direct);
-    }
-
-    public static PowerShellRuntime Activate(PowerShellPayloadActivationOptions activation)
-    {
-        ArgumentNullException.ThrowIfNull(activation);
-        PowerShell.Initialize(activation);
-        return CreateActivatedRuntime(activation.ManifestPath, activation.TrustPolicy);
+        return CreateActivatedRuntime();
     }
 
     public static PowerShellRuntime Activate(string payloadDirectory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(payloadDirectory);
         PowerShell.Initialize(payloadDirectory);
-        return CreateActivatedRuntime(string.Empty, PowerShellPayloadTrustPolicy.Direct);
+        return CreateActivatedRuntime();
     }
 
-    private static PowerShellRuntime CreateActivatedRuntime(
-        string manifestPath,
-        PowerShellPayloadTrustPolicy trustPolicy)
+    private static PowerShellRuntime CreateActivatedRuntime()
     {
         return new PowerShellRuntime(
             PowerShell.AbiVersion,
             PowerShell.FeatureFlags,
-            PowerShell.GetActivePayloadDirectory(),
-            manifestPath,
-            trustPolicy);
+            PowerShell.GetActivePayloadDirectory());
     }
 
     public PowerShell Create()

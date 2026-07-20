@@ -955,9 +955,6 @@ name = "pwsh-sdk-ffi"
 version = "0.14.2"
 dependencies = [
  "pwsh-host",
- "serde",
- "serde_json",
- "sha2",
  "winresource",
 ]
 

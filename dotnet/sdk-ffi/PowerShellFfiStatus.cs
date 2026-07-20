@@ -16,10 +16,5 @@ public enum PowerShellFfiStatus
     UnsupportedValue = -10,
     OperationCancelled = -11,
     OperationNotTerminal = -12,
-    PayloadManifestInvalid = -13,
-    PayloadUntrusted = -14,
-    PayloadHashMismatch = -15,
-    PayloadIncompatible = -16,
     UnsupportedCapability = -17,
-    SessionPolicyViolation = -18,
 }

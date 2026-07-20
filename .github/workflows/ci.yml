@@ -304,7 +304,7 @@ jobs:
           $payloadDirectory = Split-Path -Parent $env:PwshExePath
           $env:PATH = "$payloadDirectory$([System.IO.Path]::PathSeparator)$env:PATH"
           dotnet publish dotnet/nativeaot-sample/NativeAotFfiSample.csproj -c Release
-          & dotnet/nativeaot-sample/bin/Release/net8.0/win-x64/publish/NativeAotFfiSample.exe
+          & dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe
           if ($LASTEXITCODE -ne 0) { throw "The PATH-resolved NativeAOT SDK sample failed with exit code $LASTEXITCODE." }
 
       - name: Dry-run pack NativeAOT SDK

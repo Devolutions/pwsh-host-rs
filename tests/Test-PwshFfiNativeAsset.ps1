@@ -109,7 +109,7 @@ try {
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <RuntimeIdentifier>{0}</RuntimeIdentifier>
     <DevolutionsMultiPwshSdkEnabled>true</DevolutionsMultiPwshSdkEnabled>
   </PropertyGroup>
@@ -189,7 +189,7 @@ internal static class Program
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $consumerProject, '--configfile', $nugetConfig)
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('build', $consumerProject, '--no-restore', '-c', $Configuration)
 
-    $outputDirectory = Join-Path $consumerDirectory "bin\$Configuration\net8.0\$RuntimeIdentifier"
+    $outputDirectory = Join-Path $consumerDirectory "bin\$Configuration\net10.0\$RuntimeIdentifier"
     $nativeAsset = Join-Path $outputDirectory $nativeAssets[$RuntimeIdentifier]
     if (-not (Test-Path -Path $nativeAsset -PathType Leaf)) {
         throw "The package did not stage the expected native asset: $nativeAsset"

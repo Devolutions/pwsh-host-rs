@@ -19,7 +19,6 @@ public sealed unsafe class PowerShell : IDisposable
     private const ulong BoundedInputFeature = 1UL << 6;
     private const ulong InvocationMetadataFeature = 1UL << 7;
     private const ulong AsyncOperationsFeature = 1UL << 8;
-    private const ulong PayloadManifestFeature = 1UL << 9;
     private const ulong SessionsFeature = 1UL << 10;
     private const ulong SessionPollingFeature = 1UL << 11;
     private const ulong SessionPoolRejectionFeature = 1UL << 12;
@@ -30,7 +29,7 @@ public sealed unsafe class PowerShell : IDisposable
     private const ulong RequiredFeatures =
         StructuredInvocationErrorsFeature | PerCallDiagnosticsFeature | Utf8SpansFeature |
         ImmutableResultsFeature | TaggedValuesFeature | CommandOptionsFeature | BoundedInputFeature |
-        InvocationMetadataFeature | AsyncOperationsFeature | PayloadManifestFeature | SessionsFeature |
+        InvocationMetadataFeature | AsyncOperationsFeature | SessionsFeature |
         SessionPollingFeature | SessionPoolRejectionFeature | SnapshotProjectionsFeature |
         SessionConfigurationFeature | SessionVariablesFeature | CapabilityRpcFeature;
     private const uint ResultTerminatingFailure = 1;
@@ -86,44 +85,6 @@ public sealed unsafe class PowerShell : IDisposable
                     Length = (nuint)payloadBytes.Length,
                 },
                 &result);
-            NativeCall.ThrowIfFailed(status, result, diagnostic);
-        }
-    }
-
-    public static void Initialize(PowerShellPayloadActivationOptions options)
-    {
-        ArgumentNullException.ThrowIfNull(options);
-        EnsureSupportedAbi();
-        byte[] payloadBytes = EncodeUtf8(options.PayloadDirectory);
-        byte[] manifestBytes = EncodeUtf8(options.ManifestPath);
-        byte[] manifestHashBytes = EncodeUtf8(options.ManifestSha256);
-        fixed (byte* payloadPointer = payloadBytes)
-        fixed (byte* manifestPointer = manifestBytes)
-        fixed (byte* manifestHashPointer = manifestHashBytes)
-        {
-            NativePayloadActivation activation = new()
-            {
-                Size = checked((uint)sizeof(NativePayloadActivation)),
-                TrustPolicy = checked((uint)options.TrustPolicy),
-                PayloadPath = new NativeUtf8Span
-                {
-                    Data = payloadBytes.Length == 0 ? null : payloadPointer,
-                    Length = (nuint)payloadBytes.Length,
-                },
-                ManifestPath = new NativeUtf8Span
-                {
-                    Data = manifestBytes.Length == 0 ? null : manifestPointer,
-                    Length = (nuint)manifestBytes.Length,
-                },
-                ManifestSha256 = new NativeUtf8Span
-                {
-                    Data = manifestHashBytes.Length == 0 ? null : manifestHashPointer,
-                    Length = (nuint)manifestHashBytes.Length,
-                },
-            };
-            byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
-            NativeCallResult result = NativeCall.CreateResult(diagnostic);
-            int status = NativeMethods.InitializePayload(&activation, &result);
             NativeCall.ThrowIfFailed(status, result, diagnostic);
         }
     }
@@ -468,7 +429,7 @@ public sealed unsafe class PowerShell : IDisposable
             (info.FeatureFlags & RequiredFeatures) != RequiredFeatures)
         {
             throw new NotSupportedException(
-                $"Native PowerShell FFI ABI {info.AbiVersion} does not support facade ABI {RequiredAbiVersion} structured errors, diagnostics, UTF-8, value, command, input, result, async operation, payload manifest, and session features.");
+                $"Native PowerShell FFI ABI {info.AbiVersion} does not support facade ABI {RequiredAbiVersion} structured errors, diagnostics, UTF-8, value, command, input, result, async operation, and session features.");
         }
     }
 

@@ -1,8 +1,8 @@
 # In-process PowerShell FFI experiment
 
 `pwsh-host` can be exposed through the `pwsh-sdk-ffi` Rust `cdylib`.
-The library receives an explicit PowerShell payload directory, loads that
-payload's `hostfxr`, initializes `pwsh.dll`, injects
+The library receives a caller-selected PowerShell payload directory, or resolves
+`pwsh` from `PATH`, then loads that payload's `hostfxr`, initializes `pwsh.dll`, injects
 `Devolutions.PowerShell.SDK.Bindings`, and invokes its unmanaged function table.
 
 The `dotnet/sdk-ffi` facade uses only `LibraryImport`. It has no
@@ -21,10 +21,9 @@ PowerShell runtime versions, or runtime unloading in the same process.
 
 ## Lifecycle and ABI
 
-- The direct and manifest activation exports are process-global and accept one
-  canonical payload directory plus one activation identity. Repeating the same
-  activation succeeds; selecting a different payload, or changing between
-  direct and manifest activation, returns `MULTI_PWSH_INCOMPATIBLE_PAYLOAD`.
+- The direct activation exports are process-global and accept one canonical
+  payload directory. Repeating the same activation succeeds; selecting a
+  different payload returns `MULTI_PWSH_INCOMPATIBLE_PAYLOAD`.
 - The native product ABI reports its compatible version and feature flags through
   `multi_pwsh_get_abi_info`; the managed package and native asset ship together
   and use the unversioned `multi_pwsh_*` exports. The injected managed function
@@ -64,121 +63,21 @@ PowerShell runtime versions, or runtime unloading in the same process.
   `SafeHandle` leases keep an in-flight facade call alive until that call
   returns.
 
-## Payload trust and activation
+## Payload selection and activation
 
 `PowerShellRuntime.Activate()` resolves `pwsh` from `PATH` and activates its
 containing payload directory. `PowerShellRuntime.Activate(payloadDirectory)`
-activates exactly the caller-selected directory. Neither direct activation mode
-reads `devolutions-pwsh-payload.json` or requires any other manifest: the
-application controls which PowerShell it trusts and bears responsibility for
-its provenance and integrity.
+activates exactly the caller-selected existing directory. The native host
+canonicalizes that directory before loading its local `hostfxr`.
 
-For deployments that require a verified, race-resistant payload, hash-pinned
-activation is deliberately **not** an existence check. Before loading
-`hostfxr`, `multi_pwsh_initialize_payload` canonicalizes the payload
-and manifest paths, parses the manifest, verifies the caller-supplied SHA-256
-pin of the complete manifest bytes, checks the target RID/architecture, and
-SHA-256 verifies every declared file. A hash-pinned manifest must declare
-**every regular file recursively beneath the selected payload root**; an
-undeclared DLL, module file, or other regular file rejects activation. It also requires hashes for
-`pwsh.dll`, `pwsh.runtimeconfig.json`, `pwsh.deps.json`,
-`System.Management.Automation.dll`, `hostfxr.dll`, and `coreclr.dll` on the
-currently supported Windows payload.
+The SDK deliberately does not read, package, generate, or validate a payload
+metadata file. It does not pin a PowerShell, hostfxr, CoreCLR, module, or file
+version. The application selects the PowerShell installation and is responsible
+for any provenance or integrity controls its deployment requires.
 
-The schema is `devolutions-pwsh-payload` version `1`:
-
-```json
-{
-  "schema": "devolutions-pwsh-payload",
-  "schemaVersion": 1,
-  "payload": { "id": "PowerShell", "version": "7.x.y" },
-  "target": { "rid": "win-x64", "architecture": "x64" },
-  "runtime": {
-    "powerShellVersion": "7.x.y",
-    "dotnetVersion": "x.y.z",
-    "hostfxrVersion": "x.y.z",
-    "bindingsAbiVersion": 2,
-    "requiredBindingsFeatures": 123136
-  },
-  "files": [{ "path": "every/regular/file", "sha256": "<64 hexadecimal digits>" }],
-  "trust": { "allowSymlinks": false },
-  "sessionPolicy": {
-    "modulePaths": [],
-    "workingDirectories": [],
-    "moduleImports": [],
-    "environmentKeys": []
-  }
-}
-```
-
-`payload.version` and `runtime.powerShellVersion` must match the
-`System.Management.Automation` version in `pwsh.deps.json`.
-`runtime.dotnetVersion` is checked against `pwsh.runtimeconfig.json`, and
-`runtime.hostfxrVersion` is checked against the Windows `hostfxr.dll` product
-version. The bindings ABI must be `2` and declare the async-operation,
-snapshot-projection, bounded session-configuration, and copied-session-variable
-bits (`123136`). Validation failures are returned by the activation call as bounded
-diagnostics with one of `PayloadManifestInvalid`, `PayloadUntrusted`,
-`PayloadHashMismatch`, or `PayloadIncompatible`; CoreCLR has not started yet.
-
-Manifest file paths are slash-separated relative paths only. `..`, rooted,
-dot, and duplicate paths are rejected. The payload root and every declared
-file are canonicalized; a file resolving outside the canonical root is
-rejected. Payload roots reached through normal Windows junction/path
-substitution are accepted after canonicalization. Per-file symlinks are
-rejected unless `trust.allowSymlinks` is explicitly true, and even then must
-resolve inside the payload root. With the default `allowSymlinks: false`, any
-symlink in a hash-pinned payload rejects its complete-closure check.
-
-The hash-pinned manifest itself must be outside the payload root: otherwise a
-manifest that hashes every regular file would need to contain a stable hash of
-its own bytes. The package template is deliberately not a usable manifest.
-Build the `files` array from the installed payload, including nested module
-files, then set the remaining placeholders and pin the final manifest bytes.
-For example, this produces the complete array for a non-symlinked payload:
-
-```powershell
-$payload = (Resolve-Path 'C:\path\to\payload').Path
-$files = @(
-  Get-ChildItem -LiteralPath $payload -Recurse -Force |
-    ForEach-Object {
-      if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-        throw "Payload symlinks require an explicitly reviewed allowSymlinks policy: $($_.FullName)"
-      }
-      if (-not $_.PSIsContainer) {
-        [ordered]@{
-          path = [IO.Path]::GetRelativePath($payload, $_.FullName) -replace '\\', '/'
-          sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-        }
-      }
-    } |
-    Sort-Object path
-)
-```
-
-`tests/Test-PwshFfiPackage.ps1` uses this same complete-closure approach when
-it generates its smoke-test manifest.
-
-The caller's manifest SHA-256 pin is the trust anchor. This implementation
-does **not** validate a signature and must not be described as signed.
-For hash-pinned activation, the validated files are copied into a fresh
-per-activation staging root, every staged file is hashed again against the
-manifest, and `hostfxr` and PowerShell load only from that staging root. The
-native runtime retains ownership of the staging root for its process lifetime.
-This removes the validation-to-load race against the original payload path.
-The staging directory is an ordinary per-user temporary filesystem directory:
-a peer with the same account and sufficient filesystem access can still modify
-it after verification, so this is not a defense against a hostile same-account
-process. Protect the account and its temporary directory accordingly.
-
-There is no conventional manifest lookup beside the payload. Direct activation
-uses the requested payload directory or the `pwsh` runtime selected from
-`PATH`; it has no manifest-derived session policy, so extended session
-configuration remains denied. The obsolete
-`PowerShellPayloadActivationOptions.UnsafeUntrustedLocalDevelopment` factory
-retains the older unpinned-manifest behavior for compatibility only. An attacker
-who can replace that manifest or payload can subvert it; do not use it for
-deployment.
+One payload is process-global. Repeating activation for the same canonical
+directory succeeds; selecting a different directory after initialization fails
+with `IncompatiblePayload`. Runtime switching and unloading are unsupported.
 
 ### Async operations and cancellation
 
@@ -246,25 +145,13 @@ managed delegates cross the boundary.
   prompt channel. Error preference is also passed through a bounded
   `PSInvocationSettings`; no settings object leaves managed code.
 
-The activated manifest governs session configuration. `sessionPolicy` is
-optional, but omitted or empty entries deny the corresponding module paths,
-working directories, module imports, and environment keys. Policy paths are
-canonical, slash-separated relative directories inside the payload (use `.`
-for the payload root); requested facade paths must be absolute existing
-directories and match an approved canonical source directory exactly. For
-hash-pinned activation, approved module roots, working directories, and exact
-module-manifest identities are translated to their staged equivalents before
-the managed session is created; initial imports cannot use the original source
-directory. A session working directory selected from the source payload is
-therefore observed as the corresponding staged directory. Module imports are
-bounded names and are resolved only beneath approved module paths. For a
-staged approved module root, the payload-local authorization manager permits
-only external scripts under that root and rejects every other external script.
-This preserves the exact manifest identity and staged closure boundary; it is
-not a general authorization bypass or an additional module search path.
-Diagnostics report policy categories without echoing supplied paths or
-environment values. `CurrentRunspace` rejects all configuration so the ABI
-does not mutate ambient application state.
+Session configuration is supplied directly by the application. Requested module
+paths and working directories must be absolute existing directories; module
+imports are bounded names resolved only beneath the supplied module paths. The
+payload-local authorization manager permits external scripts only beneath those
+module roots. This is not a general authorization bypass or an additional
+module search path. `CurrentRunspace` rejects all configuration so the ABI does
+not mutate ambient application state.
 
 `GetSnapshot()` and `GetEvents()` are polling APIs. A snapshot reports copied
 session/runspace state, active pipeline count, invocation and history counts.
@@ -387,46 +274,36 @@ type.
 
 Call `PowerShellRuntime.Activate()` to select `pwsh` from `PATH`, or
 `PowerShellRuntime.Activate(payloadDirectory)` to select an explicit payload.
-Use `PowerShellRuntime.Activate(new PowerShellPayloadActivationOptions(
-payloadDirectory, manifestPath, manifestSha256))` only when opting into
-hash-pinned activation. Then use `runtime.Create()` (or the equivalent
-`PowerShell.Create()` process-global entry point) to construct builders. The
-runtime object reports the selected paths, trust policy, and negotiated
-ABI/features; it does not permit selecting a second payload or unloading the
-selected runtime.
+Then use `runtime.Create()` (or the equivalent `PowerShell.Create()`
+process-global entry point) to construct builders. The runtime object reports
+the selected path and negotiated ABI/features; it does not permit selecting a
+second payload or unloading the selected runtime.
 
-## RDM DTO migration boundary
+## Facade scope
 
-This SDK offers DTO migration compatibility, not SMA compatibility. The table
-below is the current implementation status for RDM-facing work.
+This SDK offers copied-DTO compatibility, not SMA compatibility. The table
+below defines the generic managed facade boundary.
 
-| RDM need | Status | FFI replacement and boundary |
+| Application need | Status | FFI replacement and boundary |
 | --- | --- | --- |
-| Explicit payload activation, hostfxr startup, one runtime per process | Implemented | Direct payload or `PATH` activation, with optional hash-pinned manifest staging, and an opaque `PowerShellRuntime`; only `win-x64` has NativeAOT smoke evidence. |
+| Explicit payload activation, hostfxr startup, one runtime per process | Implemented | Direct payload or `PATH` activation and an opaque `PowerShellRuntime`; only `win-x64` has NativeAOT smoke evidence. |
 | Script or named-command execution with scalar parameters | Implemented | `AddScript`, `AddCommand`, `AddParameter`, and bounded `PowerShellValue` inputs. No raw `object`, `PSObject`, or `SecureString` overload exists. |
 | Script parameter declarations and syntax errors | Implemented, copied-only | `PowerShellRuntime.ParseScriptParameters` passes the input to payload-local `Parser.ParseInput` as data, never executable pipeline text. It returns bounded parameter/parse-error DTOs, not SMA AST or token objects. |
 | Output, errors, diagnostics, warning/progress streams | Implemented | Immutable bounded `PowerShellInvocationResult` snapshots. Safe scalar and property-bag projections are read through typed copied-value readers, never live SMA collections. |
 | Timeout, cancellation, async completion, deterministic disposal | Implemented | `InvokeAsync(CancellationToken)`, `BeginInvoke`, `Wait`, `Stop`, and `SafeHandle` ownership. Cancellation wins and never returns a partial success result. |
 | Long-lived local state | Implemented | Opaque local `PowerShellSession` plus serialized builders. It is not a pool or a remoting session. |
 | `SessionStateProxy.SetVariable` for value data | Implemented, copied-only | `SetVariable`, `TryGetVariable`, and `RemoveVariable` transfer bounded tagged values only. No methods, proxies, handles, or CLR identity survive the boundary. |
-| Approved local modules | Implemented, local-only | Each requested import must map to a manifest-pinned `.psd1` identity: canonical name, path beneath an approved module root, SHA-256 also listed in `files`, and exact `ModuleVersion`. Rust resolves the identity and the payload imports that exact manifest path. This does not validate PowerCLI or remoting dependencies. |
+| Application-selected local modules | Implemented, local-only | Each requested import is resolved by name beneath a caller-supplied module root. This does not validate PowerCLI or remoting dependencies. |
 | `PSCredential` parameter | Intentionally unsupported | Arbitrary scripts can emit or transform a supplied credential. The DTO result model cannot guarantee redaction or a zeroable managed lifetime. |
-| Enumerated RDM capability calls and bounded host interaction | Implemented, opt-in | A registered `PowerShellCapabilitySet` makes only declared typed calls available through the temporary payload-local `$DpsCapabilities` object. `PowerShellHostInteraction` supplies schemas for text, progress, line, and choice interactions; it is not a `PSHost` proxy. |
+| Enumerated application capability calls and bounded host interaction | Implemented, opt-in | A registered `PowerShellCapabilitySet` makes only declared typed calls available through the temporary payload-local `$DpsCapabilities` object. `PowerShellHostInteraction` supplies schemas for text, progress, line, and choice interactions; it is not a `PSHost` proxy. |
 | PowerCLI typed return objects, PSRP/WinRM/SSH, pools, and transports | Unsupported | Retain the existing SMA/process paths. No CLR type, transport, or live session crosses the facade. |
 
-A local package-swap assessment of RDM's
-`Windows/RemoteDesktopManager/Business` project confirmed this is not a
-drop-in replacement for `Devolutions.PowerShell.SDK`. That project directly
-uses SMA parser AST/token types and `Collection<PSObject>` output. The copied
-parser metadata API above supports an RDM migration of the former, but it
-cannot preserve public SMA AST/token signatures. The latter must migrate to
-RDM-owned DTOs from `PowerShellInvocationResult` snapshots. Existing RDM
-custom actions that set live `Connection`, `RDM`, `Core`, or `Result` objects
-on a `Runspace`; VMware PowerCLI code that retains live runspaces/typed
-`PSObject` base objects; and interactive/remoting code using `PSHost`,
-`PSCredential`, `PSSession`, or connection-info types remain incompatible.
-They require a separate RDM migration or an existing SMA-backed path, never an
-SMA forwarding assembly or generic proxy bridge.
+This is not a drop-in replacement for `Devolutions.PowerShell.SDK`. Existing
+applications that expose SMA parser AST/token types, `Collection<PSObject>`,
+live runspaces, typed `PSObject` base objects, or interactive/remoting APIs
+must retain an SMA-backed path or migrate to application-owned copied DTOs from
+`PowerShellInvocationResult` snapshots. This facade never becomes an SMA
+forwarding assembly or a generic proxy bridge.
 
 ### Copied session variables
 
@@ -450,13 +327,13 @@ value that cannot be encoded as the documented copied graph; such values return
 `PowerShellValue` is an immutable copied DTO, not an opaque serialized
 `PSObject`. Its `TryGetString`, numeric, Boolean, date/time, GUID, URI, and
 byte-array readers, together with `GetArray`, `GetPropertyBag`, and
-`TryGetProperty`, let an RDM adapter map data into its own DTOs without parsing
+`TryGetProperty`, let an application adapter map data into its own DTOs without parsing
 display text or snapshot JSON. Arrays and property bags always return copied,
 immutable collections; bytes are cloned on every read.
 
 ### Script parameter metadata
 
-`PowerShellRuntime.ParseScriptParameters(script)` supports RDM script-editor
+`PowerShellRuntime.ParseScriptParameters(script)` supports application script-editor
 metadata without a facade reference to `System.Management.Automation.Language`.
 The supplied script is an argument to a fixed payload-local
 `Parser.ParseInput` helper and is never executed. On success the immutable DTO
@@ -500,9 +377,9 @@ text view of every output/stream channel and reports whether it is complete.
 Neither helper recreates an SMA object, parses CLIXML as a CLR graph, or treats
 display text as a typed DTO.
 
-### Replacing injected RDM data
+### Replacing injected application data
 
-Value-only scripts can migrate their former injected objects into explicit
+Value-only scripts can map application-owned input DTOs into explicit
 copied variables: for example, `FfiConnection`, `FfiCoreOptions`, and
 `FfiResult`. The caller sets input bags before invoking a session builder. A
 script may replace `FfiResult` with a scalar-only `PSCustomObject` or
@@ -513,41 +390,21 @@ same copied-only flow. The package NativeAOT contract covers this update/readbac
 flow.
 
 The old object's methods do not migrate this way. A reviewed operation that
-needs parent-side behavior must instead be a named `rdm.*` capability with
+needs parent-side behavior must instead be a named `app.*` capability with
 explicit arguments and a copied response. A script that needs a local resource
 may create it inside an opaque `PowerShellSession` and use it only through
 approved script or module commands in that same serialized session; no
 `PSSession`, `Runspace`, PowerCLI object, or resource handle is returned to the
 parent.
 
-### Exact local module identities
+### Local module roots
 
-`sessionPolicy.moduleImports` alone is not sufficient. Every declared import
-must have exactly one `sessionPolicy.moduleIdentities` entry:
-
-```json
-{
-  "name": "Example.Module",
-  "manifestPath": "Modules/Example.Module/Example.Module.psd1",
-  "version": "1.2.3",
-  "sha256": "<the same SHA-256 recorded for manifestPath in files>"
-}
-```
-
-Activation verifies the manifest file hash before CoreCLR starts, requires the
-identity manifest to reside beneath a declared `modulePaths` root, and reads its
-literal `ModuleVersion` without executing it. Session creation resolves a
-requested module name only through this identity and imports the exact pinned
-manifest, not a name found by ambient `PSModulePath`. Missing, duplicate,
-outside-root, mismatched-hash, or mismatched-version identities are rejected
-with `SessionPolicyViolation` or a manifest activation error.
-
-This is a local module identity contract, not a module sandbox or a PowerCLI
-claim. The complete-closure requirement hashes every regular module file, and
-`win-x64` local built-in module smoke coverage is the only
-validated configuration. Do not enable PowerCLI, arbitrary module
-initialization, native loading, or remoting modules until their full payload
-dependency closure has separately passed this contract.
+Session configuration accepts module names and absolute existing module roots.
+Imports are resolved only beneath those roots, and the payload-local
+authorization manager permits external scripts only from those locations. This
+is not a module sandbox or a PowerCLI claim. Do not enable PowerCLI, arbitrary
+module initialization, native loading, or remoting modules until their runtime
+behavior has passed a separate application-owned validation.
 
 ### Declarative recipes and result schemas
 
@@ -567,21 +424,19 @@ deserializer.
 `PowerShellCommandPolicy` is an opt-in application guardrail for recipe command
 allowlists, parameter counts, script opt-in, and source size. It is explicitly
 not a PowerShell sandbox: once arbitrary script source is allowed, that script
-retains the full authority of its payload session. Applications must keep their
-real authorization, payload manifest, session policy, and capability decisions
-outside this advisory policy.
+retains the full authority of its payload session. Applications must keep their real authorization and capability decisions outside
+this advisory policy.
 
 ### Payload-owned module adapter contract
 
-A future adapter for a specific reviewed module must be payload-owned and
-manifest-pinned: its exact `.psd1`, version, hash, dependencies, and native
-closure belong in the selected payload manifest. Its public contract may accept
-and return only documented copied `PowerShellValue` DTOs and may use only
-explicitly registered capability names. It must prove its target payload and
-module closure through a NativeAOT package smoke before being advertised.
+A future adapter for a specific reviewed module must be application-owned. Its
+public contract may accept and return only documented copied `PowerShellValue`
+DTOs and may use only explicitly registered capability names. It must prove its
+target payload and module behavior through a NativeAOT package smoke before
+being advertised.
 
 This is not a generic module bridge. It cannot expose PowerCLI CLR objects,
-remoting/PSRP, credentials, live RDM objects, arbitrary callbacks, or an
+remoting/PSRP, credentials, live application objects, arbitrary callbacks, or an
 ambient `PSModulePath`. Any such behavior requires a separately designed
 boundary rather than an exception to this contract.
 
@@ -593,8 +448,8 @@ General string values remain ordinary DTO data and must never be used as a
 secret transport. Passing a credential to an arbitrary script would let that
 script write, encode, or throw it into ordinary result/error streams. A
 one-time ABI buffer does not solve that exfiltration problem, and accepting one
-would make the facade's redaction and zeroization guarantees false. RDM flows
-that require `PSCredential` remain on the existing SMA/process implementation.
+would make the facade's redaction and zeroization guarantees false. Applications
+that require `PSCredential` must use a separately designed boundary.
 
 The threat model assumes the invoked payload script, a module it loads, and
 PowerShell formatting/error behavior are all capable of observing a bound
@@ -610,8 +465,8 @@ places a password in a general string or script.
 
 Capability RPC is feature-gated, disabled by default, and deliberately narrow.
 `PowerShellRuntime.RegisterCapabilities` copies an immutable set of at most 16
-definitions into Rust. Each definition has a canonical lowercase `rdm.*` or
-`host.*` name, exact argument arity and value-kind schemas, allowed response
+definitions into Rust. Each definition has a canonical lowercase
+namespace-qualified name, exact argument arity and value-kind schemas, allowed response
 kinds, permissions, input/output byte caps, and a deadline. `WithCapabilities`
 attaches one registration to one builder invocation. The payload creates the
 temporary `$DpsCapabilities` only for that invocation and removes it before the
@@ -619,7 +474,7 @@ result is returned.
 
 ```csharp
 var definition = new PowerShellCapabilityDefinition(
-    "rdm.get-connection-name",
+    "app.get-label",
     Array.Empty<PowerShellCapabilityArgumentSchema>(),
     new[] { PowerShellValueKind.String },
     PowerShellCapabilityPermission.Read,
@@ -631,7 +486,7 @@ using var capabilities = runtime.RegisterCapabilities(new[]
     new PowerShellCapabilityBinding(definition, connectionNameHandler),
 });
 using var command = session.CreatePowerShell()
-    .AddScript("$DpsCapabilities.Invoke('rdm.get-connection-name')")
+    .AddScript("$DpsCapabilities.Invoke('app.get-label')")
     .WithCapabilities(capabilities);
 PowerShellInvocationResult result = command.Invoke();
 ```
@@ -668,27 +523,23 @@ never carry a credential or secure-string response. This reuses the capability
 mechanism; there is no second callback vtable, direct console I/O, or `PSHost`
 surface.
 
-`PowerShellRdmCapabilities` provides harmless standard schemas for
-`rdm.get-connection-name`, `rdm.get-connection-display`, and
-`rdm.report-status`; callers opt in by registering handlers and no capability
-is available merely because its definition exists. For
+Applications define their own capability schemas; no application-specific
+catalog is part of this SDK. For
 `host.report-progress`, handlers can use
 `PowerShellHostInteraction.ParseProgressUpdate` to validate explicit copied
 `ActivityId`, `ParentActivityId`, activity/status text, percentage, remaining
 seconds, and completion fields. It intentionally never derives typed progress
 from a generic progress-stream display string.
 
-This remains intentionally unlike a generic `RDM`/`Core`/`connection` object
-bridge. Put copied `Result`, `Core`, and `connection` data in session
-variables. Promote only a reviewed operation, such as the example
-`rdm.get-connection-name` or `rdm.report-status`, to an enumerated capability.
-Scripts cannot call arbitrary proxy methods or obtain the original managed
-objects.
+This remains intentionally unlike a generic application-object bridge. Put
+copied input and result data in session variables. Promote only a reviewed
+operation, such as the example `app.get-label`, to an enumerated capability.
+Scripts cannot call arbitrary proxy methods or obtain original managed objects.
 
-### One-shot administrative command pilot
+### One-shot administrative command example
 
-The first additive RDM pilot is a local, no-credential `Stop-Computer` or
-`Restart-Computer` command. Use `-WhatIf` in development and CI; real reboot or
+A local, no-credential `Stop-Computer` or `Restart-Computer` command is a
+bounded one-shot example. Use `-WhatIf` in development and CI; real reboot or
 shutdown execution must require an application-owned feature flag and explicit
 operator approval.
 
@@ -749,14 +600,13 @@ prompt/credential callback, or arbitrary delegate/object bridge. Custom
 remoting and actual session pools remain permanent non-goals until a separate
 bounded architecture proves their lifecycle and concurrency semantics.
 
-Only an explicit payload root is supported. The FFI initialization path does not
-resolve `pwsh` from `PATH`. The activation manifest and its SHA-256 pin must
-come from application-controlled deployment configuration, not from the
-payload being selected.
+Direct initialization resolves `pwsh` from `PATH` by default or accepts an
+explicit payload root. The SDK does not use a payload metadata file or pin a
+PowerShell version.
 
 ## Package preview
 
-`Devolutions.MultiPwsh.Sdk` is a preview package with native assets for the
+`Devolutions.MultiPwsh.Sdk` is a `net10.0` preview package with native assets for the
 same release RIDs as `Devolutions.MultiPwsh.Cli`: `win-x64`, `win-arm64`,
 `linux-x64`, `linux-arm64`, `linux-arm`, `osx-x64`, and `osx-arm64`. The Rust
 cdylib is inert by default; consumers set a matching `RuntimeIdentifier` and
@@ -770,21 +620,10 @@ the `multi-pwsh` CLI release version. Only the `win-x64` RID currently has
 end-to-end NativeAOT payload smoke coverage; publishing another asset is not a
 claim that its payload activation topology has been validated.
 
-The package includes the optional hash-pinned activation template
-`contentFiles/any/any/devolutions-pwsh-payload.manifest.template.json` as a
-schema template only. When opting into verified staging, replace every placeholder after installing
-the external payload, write the completed manifest outside an immutable
-PowerShell installation when needed, hash the final manifest bytes, and store
-that hash in the application's protected deployment configuration. Do not ship
-the template as a trusted manifest and do not rely on a file merely being
-present.
+### Deployment and rollout contract
 
-### RDM packaging and rollout contract
-
-The RDM caller must opt in to `win-x64` native staging, deploy the selected
-PowerShell payload and every approved module separately, produce a completed
-hash-pinned manifest, and pass the manifest path and SHA-256 through
-application-controlled configuration. The RDM application must not add a
+The application must opt in to `win-x64` native staging, deploy the selected
+PowerShell payload and any selected modules separately. The application must not add a
 transitive `System.Management.Automation`, `Microsoft.PowerShell.SDK`, or
 payload runtime asset to the NativeAOT facade path. Activation reports a
 deterministic incompatibility if another selected payload/runtime already owns
@@ -792,19 +631,18 @@ the process.
 
 `win-arm64`, Linux, and macOS have packaged native assets but remain unvalidated
 for payload activation and must not be advertised as supported until each has a
-real NativeAOT activation smoke test. The current module identity smoke test covers only exact
-manifest-pinned local built-in modules; it does not prove PowerCLI or binary
-module support.
+real NativeAOT activation smoke test. Current coverage does not prove PowerCLI
+or binary module support.
 
-Adopt this as an additive RDM feature-flagged pilot:
+   Adopt this as an additive application feature-flagged deployment:
 
-1. Start with `RemoteToolsManager` one-shot local administrative commands in
-   safe `-WhatIf`/mocked contract tests.
-2. Move value-only custom resolver and script flows only after their state fits
-   copied variables and their credential requirement is absent.
+   1. Start with one-shot local administrative commands in safe
+   `-WhatIf`/mocked contract tests.
+   2. Move value-only resolver and script flows only after their state fits copied
+   variables and their credential requirement is absent.
 3. Add persistent approved-module local sessions only after their actual
    payload/module dependencies are exercised.
-4. Keep existing SMA-backed paths for live RDM object injection,
+   4. Keep existing SMA-backed paths for live application object injection,
    `PSObject.BaseObject`, typed generic invoke/PowerCLI, remoting, SSH/WinRM,
    and process-host scenarios.
 
@@ -830,10 +668,9 @@ cargo test -p pwsh-sdk-ffi explicit_payload_lifecycle_stress_enforces_serializat
 cargo test -p pwsh-sdk-ffi explicit_payload_increment_6_sessions_are_bounded_and_lifetime_safe -- --ignored
 
 dotnet publish dotnet/nativeaot-sample/NativeAotFfiSample.csproj -c Release
-./dotnet/nativeaot-sample/bin/Release/net8.0/win-x64/publish/NativeAotFfiSample.exe
-# Or select a payload explicitly, with an optional hash-pinned manifest:
-./dotnet/nativeaot-sample/bin/Release/net8.0/win-x64/publish/NativeAotFfiSample.exe <payload>
-./dotnet/nativeaot-sample/bin/Release/net8.0/win-x64/publish/NativeAotFfiSample.exe <payload> <manifest> <manifest-sha256>
+./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe
+# Or select a payload explicitly:
+./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe <payload>
 ```
 
 The ignored Rust test and NativeAOT sample require a real payload root containing

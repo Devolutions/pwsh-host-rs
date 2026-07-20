@@ -80,121 +80,6 @@ function Resolve-PowerShellPayloadDirectory {
     return $resolved
 }
 
-function New-PowerShellPayloadManifest {
-    param(
-        [Parameter(Mandatory)][string]$PayloadDirectory,
-        [Parameter(Mandatory)][string]$ManifestPath
-    )
-
-    $runtimeConfig = Get-Content -Path (Join-Path $PayloadDirectory 'pwsh.runtimeconfig.json') -Raw | ConvertFrom-Json
-    $dotnetFramework = @($runtimeConfig.runtimeOptions.includedFrameworks |
-        Where-Object { $_.name -eq 'Microsoft.NETCore.App' } |
-        Select-Object -First 1)
-    if ($dotnetFramework.Count -ne 1 -or [string]::IsNullOrWhiteSpace($dotnetFramework[0].version)) {
-        throw 'The PowerShell runtimeconfig does not identify Microsoft.NETCore.App.'
-    }
-
-    $hostfxrProductVersion = (Get-Item (Join-Path $PayloadDirectory 'hostfxr.dll')).VersionInfo.ProductVersion
-    $hostfxrVersion = ($hostfxrProductVersion -split '\s+')[0]
-    if ([string]::IsNullOrWhiteSpace($hostfxrVersion)) {
-        throw 'hostfxr.dll does not have a readable product version.'
-    }
-
-    $powerShellVersion = & (Join-Path $PayloadDirectory 'pwsh.exe') -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($powerShellVersion)) {
-        throw 'Unable to read the PowerShell payload version.'
-    }
-
-    $requiredFiles = @(
-        'pwsh.dll',
-        'pwsh.runtimeconfig.json',
-        'pwsh.deps.json',
-        'System.Management.Automation.dll',
-        'hostfxr.dll',
-        'coreclr.dll')
-    foreach ($relativePath in $requiredFiles) {
-        $fullPath = Join-Path $PayloadDirectory $relativePath
-        if (-not (Test-Path $fullPath -PathType Leaf)) {
-            throw "The PowerShell payload is missing required manifest file: $relativePath"
-        }
-    }
-
-    $files = @(
-        Get-ChildItem -LiteralPath $PayloadDirectory -Recurse -Force | ForEach-Object {
-            if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                throw "The PowerShell payload contains a symlink/reparse point that this generator does not permit: $($_.FullName)"
-            }
-            if (-not $_.PSIsContainer) {
-                $relativePath = [IO.Path]::GetRelativePath($PayloadDirectory, $_.FullName) -replace '\\', '/'
-                [ordered]@{
-                    path = $relativePath
-                    sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-                }
-            }
-        } | Sort-Object { $_.path }
-    )
-    $fileHashes = @{}
-    foreach ($file in $files) {
-        $fileHashes[$file.path] = $file.sha256
-    }
-    $moduleIdentities = @(
-        foreach ($name in @('Microsoft.PowerShell.Security', 'Microsoft.PowerShell.Utility')) {
-            $relativePath = "Modules/$name/$name.psd1"
-            $fullPath = Join-Path $PayloadDirectory ($relativePath -replace '/', [System.IO.Path]::DirectorySeparatorChar)
-            if (-not (Test-Path $fullPath -PathType Leaf)) {
-                throw "The PowerShell payload is missing required module manifest: $relativePath"
-            }
-            $moduleManifest = Import-PowerShellDataFile -Path $fullPath
-            if ($null -eq $moduleManifest.ModuleVersion) {
-                throw "The PowerShell module manifest does not define ModuleVersion: $relativePath"
-            }
-            $sha256 = $fileHashes[$relativePath]
-            if ([string]::IsNullOrWhiteSpace($sha256)) {
-                throw "The PowerShell module manifest is not included in the complete payload file list: $relativePath"
-            }
-            [ordered]@{
-                name = $name
-                manifestPath = $relativePath
-                version = $moduleManifest.ModuleVersion.ToString()
-                sha256 = $sha256
-            }
-        }
-    )
-
-    $manifest = [ordered]@{
-        schema = 'devolutions-pwsh-payload'
-        schemaVersion = 1
-        payload = [ordered]@{
-            id = 'PowerShell'
-            version = $powerShellVersion.Trim()
-        }
-        target = [ordered]@{
-            rid = 'win-x64'
-            architecture = 'x64'
-        }
-        runtime = [ordered]@{
-            powerShellVersion = $powerShellVersion.Trim()
-            dotnetVersion = $dotnetFramework[0].version
-            hostfxrVersion = $hostfxrVersion
-            bindingsAbiVersion = 2
-            requiredBindingsFeatures = 123136
-        }
-        files = $files
-        trust = [ordered]@{
-            allowSymlinks = $false
-        }
-        sessionPolicy = [ordered]@{
-            modulePaths = @('Modules')
-            workingDirectories = @('.')
-            moduleImports = @('Microsoft.PowerShell.Security', 'Microsoft.PowerShell.Utility')
-            moduleIdentities = $moduleIdentities
-            environmentKeys = @('DPS_FFI_TEST')
-        }
-    }
-    $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path $ManifestPath -Encoding utf8
-    return (Get-FileHash -Path $ManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
-}
-
 $packageSource = (Resolve-Path $PackageSource).Path
 $package = if ([string]::IsNullOrWhiteSpace($PackageVersion)) {
     Get-ChildItem -Path $packageSource -Filter "$packageId.*.nupkg" |
@@ -225,8 +110,7 @@ try {
     $requiredPaths = @(
         'README.md',
         'buildTransitive/Devolutions.MultiPwsh.Sdk.targets',
-        'contentFiles/any/any/devolutions-pwsh-payload.manifest.template.json',
-        'lib/net8.0/Devolutions.MultiPwsh.Sdk.dll')
+        'lib/net10.0/Devolutions.MultiPwsh.Sdk.dll')
     foreach ($runtimeIdentifier in $ExpectedRuntimeIdentifiers) {
         $requiredPaths += "runtimes/$runtimeIdentifier/native/$($sdkNativeAssets[$runtimeIdentifier])"
     }
@@ -234,6 +118,13 @@ try {
         if (-not $archivePaths.Contains($requiredPath)) {
             throw "Package is missing required entry: $requiredPath"
         }
+    }
+    $retiredPayloadTemplates = @(
+        $archivePaths | Where-Object {
+            $_ -like 'contentFiles/*/devolutions-pwsh-payload*'
+        })
+    if ($retiredPayloadTemplates.Count -ne 0) {
+        throw "Package must not include retired PowerShell payload templates: $($retiredPayloadTemplates -join ', ')"
     }
 
     $nativeEntry = $archive.GetEntry('runtimes/win-x64/native/multi-pwsh-sdk.dll')
@@ -267,8 +158,6 @@ $env:NUGET_PACKAGES = $nugetCache
 
 try {
     New-Item -Path $nugetCache -ItemType Directory -Force | Out-Null
-    $manifestPath = Join-Path $workspace 'payload-manifest.json'
-    $manifestSha256 = New-PowerShellPayloadManifest -PayloadDirectory $payloadDirectory -ManifestPath $manifestPath
     $nugetConfig = Join-Path $workspace 'NuGet.Config'
     @"
 <?xml version="1.0" encoding="utf-8"?>
@@ -288,7 +177,7 @@ try {
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
   <ItemGroup>
@@ -300,7 +189,7 @@ try {
 
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $inertProject, '--configfile', $nugetConfig)
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('build', $inertProject, '--no-restore', '-c', $Configuration)
-    $inertNativeAsset = Join-Path $inertProjectDirectory "bin\$Configuration\net8.0\win-x64\multi-pwsh-sdk.dll"
+    $inertNativeAsset = Join-Path $inertProjectDirectory "bin\$Configuration\net10.0\win-x64\multi-pwsh-sdk.dll"
     if (Test-Path $inertNativeAsset -PathType Leaf) {
         throw "FFI native assets must be inert by default, but found $inertNativeAsset"
     }
@@ -312,7 +201,7 @@ try {
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishAot>true</PublishAot>
@@ -348,7 +237,7 @@ void Require(bool condition, string message)
 void VerifyCopiedValueReaders()
 {
     Guid expectedGuid = Guid.Parse("3e0a9e49-2cc4-44d0-b4ce-65fc29f5d8b1");
-    Uri expectedUri = new("https://example.test/rdm");
+    Uri expectedUri = new("https://example.test/sdk");
     DateTime expectedDateTime = new(2026, 7, 18, 10, 30, 0, DateTimeKind.Utc);
     DateTimeOffset expectedDateTimeOffset = new(2026, 7, 18, 10, 30, 0, TimeSpan.FromHours(-4));
     PowerShellValue bytes = PowerShellValue.Bytes(new byte[] { 1, 2, 3 });
@@ -495,7 +384,7 @@ void VerifyProgressUpdate()
             new KeyValuePair<string, PowerShellValue>("ActivityId", PowerShellValue.SignedInteger(7)),
             new KeyValuePair<string, PowerShellValue>("ParentActivityId", PowerShellValue.SignedInteger(-1)),
             new KeyValuePair<string, PowerShellValue>("Activity", PowerShellValue.String("Deploying")),
-            new KeyValuePair<string, PowerShellValue>("StatusDescription", PowerShellValue.String("Staging payload")),
+            new KeyValuePair<string, PowerShellValue>("StatusDescription", PowerShellValue.String("Loading payload")),
             new KeyValuePair<string, PowerShellValue>("CurrentOperation", PowerShellValue.String("Copy")),
             new KeyValuePair<string, PowerShellValue>("PercentComplete", PowerShellValue.SignedInteger(50)),
             new KeyValuePair<string, PowerShellValue>("SecondsRemaining", PowerShellValue.SignedInteger(12)),
@@ -692,13 +581,12 @@ async Task VerifySafeHandleDisposeRacesAsync()
     }
 }
 
-if (args.Length != 3)
+if (args.Length != 1)
 {
    return 2;
 }
 
-PowerShellRuntime runtime = PowerShellRuntime.Activate(
-   new PowerShellPayloadActivationOptions(args[0], args[1], args[2]));
+PowerShellRuntime runtime = PowerShellRuntime.Activate(args[0]);
 VerifyCopiedValueReaders();
 VerifyScriptParameterMetadata(runtime);
 VerifyProgressUpdate();
@@ -878,20 +766,6 @@ catch (ArgumentException)
 {
 }
 
-try
-{
-    _ = runtime.CreateSession(new PowerShellSessionOptions(
-        configuration: new PowerShellSessionConfiguration(allowedModulePaths: new[] { args[0] })));
-    return 1;
-}
-catch (PowerShellFfiException exception)
-    when (exception.Status == PowerShellFfiStatus.SessionPolicyViolation)
-{
-    Require(
-        !exception.Message.Contains(args[0], StringComparison.OrdinalIgnoreCase),
-        "Session-policy diagnostics leaked a supplied path.");
-}
-
 var sessionConfiguration = new PowerShellSessionConfiguration(
     initialVariables: new Dictionary<string, PowerShellValue>
     {
@@ -923,7 +797,7 @@ if (sessionResult.Output.Records.Count != 5 ||
     sessionResult.Output.Records[0].DisplayText != "session-marker" ||
     sessionResult.Output.Records[1].DisplayText != "7" ||
     sessionResult.Output.Records[2].DisplayText != "session-environment" ||
-string.Equals(sessionResult.Output.Records[3].DisplayText, args[0], StringComparison.OrdinalIgnoreCase) ||
+!string.Equals(sessionResult.Output.Records[3].DisplayText, args[0], StringComparison.OrdinalIgnoreCase) ||
 !File.Exists(Path.Combine(sessionResult.Output.Records[3].DisplayText, "pwsh.dll")) ||
 sessionResult.Output.Records[4].DisplayText != "Stop" ||
     moduleResult.Output.Records.Count != 1 ||
@@ -935,28 +809,35 @@ sessionResult.Output.Records[4].DisplayText != "Stop" ||
     return 1;
 }
 
-PowerShellCapabilityDefinition connectionNameDefinition = PowerShellRdmCapabilities.GetConnectionName;
+PowerShellCapabilityDefinition labelDefinition = new(
+    "example.get-label",
+    Array.Empty<PowerShellCapabilityArgumentSchema>(),
+    new[] { PowerShellValueKind.String },
+    PowerShellCapabilityPermission.Read,
+    maximumInputBytes: 64,
+    maximumOutputBytes: 1024,
+    deadline: TimeSpan.FromSeconds(5));
 using (PowerShellCapabilitySet capabilities = runtime.RegisterCapabilities(new[]
 {
-    new PowerShellCapabilityBinding(connectionNameDefinition, new ConnectionNameCapability()),
+    new PowerShellCapabilityBinding(labelDefinition, new LabelCapability()),
 }))
 using (PowerShell capabilityPowerShell = session.CreatePowerShell())
 {
     PowerShellInvocationResult capabilityResult = capabilityPowerShell
-        .AddScript("`$DpsCapabilities.Invoke('rdm.get-connection-name')")
+        .AddScript("`$DpsCapabilities.Invoke('example.get-label')")
         .WithCapabilities(capabilities)
         .Invoke();
     Require(
         capabilityResult.Output.Records.Count == 1 &&
-        capabilityResult.Output.Records[0].DisplayText == "nativeaot-connection",
+        capabilityResult.Output.Records[0].DisplayText == "nativeaot-label",
         "The bounded capability callback did not round-trip through the payload bridge.");
 }
 try
 {
     using PowerShellCapabilitySet duplicateCapabilities = runtime.RegisterCapabilities(new[]
     {
-        new PowerShellCapabilityBinding(connectionNameDefinition, new ConnectionNameCapability()),
-        new PowerShellCapabilityBinding(connectionNameDefinition, new ConnectionNameCapability()),
+        new PowerShellCapabilityBinding(labelDefinition, new LabelCapability()),
+        new PowerShellCapabilityBinding(labelDefinition, new LabelCapability()),
     });
     return 1;
 }
@@ -967,12 +848,12 @@ using (PowerShell unknownCapabilityPowerShell = session.CreatePowerShell())
 {
     using PowerShellCapabilitySet unknownCapabilities = runtime.RegisterCapabilities(new[]
     {
-        new PowerShellCapabilityBinding(connectionNameDefinition, new ConnectionNameCapability()),
+        new PowerShellCapabilityBinding(labelDefinition, new LabelCapability()),
     });
     try
     {
         unknownCapabilityPowerShell
-            .AddScript("`$DpsCapabilities.Invoke('rdm.unknown')")
+            .AddScript("`$DpsCapabilities.Invoke('example.unknown')")
             .WithCapabilities(unknownCapabilities)
             .Invoke();
         return 1;
@@ -982,7 +863,7 @@ using (PowerShell unknownCapabilityPowerShell = session.CreatePowerShell())
     }
 }
 PowerShellCapabilityDefinition failingDefinition = new(
-    "rdm.fail",
+    "example.fail",
     Array.Empty<PowerShellCapabilityArgumentSchema>(),
     new[] { PowerShellValueKind.String },
     PowerShellCapabilityPermission.Read,
@@ -998,7 +879,7 @@ using (PowerShell failingCapabilityPowerShell = session.CreatePowerShell())
     try
     {
         failingCapabilityPowerShell
-            .AddScript("`$DpsCapabilities.Invoke('rdm.fail')")
+            .AddScript("`$DpsCapabilities.Invoke('example.fail')")
             .WithCapabilities(failingCapabilities)
             .Invoke();
         return 1;
@@ -1008,7 +889,7 @@ using (PowerShell failingCapabilityPowerShell = session.CreatePowerShell())
     }
 }
 PowerShellCapabilityDefinition timeoutDefinition = new(
-    "rdm.timeout",
+    "example.timeout",
     Array.Empty<PowerShellCapabilityArgumentSchema>(),
     new[] { PowerShellValueKind.String },
     PowerShellCapabilityPermission.Read,
@@ -1024,7 +905,7 @@ using (PowerShell timeoutCapabilityPowerShell = session.CreatePowerShell())
     try
     {
         timeoutCapabilityPowerShell
-            .AddScript("`$DpsCapabilities.Invoke('rdm.timeout')")
+            .AddScript("`$DpsCapabilities.Invoke('example.timeout')")
             .WithCapabilities(timeoutCapabilities)
             .Invoke();
         return 1;
@@ -1034,7 +915,7 @@ using (PowerShell timeoutCapabilityPowerShell = session.CreatePowerShell())
     }
 }
 PowerShellCapabilityDefinition reentryDefinition = new(
-    "rdm.reentry",
+    "example.reentry",
     Array.Empty<PowerShellCapabilityArgumentSchema>(),
     new[] { PowerShellValueKind.String },
     PowerShellCapabilityPermission.Read,
@@ -1048,7 +929,7 @@ using (PowerShellCapabilitySet reentryCapabilities = runtime.RegisterCapabilitie
 using (PowerShell reentryCapabilityPowerShell = session.CreatePowerShell())
 {
     PowerShellInvocationResult reentryResult = reentryCapabilityPowerShell
-        .AddScript("`$DpsCapabilities.Invoke('rdm.reentry')")
+        .AddScript("`$DpsCapabilities.Invoke('example.reentry')")
         .WithCapabilities(reentryCapabilities)
         .Invoke();
     Require(
@@ -1057,7 +938,7 @@ using (PowerShell reentryCapabilityPowerShell = session.CreatePowerShell())
         "A capability handler re-entered the FFI instead of receiving backpressure.");
 }
 PowerShellCapabilityDefinition cancelledDefinition = new(
-    "rdm.wait-for-cancellation",
+    "example.wait-for-cancellation",
     Array.Empty<PowerShellCapabilityArgumentSchema>(),
     new[] { PowerShellValueKind.Null },
     PowerShellCapabilityPermission.Read,
@@ -1071,7 +952,7 @@ using (PowerShellCapabilitySet cancelledCapabilities = runtime.RegisterCapabilit
 }))
 using (PowerShell cancelledCapabilityPowerShell = session.CreatePowerShell())
 using (PowerShellInvocationOperation cancelledCapabilityOperation = cancelledCapabilityPowerShell
-    .AddScript("`$DpsCapabilities.Invoke('rdm.wait-for-cancellation')")
+    .AddScript("`$DpsCapabilities.Invoke('example.wait-for-cancellation')")
     .WithCapabilities(cancelledCapabilities)
     .BeginInvoke())
 {
@@ -1308,20 +1189,20 @@ await VerifySafeHandleDisposeRacesAsync();
 Console.WriteLine("FFI package consumer: Success");
 return 0;
 
-sealed class ConnectionNameCapability : IPowerShellCapabilityHandler
+sealed class LabelCapability : IPowerShellCapabilityHandler
 {
     public PowerShellValue Invoke(
         PowerShellCapabilityInvocation invocation,
         IReadOnlyList<PowerShellValue> arguments)
     {
-        if (invocation.Definition.Name != "rdm.get-connection-name" ||
+        if (invocation.Definition.Name != "example.get-label" ||
             arguments.Count != 0 ||
             invocation.CancellationToken.IsCancellationRequested)
         {
             throw new InvalidOperationException("Capability contract was not preserved.");
         }
 
-        return PowerShellValue.String("nativeaot-connection");
+        return PowerShellValue.String("nativeaot-label");
     }
 }
 
@@ -1393,7 +1274,7 @@ sealed class CancellableCapability : IPowerShellCapabilityHandler, IDisposable
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $consumerProject, '--configfile', $nugetConfig)
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('publish', $consumerProject, '--no-restore', '-c', $Configuration)
 
-    $publishDirectory = Join-Path $consumerDirectory "bin\$Configuration\net8.0\win-x64\publish"
+    $publishDirectory = Join-Path $consumerDirectory "bin\$Configuration\net10.0\win-x64\publish"
     $consumerExe = Join-Path $publishDirectory 'FfiPackageConsumer.exe'
     $nativeAsset = Join-Path $publishDirectory 'multi-pwsh-sdk.dll'
     if (-not (Test-Path $consumerExe -PathType Leaf) -or -not (Test-Path $nativeAsset -PathType Leaf)) {
@@ -1406,7 +1287,7 @@ sealed class CancellableCapability : IPowerShellCapabilityHandler, IDisposable
         throw "The packaged SDK native asset version metadata does not match multi-pwsh $multiPwshVersion."
     }
 
-    Invoke-CheckedCommand -FilePath $consumerExe -ArgumentList @($payloadDirectory, $manifestPath, $manifestSha256)
+    Invoke-CheckedCommand -FilePath $consumerExe -ArgumentList @($payloadDirectory)
 }
 finally {
     if ($null -eq $oldNugetPackages) {

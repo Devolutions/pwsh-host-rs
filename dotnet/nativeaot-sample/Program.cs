@@ -6,29 +6,20 @@ using System.Threading;
 using Devolutions.PowerShell.Ffi;
 
 PowerShellRuntime runtime;
-PowerShellPayloadTrustPolicy expectedTrustPolicy;
 switch (args.Length)
 {
     case 0:
         runtime = PowerShellRuntime.Activate();
-        expectedTrustPolicy = PowerShellPayloadTrustPolicy.Direct;
         break;
     case 1:
         runtime = PowerShellRuntime.Activate(args[0]);
-        expectedTrustPolicy = PowerShellPayloadTrustPolicy.Direct;
-        break;
-    case 3:
-        runtime = PowerShellRuntime.Activate(
-            new PowerShellPayloadActivationOptions(args[0], args[1], args[2]));
-        expectedTrustPolicy = PowerShellPayloadTrustPolicy.HashPinnedManifest;
         break;
     default:
-        Console.Error.WriteLine("Usage: NativeAotFfiSample [payload-directory] [manifest-path manifest-sha256]");
+        Console.Error.WriteLine("Usage: NativeAotFfiSample [payload-directory]");
         return 2;
 }
 
-if (runtime.TrustPolicy != expectedTrustPolicy ||
-    !System.IO.File.Exists(System.IO.Path.Combine(runtime.PayloadDirectory, "pwsh.dll")))
+if (!System.IO.File.Exists(System.IO.Path.Combine(runtime.PayloadDirectory, "pwsh.dll")))
 {
     Console.Error.WriteLine("NativeAOT facade did not report the selected PowerShell payload.");
     return 1;

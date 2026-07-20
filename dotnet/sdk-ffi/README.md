@@ -1,6 +1,6 @@
 # Devolutions.MultiPwsh.Sdk
 
-Experimental `net8.0` NativeAOT facade for an in-process PowerShell payload
+Experimental `net10.0` NativeAOT facade for an in-process PowerShell payload
 hosted by the `multi-pwsh-sdk.dll` Rust library.
 Its public C# types remain in the `Devolutions.PowerShell.Ffi` namespace.
 
@@ -12,8 +12,7 @@ coverage. Release CI also runs a package-consumer ABI smoke on `win-x64`,
 the ABI export, and RID-specific staging, not payload activation.
 
 By default, activation locates `pwsh` on `PATH` and loads its containing
-payload directory. Supply a directory to select a payload explicitly; neither
-direct activation mode reads a manifest:
+payload directory. Supply a directory to select a payload explicitly:
 
 ```csharp
 using Devolutions.PowerShell.Ffi;
@@ -22,24 +21,8 @@ PowerShellRuntime defaultRuntime = PowerShellRuntime.Activate();
 PowerShellRuntime selectedRuntime = PowerShellRuntime.Activate(payloadDirectory);
 ```
 
-Direct activation deliberately leaves payload provenance and file integrity to
-the application. For a deployment that needs verified, race-resistant payload
-staging, opt in to hash-pinned manifest activation:
-
-```csharp
-PowerShellRuntime verifiedRuntime = PowerShellRuntime.Activate(
-    new PowerShellPayloadActivationOptions(
-        payloadDirectory,
-        manifestPath,
-        manifestSha256));
-```
-
-The manifest must use the `devolutions-pwsh-payload` schema and SHA-256-pin
-every regular file recursively beneath the selected payload root, including
-nested module dependencies. The package provides
-`contentFiles/any/any/devolutions-pwsh-payload.manifest.template.json`; it is a
-template, not a trusted manifest. Store the final manifest SHA-256 in
-application-controlled deployment configuration.
+The application controls payload provenance and file integrity. The SDK does
+not read, package, or validate a PowerShell payload manifest.
 
 Enable native-asset staging in the consuming project:
 
@@ -68,16 +51,6 @@ The facade requires native ABI v2 and obtains a bounded diagnostic from the
 specific native call that failed. Its `SafeHandle` wrapper keeps a native handle
 alive for each P/Invoke call, including concurrent disposal races. Empty
 strings are valid UTF-8 inputs; embedded NUL characters are rejected.
-
-Hash-pinned activation verifies canonical paths, no file traversal, target RID
-and architecture, manifest schema/pin, complete file closure, every declared
-file hash, PowerShell/.NET/hostfxr versions, and bindings ABI/features before
-`hostfxr` is initialized. It then copies and re-verifies the declared files in
-a fresh process-owned staging directory and loads only from that directory.
-The staging directory remains owned for process runtime lifetime; a hostile
-same-account process with filesystem access remains outside this boundary. It
-does not validate signatures. `UnsafeUntrustedLocalDevelopment` is retained only as an obsolete compatibility
-factory for unpinned-manifest activation; it is not appropriate for deployment.
 
 `PowerShellValue` is the only way to pass non-string values. It supports
 bounded primitive values, bytes, arrays, and property bags that become copied
@@ -128,11 +101,8 @@ start.
 reusable local-runspace session. `PowerShellSessionConfiguration` supplies
 copied tagged initial variables, module imports/paths, a working directory,
 environment values, and the `Default`/`Restricted` execution-policy subset.
-Hash-pinned activation allowlists module paths, working directories, import
-names, and environment keys through the manifest's `sessionPolicy`; omitted or
-empty policy lists deny that configuration. Direct activation also denies that
-extended session configuration. Paths are absolute existing
-directories, imports are names resolved beneath approved module paths, and
+Paths are absolute existing directories, imports are names resolved beneath the
+application-supplied module paths, and
 current-runspace sessions reject every configuration field. This is not a
 general `InitialSessionState` or arbitrary module-loading API. `GetSnapshot`
 and `GetEvents` are bounded polling APIs; events retain at most 32 numeric
@@ -166,7 +136,7 @@ if (session.TryGetVariable("connection", out PowerShellValue? connectionSnapshot
 `PowerShellValue` graphs and ASCII identifier names. They reject a session with
 a pending/running async invocation, and they return `UnsupportedValue` rather
 than stringifying a value that cannot be copied. Do not use these APIs for
-credentials, live RDM proxy objects, or callback objects.
+credentials, live application proxy objects, or callback objects.
 
 `PowerShellCommandRecipe` and `PowerShellScriptRecipe` provide bounded,
 declarative one-shot calls. An optional `PowerShellResultSchema` rejects output
@@ -188,9 +158,9 @@ position/pipeline flags, and `ValidatePattern`, `ValidateRange`,
 `ValidateLength`, and `ValidateCount` argument spelling. The combined output
 is capped at 32 metadata records, so it fails rather than silently truncating.
 
-`PowerShellRdmCapabilities` supplies opt-in schemas for
-`rdm.get-connection-name`, `rdm.get-connection-display`, and
-`rdm.report-status`; applications must still register their own handlers.
+Applications define their own capability schemas using lowercase,
+namespace-qualified names such as `app.get-label`; applications must still
+register their own handlers.
 `PowerShellHostInteraction.ParseProgressUpdate` validates an explicit copied
 `host.report-progress` property bag (including ID and range fields), rather
 than inferring progress from stream display text.

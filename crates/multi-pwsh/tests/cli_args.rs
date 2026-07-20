@@ -337,7 +337,6 @@ fn save_gallery_module(module_name: &str, destination: &Path) {
     let script = format!(
         "$ErrorActionPreference = 'Stop'; \
          $ProgressPreference = 'SilentlyContinue'; \
-         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted; \
          Save-Module -Name {} -Repository PSGallery -Path {} -Force",
         quote_pwsh_literal(module_name),
         quote_pwsh_literal(&destination.display().to_string())

@@ -1,7 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 
-mod payload;
-
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
@@ -14,7 +12,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use payload::{PayloadStaging, SessionPolicy, TrustPolicy, ValidationError, ValidationRequest};
 use pwsh_host::{
     find_pwsh_dir, FfiBindingError, FfiInvocationResult, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent,
     FfiSessionSnapshot, FfiSnapshotValue, HostedRuntime,
@@ -30,7 +27,6 @@ const FEATURE_COMMAND_OPTIONS: u64 = 1 << 5;
 const FEATURE_BOUNDED_INPUT: u64 = 1 << 6;
 const FEATURE_INVOCATION_METADATA: u64 = 1 << 7;
 const FEATURE_ASYNC_OPERATIONS: u64 = 1 << 8;
-const FEATURE_PAYLOAD_MANIFEST: u64 = 1 << 9;
 const FEATURE_SESSIONS: u64 = 1 << 10;
 const FEATURE_SESSION_POLLING: u64 = 1 << 11;
 const FEATURE_SESSION_POOL_REJECTION: u64 = 1 << 12;
@@ -80,12 +76,7 @@ enum Status {
     UnsupportedValue = -10,
     OperationCancelled = -11,
     OperationNotTerminal = -12,
-    PayloadManifestInvalid = -13,
-    PayloadUntrusted = -14,
-    PayloadHashMismatch = -15,
-    PayloadIncompatible = -16,
     UnsupportedCapability = -17,
-    SessionPolicyViolation = -18,
 }
 
 impl Status {
@@ -119,18 +110,6 @@ pub struct DataValue {
     _reserved: u32,
     data: *const u8,
     data_len: usize,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct PayloadActivation {
-    size: u32,
-    trust_policy: u32,
-    flags: u32,
-    _reserved: u32,
-    payload_path: Utf8Span,
-    manifest_path: Utf8Span,
-    manifest_sha256: Utf8Span,
 }
 
 #[repr(C)]
@@ -234,10 +213,7 @@ pub struct SessionPoolOptions {
 
 struct State {
     runtime: Option<Arc<HostedRuntime>>,
-    session_policy: Option<Arc<SessionPolicy>>,
     activation_source_root: Option<PathBuf>,
-    activation_identity: Option<ActivationIdentity>,
-    payload_staging: Option<PayloadStaging>,
     sessions: HashMap<u64, Arc<Session>>,
     runspace_sessions: HashMap<u64, Arc<RunspaceSession>>,
     results: HashMap<u64, Arc<InvocationResult>>,
@@ -248,16 +224,6 @@ struct State {
     next_operation_handle: u64,
     next_runspace_session_handle: u64,
     next_capability_handle: u64,
-}
-
-#[derive(Eq, PartialEq)]
-enum ActivationIdentity {
-    Direct,
-    Manifest {
-        manifest_path: PathBuf,
-        manifest_sha256: String,
-        trust_policy: TrustPolicy,
-    },
 }
 
 struct Session {
@@ -548,10 +514,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             runtime: None,
-            session_policy: None,
             activation_source_root: None,
-            activation_identity: None,
-            payload_staging: None,
             sessions: HashMap::new(),
             runspace_sessions: HashMap::new(),
             results: HashMap::new(),
@@ -883,22 +846,23 @@ fn read_capability_kind_list(kind: u32, payload: &[u8], description: &str) -> Re
 
 fn is_canonical_capability_name(value: &str) -> bool {
     let bytes = value.as_bytes();
-    if bytes.is_empty()
-        || bytes.len() > MAX_CAPABILITY_NAME_BYTES
-        || !(value.starts_with("rdm.") || value.starts_with("host."))
-    {
+    if bytes.is_empty() || bytes.len() > MAX_CAPABILITY_NAME_BYTES {
         return false;
     }
 
     let mut previous_separator = true;
+    let mut has_namespace_separator = false;
     for byte in bytes {
         let separator = matches!(*byte, b'.' | b'-');
         if !matches!(*byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-') || (separator && previous_separator) {
             return false;
         }
+        if *byte == b'.' {
+            has_namespace_separator = true;
+        }
         previous_separator = separator;
     }
-    !previous_separator
+    has_namespace_separator && !previous_separator
 }
 
 fn parse_capability_definitions(
@@ -2071,51 +2035,20 @@ where
 }
 
 #[allow(clippy::arc_with_non_send_sync)]
-fn initialize_payload(
-    payload_path: &str,
-    manifest_path: &str,
-    manifest_sha256: &str,
-    trust_policy: TrustPolicy,
-) -> Result<Status, (Status, String)> {
-    let validated = payload::validate(ValidationRequest {
-        payload_path,
-        manifest_path,
-        manifest_sha256,
-        trust_policy,
-    })
-    .map_err(validation_failure)?;
-    let source_payload_path = validated.payload_root.clone();
-    let activation_identity = ActivationIdentity::Manifest {
-        manifest_path: validated.manifest_path.clone(),
-        manifest_sha256: validated.manifest_sha256.clone(),
-        trust_policy,
-    };
-    let (payload_path, session_policy, staging) = match trust_policy {
-        TrustPolicy::RequireHashPinnedManifest => {
-            let staged = payload::stage(validated).map_err(validation_failure)?;
-            (staged.payload_root, staged.session_policy, Some(staged.staging))
-        }
-        TrustPolicy::AllowUntrustedLocalDevelopment => (validated.payload_root, validated.session_policy, None),
-    };
-    initialize_runtime(
-        source_payload_path,
-        activation_identity,
-        payload_path,
-        session_policy,
-        staging,
-    )
-}
-
-#[allow(clippy::arc_with_non_send_sync)]
 fn initialize_direct_payload(payload_path: &str) -> Result<Status, (Status, String)> {
-    let source_payload_path = payload::validate_direct_payload(payload_path).map_err(validation_failure)?;
-    initialize_runtime(
-        source_payload_path.clone(),
-        ActivationIdentity::Direct,
-        source_payload_path,
-        SessionPolicy::default(),
-        None,
-    )
+    let payload_path = fs::canonicalize(payload_path).map_err(|error| {
+        (
+            Status::InvalidArgument,
+            format!("PowerShell payload directory cannot be resolved: {}", error),
+        )
+    })?;
+    if !payload_path.is_dir() {
+        return Err((
+            Status::InvalidArgument,
+            "PowerShell payload path must be an existing directory".to_owned(),
+        ));
+    }
+    initialize_runtime(payload_path)
 }
 
 fn initialize_from_path() -> Result<Status, (Status, String)> {
@@ -2135,22 +2068,14 @@ fn initialize_from_path() -> Result<Status, (Status, String)> {
 }
 
 #[allow(clippy::arc_with_non_send_sync)]
-fn initialize_runtime(
-    source_payload_path: PathBuf,
-    activation_identity: ActivationIdentity,
-    payload_path: PathBuf,
-    session_policy: SessionPolicy,
-    staging: Option<PayloadStaging>,
-) -> Result<Status, (Status, String)> {
+fn initialize_runtime(payload_path: PathBuf) -> Result<Status, (Status, String)> {
     let mut state = match state().lock() {
         Ok(state) => state,
         Err(poisoned) => poisoned.into_inner(),
     };
 
     if let Some(runtime) = &state.runtime {
-        return if state.activation_source_root.as_ref() == Some(&source_payload_path)
-            && state.activation_identity.as_ref() == Some(&activation_identity)
-        {
+        return if state.activation_source_root.as_ref() == Some(&payload_path) {
             Ok(Status::Success)
         } else {
             let selected_path = state
@@ -2162,7 +2087,7 @@ fn initialize_runtime(
                 format!(
                     "PowerShell runtime is already initialized for {}; cannot select {}",
                     selected_path.display(),
-                    source_payload_path.display()
+                    payload_path.display()
                 ),
             ))
         };
@@ -2171,10 +2096,7 @@ fn initialize_runtime(
     let runtime =
         HostedRuntime::new_for_pwsh_dir(&payload_path).map_err(|error| (Status::HostFailure, error.to_string()))?;
     state.runtime = Some(Arc::new(runtime));
-    state.session_policy = Some(Arc::new(session_policy));
-    state.activation_source_root = Some(source_payload_path);
-    state.activation_identity = Some(activation_identity);
-    state.payload_staging = staging;
+    state.activation_source_root = Some(payload_path);
     Ok(Status::Success)
 }
 
@@ -2195,28 +2117,6 @@ fn active_payload_path() -> Result<String, (Status, String)> {
             "the initialized PowerShell payload path is not valid UTF-8".to_owned(),
         )
     })
-}
-
-fn validation_failure(error: ValidationError) -> (Status, String) {
-    let status = match error {
-        ValidationError::InvalidArgument(_) => Status::InvalidArgument,
-        ValidationError::ManifestInvalid(_) => Status::PayloadManifestInvalid,
-        ValidationError::Untrusted(_) => Status::PayloadUntrusted,
-        ValidationError::HashMismatch(_) => Status::PayloadHashMismatch,
-        ValidationError::Incompatible(_) => Status::PayloadIncompatible,
-    };
-    (status, error.message().to_owned())
-}
-
-fn parse_trust_policy(value: u32) -> Result<TrustPolicy, (Status, String)> {
-    match value {
-        0 => Ok(TrustPolicy::RequireHashPinnedManifest),
-        1 => Ok(TrustPolicy::AllowUntrustedLocalDevelopment),
-        _ => Err((
-            Status::InvalidArgument,
-            "payload activation trust policy is invalid".to_owned(),
-        )),
-    }
 }
 
 fn create_session_result() -> Result<u64, (Status, String)> {
@@ -2284,14 +2184,13 @@ struct SessionOptionsInput<'a> {
     module_imports: Vec<&'a str>,
     allowed_module_paths: Vec<&'a str>,
     working_directory: &'a str,
-    environment: Vec<(&'a str, &'a str)>,
     environment_payload: &'a [u8],
 }
 
-struct ResolvedSessionPolicy {
-    module_imports: Vec<PathBuf>,
-    module_paths: Vec<PathBuf>,
-    working_directory: Option<PathBuf>,
+struct ResolvedSessionConfiguration {
+    module_imports: Vec<String>,
+    module_paths: Vec<String>,
+    working_directory: Option<String>,
 }
 
 unsafe fn session_options_input<'a>(
@@ -2449,7 +2348,6 @@ unsafe fn session_options_input<'a>(
         module_imports,
         allowed_module_paths,
         working_directory,
-        environment,
         environment_payload,
     })
 }
@@ -2648,16 +2546,10 @@ fn create_runspace_session(options: SessionOptionsInput<'_>) -> Result<u64, (Sta
             "PowerShell runtime is not initialized".to_owned(),
         )
     })?;
-    let session_policy = state.session_policy.as_ref().cloned().ok_or_else(|| {
-        (
-            Status::NotInitialized,
-            "PowerShell payload session policy is unavailable".to_owned(),
-        )
-    })?;
-    let resolved = enforce_session_policy(&options, &session_policy)?;
-    let resolved_module_imports_payload = encode_string_array(&resolved.module_imports)?;
-    let resolved_module_paths_payload = encode_string_array(&resolved.module_paths)?;
-    let resolved_working_directory = session_path_string(resolved.working_directory.as_deref())?;
+    let resolved = resolve_session_configuration(&options)?;
+    let resolved_module_imports_payload = encode_string_array(&resolved.module_imports, "module imports")?;
+    let resolved_module_paths_payload = encode_string_array(&resolved.module_paths, "module paths")?;
+    let resolved_working_directory = resolved.working_directory.unwrap_or_default();
     let session = FfiPowerShellSession::new_for_runtime(
         runtime,
         options.runspace_mode,
@@ -2692,169 +2584,103 @@ fn create_runspace_session(options: SessionOptionsInput<'_>) -> Result<u64, (Sta
     Ok(handle)
 }
 
-fn enforce_session_policy(
+fn resolve_session_configuration(
     options: &SessionOptionsInput<'_>,
-    policy: &SessionPolicy,
-) -> Result<ResolvedSessionPolicy, (Status, String)> {
+) -> Result<ResolvedSessionConfiguration, (Status, String)> {
     let mut resolved_module_paths = Vec::with_capacity(options.allowed_module_paths.len());
-    if !options.allowed_module_paths.is_empty() {
-        if policy.module_paths.is_empty() {
+    for path in &options.allowed_module_paths {
+        let canonical = fs::canonicalize(path).map_err(|_| {
+            (
+                Status::InvalidArgument,
+                "a requested module path must be an existing directory".to_owned(),
+            )
+        })?;
+        if !canonical.is_dir() {
             return Err((
-                Status::SessionPolicyViolation,
-                "payload session policy does not permit module paths".to_owned(),
+                Status::InvalidArgument,
+                "a requested module path must be an existing directory".to_owned(),
             ));
         }
-        for path in &options.allowed_module_paths {
-            let canonical = fs::canonicalize(path).map_err(|_| {
-                (
-                    Status::SessionPolicyViolation,
-                    "a requested module path is not an approved existing directory".to_owned(),
-                )
-            })?;
-            let staged = policy.staged_module_paths.get(&canonical).ok_or_else(|| {
-                (
-                    Status::SessionPolicyViolation,
-                    "a requested module path is not approved by the payload session policy".to_owned(),
-                )
-            })?;
-            if !canonical.is_dir() || !staged.is_dir() {
-                return Err((
-                    Status::SessionPolicyViolation,
-                    "a requested module path is not approved by the payload session policy".to_owned(),
-                ));
-            }
-            resolved_module_paths.push(staged.clone());
-        }
+        resolved_module_paths.push(session_path_string(&canonical, "module path")?);
     }
     let mut resolved_module_imports = Vec::with_capacity(options.module_imports.len());
     if !options.module_imports.is_empty() {
-        if policy.module_imports.is_empty() || options.allowed_module_paths.is_empty() {
+        if options.allowed_module_paths.is_empty() {
             return Err((
-                Status::SessionPolicyViolation,
-                "payload session policy does not permit the requested module imports".to_owned(),
+                Status::InvalidArgument,
+                "module imports require one or more module paths".to_owned(),
             ));
         }
         if options
             .module_imports
             .iter()
             .any(|name| !valid_module_import_name(name))
-            || options
-                .module_imports
-                .iter()
-                .any(|name| !policy.module_imports.contains(&name.to_ascii_lowercase()))
         {
             return Err((
-                Status::SessionPolicyViolation,
-                "a requested module import is not approved by the payload session policy".to_owned(),
+                Status::InvalidArgument,
+                "a requested module import is invalid".to_owned(),
             ));
         }
-        for name in &options.module_imports {
-            let identity = policy
-                .module_identities
-                .get(&name.to_ascii_lowercase())
-                .ok_or_else(|| {
-                    (
-                        Status::SessionPolicyViolation,
-                        "a requested module import does not have an approved exact manifest identity".to_owned(),
-                    )
-                })?;
-            let is_within_requested_path = resolved_module_paths
-                .iter()
-                .any(|path| identity.manifest_path.starts_with(path));
-            if !is_within_requested_path {
-                return Err((
-                    Status::SessionPolicyViolation,
-                    "an approved module manifest is outside the requested approved module paths".to_owned(),
-                ));
-            }
-            resolved_module_imports.push(identity.manifest_path.clone());
-        }
+        resolved_module_imports.extend(options.module_imports.iter().map(|name| (*name).to_owned()));
     }
     let resolved_working_directory = if !options.working_directory.is_empty() {
         let canonical = fs::canonicalize(options.working_directory).map_err(|_| {
             (
-                Status::SessionPolicyViolation,
-                "the requested working directory is not an approved existing directory".to_owned(),
+                Status::InvalidArgument,
+                "the requested working directory must be an existing directory".to_owned(),
             )
         })?;
-        let staged = policy.staged_working_directories.get(&canonical).ok_or_else(|| {
-            (
-                Status::SessionPolicyViolation,
-                "the requested working directory is not approved by the payload session policy".to_owned(),
-            )
-        })?;
-        if !canonical.is_dir() || !staged.is_dir() {
+        if !canonical.is_dir() {
             return Err((
-                Status::SessionPolicyViolation,
-                "the requested working directory is not approved by the payload session policy".to_owned(),
+                Status::InvalidArgument,
+                "the requested working directory must be an existing directory".to_owned(),
             ));
         }
-        Some(staged.clone())
+        Some(session_path_string(&canonical, "working directory")?)
     } else {
         None
     };
-    if !options.environment.is_empty()
-        && (policy.environment_keys.is_empty()
-            || options
-                .environment
-                .iter()
-                .any(|(key, _)| !policy.environment_keys.contains(&key.to_ascii_lowercase())))
-    {
-        return Err((
-            Status::SessionPolicyViolation,
-            "a requested environment key is not approved by the payload session policy".to_owned(),
-        ));
-    }
-    Ok(ResolvedSessionPolicy {
+    Ok(ResolvedSessionConfiguration {
         module_imports: resolved_module_imports,
         module_paths: resolved_module_paths,
         working_directory: resolved_working_directory,
     })
 }
 
-fn session_path_string(path: Option<&Path>) -> Result<String, (Status, String)> {
-    let Some(path) = path else {
-        return Ok(String::new());
-    };
+fn session_path_string(path: &Path, description: &str) -> Result<String, (Status, String)> {
     let value = path.to_str().ok_or_else(|| {
         (
-            Status::SessionPolicyViolation,
-            "an approved working directory is not valid UTF-8".to_owned(),
+            Status::InvalidArgument,
+            format!("the requested {} is not valid UTF-8", description),
         )
     })?;
     #[cfg(windows)]
     let value = value.strip_prefix(r"\\?\").unwrap_or(value);
     if value.len() > MAX_SESSION_PATH_BYTES || value.as_bytes().contains(&0) {
         return Err((
-            Status::SessionPolicyViolation,
-            "an approved working directory exceeds its bound".to_owned(),
+            Status::InvalidArgument,
+            format!("the requested {} exceeds its bound", description),
         ));
     }
     Ok(value.to_owned())
 }
 
-fn encode_string_array(values: &[PathBuf]) -> Result<Vec<u8>, (Status, String)> {
+fn encode_string_array(values: &[String], description: &str) -> Result<Vec<u8>, (Status, String)> {
     if values.len() > MAX_SESSION_CONFIGURATION_ENTRIES {
         return Err((
             Status::InvalidArgument,
-            "PowerShell session module imports exceed their bound".to_owned(),
+            format!("PowerShell session {} exceed their bound", description),
         ));
     }
     let mut payload = Vec::with_capacity(4 + values.len() * 16);
     payload.extend_from_slice(&(values.len() as u32).to_le_bytes());
     for value in values {
-        let value = value.to_str().ok_or_else(|| {
-            (
-                Status::SessionPolicyViolation,
-                "an approved module manifest path is not valid UTF-8".to_owned(),
-            )
-        })?;
         #[cfg(windows)]
         let value = value.strip_prefix(r"\\?\").unwrap_or(value);
         if value.len() > MAX_SESSION_PATH_BYTES || value.as_bytes().contains(&0) {
             return Err((
-                Status::SessionPolicyViolation,
-                "an approved module manifest path exceeds its bound".to_owned(),
+                Status::InvalidArgument,
+                format!("PowerShell session {} contain an invalid value", description),
             ));
         }
         payload.extend_from_slice(&VALUE_KIND_STRING.to_le_bytes());
@@ -2863,8 +2689,8 @@ fn encode_string_array(values: &[PathBuf]) -> Result<Vec<u8>, (Status, String)> 
     }
     if payload.len() > MAX_VALUE_PAYLOAD_BYTES {
         return Err((
-            Status::SessionPolicyViolation,
-            "approved module identity payload exceeds the tagged-value bound".to_owned(),
+            Status::InvalidArgument,
+            format!("PowerShell session {} exceed the tagged-value bound", description),
         ));
     }
     Ok(payload)
@@ -3033,7 +2859,6 @@ fn feature_flags() -> u64 {
         | FEATURE_BOUNDED_INPUT
         | FEATURE_INVOCATION_METADATA
         | FEATURE_ASYNC_OPERATIONS
-        | FEATURE_PAYLOAD_MANIFEST
         | FEATURE_SESSIONS
         | FEATURE_SESSION_POLLING
         | FEATURE_SESSION_POOL_REJECTION
@@ -3072,47 +2897,6 @@ pub unsafe extern "C" fn multi_pwsh_initialize_utf8(payload_path: Utf8Span, resu
 #[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_initialize_from_path(result: *mut CallResult) -> i32 {
     v2_call(result, initialize_from_path)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn multi_pwsh_initialize_payload(
-    activation: *const PayloadActivation,
-    result: *mut CallResult,
-) -> i32 {
-    v2_call(result, || {
-        if activation.is_null() || (*activation).size < std::mem::size_of::<PayloadActivation>() as u32 {
-            return Err((
-                Status::InvalidArgument,
-                "payload activation structure is missing or too small".to_owned(),
-            ));
-        }
-        if (*activation).flags != 0 || (*activation)._reserved != 0 {
-            return Err((
-                Status::InvalidArgument,
-                "payload activation flags and reserved fields must be zero".to_owned(),
-            ));
-        }
-        let payload_path = utf8_span((*activation).payload_path).map_err(|_| {
-            (
-                Status::InvalidArgument,
-                "payload activation payload path must be UTF-8 without NUL".to_owned(),
-            )
-        })?;
-        let manifest_path = utf8_span((*activation).manifest_path).map_err(|_| {
-            (
-                Status::InvalidArgument,
-                "payload activation manifest path must be UTF-8 without NUL".to_owned(),
-            )
-        })?;
-        let manifest_sha256 = utf8_span((*activation).manifest_sha256).map_err(|_| {
-            (
-                Status::InvalidArgument,
-                "payload activation manifest SHA-256 must be UTF-8 without NUL".to_owned(),
-            )
-        })?;
-        let trust_policy = parse_trust_policy((*activation).trust_policy)?;
-        initialize_payload(payload_path, manifest_path, manifest_sha256, trust_policy)
-    })
 }
 
 #[no_mangle]
@@ -4351,18 +4135,18 @@ mod tests {
 
     #[test]
     fn capability_schema_parser_rejects_noncanonical_and_duplicate_definitions() {
-        let valid = encode_capability_registration(&["rdm.get-connection-name"]);
+        let valid = encode_capability_registration(&["example.get-label"]);
         let definitions = parse_capability_definitions(VALUE_KIND_PROPERTY_BAG, &valid).unwrap();
         assert_eq!(definitions.len(), 1);
-        assert!(definitions.contains_key("rdm.get-connection-name"));
+        assert!(definitions.contains_key("example.get-label"));
 
-        let duplicate = encode_capability_registration(&["rdm.get-connection-name", "rdm.get-connection-name"]);
+        let duplicate = encode_capability_registration(&["example.get-label", "example.get-label"]);
         assert!(matches!(
             parse_capability_definitions(VALUE_KIND_PROPERTY_BAG, &duplicate),
             Err((Status::InvalidArgument, _))
         ));
 
-        let noncanonical = encode_capability_registration(&["RDM.get-connection-name"]);
+        let noncanonical = encode_capability_registration(&["example"]);
         assert!(matches!(
             parse_capability_definitions(VALUE_KIND_PROPERTY_BAG, &noncanonical),
             Err((Status::InvalidArgument, _))
@@ -4407,7 +4191,6 @@ mod tests {
             | FEATURE_BOUNDED_INPUT
             | FEATURE_INVOCATION_METADATA
             | FEATURE_ASYNC_OPERATIONS
-            | FEATURE_PAYLOAD_MANIFEST
             | FEATURE_SESSIONS
             | FEATURE_SESSION_POLLING
             | FEATURE_SESSION_POOL_REJECTION
@@ -4447,42 +4230,6 @@ mod tests {
             Status::InvalidArgument.value()
         );
 
-        let mut diagnostic = [0_u8; 128];
-        let mut call_result = CallResult {
-            size: mem::size_of::<CallResult>() as u32,
-            status: 0,
-            flags: 0,
-            _reserved: 0,
-            diagnostic: diagnostic.as_mut_ptr(),
-            diagnostic_capacity: diagnostic.len(),
-            diagnostic_required: 0,
-            diagnostic_written: 0,
-        };
-        let invalid_activation = PayloadActivation {
-            size: (mem::size_of::<PayloadActivation>() - 1) as u32,
-            trust_policy: 0,
-            flags: 0,
-            _reserved: 0,
-            payload_path: Utf8Span {
-                data: std::ptr::null(),
-                len: 0,
-            },
-            manifest_path: Utf8Span {
-                data: std::ptr::null(),
-                len: 0,
-            },
-            manifest_sha256: Utf8Span {
-                data: std::ptr::null(),
-                len: 0,
-            },
-        };
-        assert_eq!(
-            unsafe { multi_pwsh_initialize_payload(&invalid_activation, &mut call_result) },
-            Status::InvalidArgument.value()
-        );
-        assert_eq!(call_result.status, Status::InvalidArgument.value());
-        assert_ne!(call_result.diagnostic_written, 0);
-
         let mut undersized_call_result = CallResult {
             size: (mem::size_of::<CallResult>() - 1) as u32,
             status: 0,
@@ -4503,6 +4250,8 @@ mod tests {
     fn v2_negative_matrix_rejects_defined_malformed_inputs_without_a_payload() {
         let mut diagnostic = [0_u8; 8];
         let mut call_result = v2_call_result(&mut diagnostic);
+        let invalid_utf8 = [0xff];
+        let nul_utf8 = [b'a', 0];
 
         assert_eq!(
             unsafe { multi_pwsh_release(u64::MAX, &mut call_result) },
@@ -4532,63 +4281,6 @@ mod tests {
         undersized_call_result.size = (mem::size_of::<CallResult>() - 1) as u32;
         assert_eq!(
             unsafe { multi_pwsh_release(u64::MAX, &mut undersized_call_result) },
-            Status::InvalidArgument.value()
-        );
-
-        let mut activation = PayloadActivation {
-            size: mem::size_of::<PayloadActivation>() as u32,
-            trust_policy: 0,
-            flags: 0,
-            _reserved: 0,
-            payload_path: Utf8Span {
-                data: std::ptr::null(),
-                len: 0,
-            },
-            manifest_path: Utf8Span {
-                data: std::ptr::null(),
-                len: 0,
-            },
-            manifest_sha256: Utf8Span {
-                data: std::ptr::null(),
-                len: 0,
-            },
-        };
-        activation.size = (mem::size_of::<PayloadActivation>() - 1) as u32;
-        assert_eq!(
-            unsafe { multi_pwsh_initialize_payload(&activation, &mut call_result) },
-            Status::InvalidArgument.value()
-        );
-        activation.size = mem::size_of::<PayloadActivation>() as u32;
-        activation.flags = 1;
-        assert_eq!(
-            unsafe { multi_pwsh_initialize_payload(&activation, &mut call_result) },
-            Status::InvalidArgument.value()
-        );
-        activation.flags = 0;
-        activation.payload_path = Utf8Span {
-            data: std::ptr::null(),
-            len: 1,
-        };
-        assert_eq!(
-            unsafe { multi_pwsh_initialize_payload(&activation, &mut call_result) },
-            Status::InvalidArgument.value()
-        );
-        let invalid_utf8 = [0xff_u8];
-        activation.payload_path = Utf8Span {
-            data: invalid_utf8.as_ptr(),
-            len: invalid_utf8.len(),
-        };
-        assert_eq!(
-            unsafe { multi_pwsh_initialize_payload(&activation, &mut call_result) },
-            Status::InvalidArgument.value()
-        );
-        let nul_utf8 = [b'x', 0];
-        activation.payload_path = Utf8Span {
-            data: nul_utf8.as_ptr(),
-            len: nul_utf8.len(),
-        };
-        assert_eq!(
-            unsafe { multi_pwsh_initialize_payload(&activation, &mut call_result) },
             Status::InvalidArgument.value()
         );
 
@@ -4741,32 +4433,6 @@ mod tests {
 
     #[test]
     #[ignore = "requires PWSH_FFI_PAYLOAD to be an explicit PowerShell payload directory"]
-    fn untrusted_local_development_requires_explicit_opt_in() {
-        let payload = std::env::var("PWSH_FFI_PAYLOAD")
-            .expect("PWSH_FFI_PAYLOAD must name an explicit PowerShell payload directory");
-        let (manifest_path, _) = payload::create_test_manifest(&PathBuf::from(&payload));
-        let manifest_path = manifest_path.to_str().unwrap();
-
-        assert!(payload::validate(ValidationRequest {
-            payload_path: &payload,
-            manifest_path,
-            manifest_sha256: "",
-            trust_policy: TrustPolicy::AllowUntrustedLocalDevelopment,
-        })
-        .is_ok());
-        assert!(matches!(
-            payload::validate(ValidationRequest {
-                payload_path: &payload,
-                manifest_path,
-                manifest_sha256: "",
-                trust_policy: TrustPolicy::RequireHashPinnedManifest,
-            }),
-            Err(ValidationError::Untrusted(_))
-        ));
-    }
-
-    #[test]
-    #[ignore = "requires PWSH_FFI_PAYLOAD to be an explicit PowerShell payload directory"]
     fn explicit_payload_round_trip_uses_the_exported_abi() {
         let payload = std::env::var("PWSH_FFI_PAYLOAD")
             .expect("PWSH_FFI_PAYLOAD must name an explicit PowerShell payload directory");
@@ -4785,14 +4451,10 @@ mod tests {
         assert_eq!(abi_info.minimum_compatible_abi_version, ABI_VERSION);
         assert_ne!(abi_info.feature_flags & FEATURE_PER_CALL_DIAGNOSTICS, 0);
         assert_ne!(abi_info.feature_flags & FEATURE_UTF8_SPANS, 0);
-        assert_ne!(abi_info.feature_flags & FEATURE_PAYLOAD_MANIFEST, 0);
-
         let payload_span = Utf8Span {
             data: payload.as_ptr(),
             len: payload.len(),
         };
-        let (manifest_path, manifest_sha256) = payload::create_test_manifest(&PathBuf::from(&payload));
-        let manifest_path = manifest_path.to_str().unwrap();
         let mut diagnostic = [0_u8; 64];
         let mut call_result = CallResult {
             size: std::mem::size_of::<CallResult>() as u32,
@@ -4805,26 +4467,7 @@ mod tests {
             diagnostic_written: 0,
         };
         assert_eq!(
-            unsafe {
-                multi_pwsh_initialize_payload(
-                    &PayloadActivation {
-                        size: std::mem::size_of::<PayloadActivation>() as u32,
-                        trust_policy: 0,
-                        flags: 0,
-                        _reserved: 0,
-                        payload_path: payload_span,
-                        manifest_path: Utf8Span {
-                            data: manifest_path.as_ptr(),
-                            len: manifest_path.len(),
-                        },
-                        manifest_sha256: Utf8Span {
-                            data: manifest_sha256.as_ptr(),
-                            len: manifest_sha256.len(),
-                        },
-                    },
-                    &mut call_result,
-                )
-            },
+            unsafe { multi_pwsh_initialize_utf8(payload_span, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(call_result.status, Status::Success.value());
@@ -5359,7 +5002,7 @@ mod tests {
             .expect("PWSH_FFI_PAYLOAD must name an explicit PowerShell payload directory");
         let mut diagnostic = [0_u8; 512];
         let mut call_result = v2_call_result(&mut diagnostic);
-        initialize_v2_trusted(&payload, &mut call_result);
+        initialize_v2(&payload, &mut call_result);
         assert_ne!(feature_flags() & FEATURE_ASYNC_OPERATIONS, 0);
 
         let success_builder = v2_create_session(&mut call_result);
@@ -5564,7 +5207,7 @@ mod tests {
             .expect("PWSH_FFI_PAYLOAD must name an explicit PowerShell payload directory");
         let mut diagnostic = [0_u8; 512];
         let mut call_result = v2_call_result(&mut diagnostic);
-        initialize_v2_trusted(&payload, &mut call_result);
+        initialize_v2(&payload, &mut call_result);
 
         let stale_builder = v2_create_session(&mut call_result);
         assert_eq!(
@@ -5899,7 +5542,7 @@ mod tests {
             .expect("PWSH_FFI_PAYLOAD must name an explicit PowerShell payload directory");
         let mut diagnostic = [0_u8; 512];
         let mut call_result = v2_call_result(&mut diagnostic);
-        initialize_v2_trusted(&payload, &mut call_result);
+        initialize_v2(&payload, &mut call_result);
         assert_ne!(feature_flags() & FEATURE_SESSIONS, 0);
         assert_ne!(feature_flags() & FEATURE_SESSION_POLLING, 0);
         assert_ne!(feature_flags() & FEATURE_SESSION_POOL_REJECTION, 0);
@@ -6428,7 +6071,7 @@ mod tests {
             .expect("PWSH_FFI_PAYLOAD must name an explicit PowerShell payload directory");
         let mut diagnostic = [0_u8; 512];
         let mut call_result = v2_call_result(&mut diagnostic);
-        initialize_v2_trusted(&payload, &mut call_result);
+        initialize_v2(&payload, &mut call_result);
         assert_ne!(feature_flags() & FEATURE_TAGGED_VALUES, 0);
         assert_ne!(feature_flags() & FEATURE_COMMAND_OPTIONS, 0);
         assert_ne!(feature_flags() & FEATURE_BOUNDED_INPUT, 0);
@@ -6716,29 +6359,13 @@ mod tests {
         }
     }
 
-    fn initialize_v2_trusted(payload: &str, call_result: &mut CallResult) {
-        let (manifest_path, manifest_sha256) = payload::create_test_manifest(&PathBuf::from(payload));
-        let manifest_path = manifest_path.to_str().unwrap();
+    fn initialize_v2(payload: &str, call_result: &mut CallResult) {
         assert_eq!(
             unsafe {
-                multi_pwsh_initialize_payload(
-                    &PayloadActivation {
-                        size: std::mem::size_of::<PayloadActivation>() as u32,
-                        trust_policy: 0,
-                        flags: 0,
-                        _reserved: 0,
-                        payload_path: Utf8Span {
-                            data: payload.as_ptr(),
-                            len: payload.len(),
-                        },
-                        manifest_path: Utf8Span {
-                            data: manifest_path.as_ptr(),
-                            len: manifest_path.len(),
-                        },
-                        manifest_sha256: Utf8Span {
-                            data: manifest_sha256.as_ptr(),
-                            len: manifest_sha256.len(),
-                        },
+                multi_pwsh_initialize_utf8(
+                    Utf8Span {
+                        data: payload.as_ptr(),
+                        len: payload.len(),
                     },
                     call_result,
                 )
