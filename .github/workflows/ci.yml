@@ -304,7 +304,7 @@ jobs:
           $multiPwshVersionMatch = Select-String -Path 'crates\multi-pwsh\Cargo.toml' -Pattern '^version = "([^"]+)"$' | Select-Object -First 1
           if ($null -eq $multiPwshVersionMatch) { throw 'Unable to read the multi-pwsh version.' }
           $multiPwshVersion = $multiPwshVersionMatch.Matches[0].Groups[1].Value
-          dotnet pack dotnet/ffi/Devolutions.MultiPwsh.Sdk.csproj -c Release `
+          dotnet pack dotnet/sdk-ffi/Devolutions.MultiPwsh.Sdk.csproj -c Release `
             -p:PackageVersion="$multiPwshVersion" `
             -o artifacts/sdk-nuget
 
@@ -379,7 +379,7 @@ jobs:
           $version = $versionMatch.Matches[0].Groups[1].Value
           $nativeLibrary = Join-Path (Resolve-Path '.') "target\ffi-release\${{ matrix.native_file }}"
 
-          dotnet pack dotnet\ffi\Devolutions.MultiPwsh.Sdk.csproj -c Release `
+          dotnet pack dotnet\sdk-ffi\Devolutions.MultiPwsh.Sdk.csproj -c Release `
               -p:PackageVersion="$version" `
               -p:PwshFfiNativeLibrary="$nativeLibrary" `
               -p:PwshFfiNativeRuntimeIdentifier="${{ matrix.runtime_id }}" `

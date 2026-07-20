@@ -687,7 +687,7 @@ jobs:
           PACKAGE_VERSION: ${{ needs.validate.outputs.release_version }}
         run: |
           $nativeStagingRoot = Resolve-Path 'sdk-stage'
-          dotnet pack dotnet\ffi\Devolutions.MultiPwsh.Sdk.csproj -c Release `
+          dotnet pack dotnet\sdk-ffi\Devolutions.MultiPwsh.Sdk.csproj -c Release `
             -p:PackageVersion="$env:PACKAGE_VERSION" `
             -p:PwshFfiNativeStagingRoot="$nativeStagingRoot" `
             -p:BuildPwshFfiNativeAsset=false `

@@ -5,12 +5,12 @@ The library receives an explicit PowerShell payload directory, loads that
 payload's `hostfxr`, initializes `pwsh.dll`, injects
 `Devolutions.PowerShell.SDK.Bindings`, and invokes its unmanaged function table.
 
-The `dotnet/ffi` facade uses only `LibraryImport`. It has no
+The `dotnet/sdk-ffi` facade uses only `LibraryImport`. It has no
 `System.Management.Automation` or `Microsoft.PowerShell.*` dependency.
 
 ## Experimental runtime boundary
 
-The `dotnet/nativeaot-ffi-sample` NativeAOT executable has been exercised on Windows x64
+The `dotnet/nativeaot-sample` NativeAOT executable has been exercised on Windows x64
 with an explicit PowerShell 7.4 payload in the **same process**. It creates a
 pipeline and receives script output through the Rust `cdylib`.
 
@@ -817,8 +817,8 @@ cargo test -p pwsh-sdk-ffi explicit_payload_async_operations_are_terminal_and_li
 cargo test -p pwsh-sdk-ffi explicit_payload_lifecycle_stress_enforces_serialization_and_lifetime_contracts -- --ignored
 cargo test -p pwsh-sdk-ffi explicit_payload_increment_6_sessions_are_bounded_and_lifetime_safe -- --ignored
 
-dotnet publish dotnet/nativeaot-ffi-sample/NativeAotFfiSample.csproj -c Release
-./dotnet/nativeaot-ffi-sample/bin/Release/net8.0/win-x64/publish/NativeAotFfiSample.exe <payload> <manifest> <manifest-sha256>
+dotnet publish dotnet/nativeaot-sample/NativeAotFfiSample.csproj -c Release
+./dotnet/nativeaot-sample/bin/Release/net8.0/win-x64/publish/NativeAotFfiSample.exe <payload> <manifest> <manifest-sha256>
 ```
 
 The ignored Rust test and NativeAOT sample require a real payload root containing

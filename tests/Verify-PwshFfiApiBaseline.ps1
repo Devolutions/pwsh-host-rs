@@ -123,11 +123,11 @@ function Assert-AbiRejected {
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$facadeProject = Join-Path $repoRoot 'dotnet\ffi\Devolutions.MultiPwsh.Sdk.csproj'
-$facadeAssembly = Join-Path $repoRoot 'dotnet\ffi\bin\Release\net8.0\Devolutions.MultiPwsh.Sdk.dll'
+$facadeProject = Join-Path $repoRoot 'dotnet\sdk-ffi\Devolutions.MultiPwsh.Sdk.csproj'
+$facadeAssembly = Join-Path $repoRoot 'dotnet\sdk-ffi\bin\Release\net8.0\Devolutions.MultiPwsh.Sdk.dll'
 $bindingsProject = Join-Path $repoRoot 'dotnet\bindings\Devolutions.PowerShell.SDK.Bindings.csproj'
 $bindingsAssembly = Join-Path $repoRoot 'dotnet\bindings\bin\Release\net8.0\Devolutions.PowerShell.SDK.Bindings.dll'
-$nativeMethodsPath = Join-Path $repoRoot 'dotnet\ffi\NativeMethods.cs'
+$nativeMethodsPath = Join-Path $repoRoot 'dotnet\sdk-ffi\NativeMethods.cs'
 $ffiBindingsPath = Join-Path $repoRoot 'dotnet\bindings\FfiBindings.cs'
 $rustBindingsPath = Join-Path $repoRoot 'crates\pwsh-host\src\bindings\ffi.rs'
 $rustFfiPath = Join-Path $repoRoot 'crates\pwsh-sdk-ffi\src\lib.rs'

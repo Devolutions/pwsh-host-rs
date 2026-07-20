@@ -10,7 +10,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\ffi\Devolutions.MultiPwsh.Sdk.csproj" />
+    <ProjectReference Include="..\sdk-ffi\Devolutions.MultiPwsh.Sdk.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
