@@ -7,7 +7,7 @@ using Devolutions.PowerShell.Ffi;
 
 if (args.Length != 3)
 {
-    Console.Error.WriteLine("Usage: FfiSample <payload-directory> <manifest-path> <manifest-sha256>");
+    Console.Error.WriteLine("Usage: NativeAotFfiSample <payload-directory> <manifest-path> <manifest-sha256>");
     return 2;
 }
 
