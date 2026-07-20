@@ -77,7 +77,7 @@
   <Target Name="BuildPwshFfiNativeAsset"
           BeforeTargets="GenerateNuspec"
           Condition="'$(BuildPwshFfiNativeAsset)' != 'false' and '$(PwshFfiNativeStagingRoot)' == ''">
-    <Exec Command="cargo build --profile $(PwshFfiCargoProfile) -p devolutions-pwsh-ffi"
+    <Exec Command="cargo build --profile $(PwshFfiCargoProfile) -p pwsh-sdk-ffi"
           WorkingDirectory="$(RepositoryRoot)"
           EnvironmentVariables="RUSTFLAGS=$(PwshFfiRustFlags)" />
   </Target>

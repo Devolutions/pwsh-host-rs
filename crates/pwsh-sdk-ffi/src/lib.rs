@@ -1762,7 +1762,7 @@ fn start_operation(handle: u64) -> Result<u64, (Status, String)> {
     };
 
     if std::thread::Builder::new()
-        .name("devolutions-pwsh-ffi-operation".to_owned())
+        .name("pwsh-sdk-ffi-operation".to_owned())
         .spawn({
             let operation = Arc::clone(&operation);
             move || run_operation(operation)

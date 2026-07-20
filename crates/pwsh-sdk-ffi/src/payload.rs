@@ -218,7 +218,7 @@ impl PayloadStaging {
             .unwrap_or(0);
         for attempt in 0..32_u64 {
             let path = parent.join(format!(
-                "devolutions-pwsh-ffi-{}-{}-{}-{}",
+                "pwsh-sdk-ffi-{}-{}-{}-{}",
                 std::process::id(),
                 timestamp,
                 NEXT_STAGING.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -1295,7 +1295,7 @@ pub fn create_test_manifest(payload_root: &Path) -> (PathBuf, String) {
         },
     });
     let manifest_directory = std::env::current_dir().unwrap().join("target").join(format!(
-        "pwsh-ffi-test-manifest-{}-{}",
+        "pwsh-sdk-ffi-test-manifest-{}-{}",
         std::process::id(),
         NEXT_MANIFEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
@@ -1316,7 +1316,7 @@ mod tests {
 
     fn fixture_root() -> PathBuf {
         let root = std::env::current_dir().unwrap().join("target").join(format!(
-            "pwsh-ffi-payload-manifest-{}-{}",
+            "pwsh-sdk-ffi-payload-manifest-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));

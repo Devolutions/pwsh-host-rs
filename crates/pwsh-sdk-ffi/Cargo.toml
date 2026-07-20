@@ -1,5 +1,5 @@
 [package]
-name = "devolutions-pwsh-ffi"
+name = "pwsh-sdk-ffi"
 version = "0.14.2"
 edition = "2018"
 license = "MIT/Apache-2.0"

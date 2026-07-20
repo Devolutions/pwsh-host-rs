@@ -109,7 +109,7 @@ jobs:
 
           multi_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/multi-pwsh/Cargo.toml | head -n 1)"
           host_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pwsh-host/Cargo.toml | head -n 1)"
-          ffi_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pwsh-ffi/Cargo.toml | head -n 1)"
+          ffi_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/pwsh-sdk-ffi/Cargo.toml | head -n 1)"
 
           if [[ -z "${multi_version}" || -z "${host_version}" || -z "${ffi_version}" ]]; then
             echo "Failed to read crate versions from Cargo.toml files." >&2
@@ -117,7 +117,7 @@ jobs:
           fi
 
           if [[ "${multi_version}" != "${host_version}" || "${multi_version}" != "${ffi_version}" ]]; then
-            echo "Crate versions do not match: multi-pwsh=${multi_version}, pwsh-host=${host_version}, pwsh-ffi=${ffi_version}" >&2
+            echo "Crate versions do not match: multi-pwsh=${multi_version}, pwsh-host=${host_version}, pwsh-sdk-ffi=${ffi_version}" >&2
             exit 1
           fi
 
@@ -272,7 +272,7 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
         run: |
-          cargo build --locked --profile ffi-release --package devolutions-pwsh-ffi --target "${{ matrix.target }}"
+          cargo build --locked --profile ffi-release --package pwsh-sdk-ffi --target "${{ matrix.target }}"
 
       - name: Package artifacts
         if: ${{ !contains(matrix.target, 'windows-msvc') }}

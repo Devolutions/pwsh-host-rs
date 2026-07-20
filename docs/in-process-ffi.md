@@ -1,6 +1,6 @@
 # In-process PowerShell FFI experiment
 
-`pwsh-host` can be exposed through the `devolutions-pwsh-ffi` Rust `cdylib`.
+`pwsh-host` can be exposed through the `pwsh-sdk-ffi` Rust `cdylib`.
 The library receives an explicit PowerShell payload directory, loads that
 payload's `hostfxr`, initializes `pwsh.dll`, injects
 `Devolutions.PowerShell.SDK.Bindings`, and invokes its unmanaged function table.
@@ -812,13 +812,13 @@ bindings assembly:
 
 ```powershell
 dotnet build dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj -c Release
-cargo test -p devolutions-pwsh-ffi --all-targets
+cargo test -p pwsh-sdk-ffi --all-targets
 
 $env:PWSH_FFI_PAYLOAD = 'C:\Program Files\PowerShell\7'
-cargo test -p devolutions-pwsh-ffi explicit_payload_round_trip_uses_the_exported_abi -- --ignored
-cargo test -p devolutions-pwsh-ffi explicit_payload_async_operations_are_terminal_and_lifetime_safe -- --ignored
-cargo test -p devolutions-pwsh-ffi explicit_payload_lifecycle_stress_enforces_serialization_and_lifetime_contracts -- --ignored
-cargo test -p devolutions-pwsh-ffi explicit_payload_increment_6_sessions_are_bounded_and_lifetime_safe -- --ignored
+cargo test -p pwsh-sdk-ffi explicit_payload_round_trip_uses_the_exported_abi -- --ignored
+cargo test -p pwsh-sdk-ffi explicit_payload_async_operations_are_terminal_and_lifetime_safe -- --ignored
+cargo test -p pwsh-sdk-ffi explicit_payload_lifecycle_stress_enforces_serialization_and_lifetime_contracts -- --ignored
+cargo test -p pwsh-sdk-ffi explicit_payload_increment_6_sessions_are_bounded_and_lifetime_safe -- --ignored
 
 dotnet publish dotnet/ffi-sample/FfiSample.csproj -c Release
 ./dotnet/ffi-sample/bin/Release/net8.0/win-x64/publish/FfiSample.exe <payload> <manifest> <manifest-sha256>

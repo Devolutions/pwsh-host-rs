@@ -296,7 +296,7 @@ jobs:
         run: |
           dotnet build dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj -c Release -p:PwshExePath="$env:PwshExePath"
           $env:PWSH_FFI_PAYLOAD = Split-Path -Parent $env:PwshExePath
-          cargo test -p devolutions-pwsh-ffi -- --ignored
+          cargo test -p pwsh-sdk-ffi -- --ignored
 
       - name: Dry-run pack NativeAOT SDK
         shell: pwsh
@@ -371,7 +371,7 @@ jobs:
       - name: Build and pack SDK native asset
         shell: pwsh
         run: |
-          cargo build --locked --profile ffi-release --package devolutions-pwsh-ffi
+          cargo build --locked --profile ffi-release --package pwsh-sdk-ffi
           if ($LASTEXITCODE -ne 0) { throw 'SDK native library build failed.' }
 
           $versionMatch = Select-String -Path 'crates\multi-pwsh\Cargo.toml' -Pattern '^version = "([^"]+)"$' | Select-Object -First 1

@@ -130,7 +130,7 @@ $bindingsAssembly = Join-Path $repoRoot 'dotnet\bindings\bin\Release\net8.0\Devo
 $nativeMethodsPath = Join-Path $repoRoot 'dotnet\ffi\NativeMethods.cs'
 $ffiBindingsPath = Join-Path $repoRoot 'dotnet\bindings\FfiBindings.cs'
 $rustBindingsPath = Join-Path $repoRoot 'crates\pwsh-host\src\bindings\ffi.rs'
-$rustFfiPath = Join-Path $repoRoot 'crates\pwsh-ffi\src\lib.rs'
+$rustFfiPath = Join-Path $repoRoot 'crates\pwsh-sdk-ffi\src\lib.rs'
 $baselinePath = Join-Path $PSScriptRoot 'PwshFfiApiBaseline.txt'
 
 & dotnet build $facadeProject -c Release --nologo

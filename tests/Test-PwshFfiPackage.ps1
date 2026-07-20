@@ -1241,7 +1241,7 @@ using (PowerShell restrictedPowerShell = restrictedSession.CreatePowerShell())
         restrictedResult.Output.Records.Count == 1 &&
         restrictedResult.Output.Records[0].DisplayText == "Restricted",
         "The restricted execution-policy subset was not applied.");
-    string unapprovedScript = Path.Combine(Path.GetTempPath(), $"devolutions-pwsh-ffi-{Guid.NewGuid():N}.ps1");
+    string unapprovedScript = Path.Combine(Path.GetTempPath(), $"pwsh-sdk-ffi-{Guid.NewGuid():N}.ps1");
     File.WriteAllText(unapprovedScript, "'unapproved external script'");
     try
     {

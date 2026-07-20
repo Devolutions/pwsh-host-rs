@@ -19,7 +19,7 @@
   </PropertyGroup>
 
   <Target Name="BuildAndStagePwshFfiNativeLibrary" BeforeTargets="Publish">
-    <Exec Command="cargo build --release -p devolutions-pwsh-ffi" WorkingDirectory="$(RepositoryRoot)" />
+    <Exec Command="cargo build --release -p pwsh-sdk-ffi" WorkingDirectory="$(RepositoryRoot)" />
   </Target>
 
   <Target Name="CopyPwshFfiNativeLibrary" AfterTargets="Publish">
