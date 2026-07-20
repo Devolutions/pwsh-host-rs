@@ -185,7 +185,7 @@ foreach ($match in [regex]::Matches($bindingsForPublicBaseline, '(?m)^\s*public 
 }
 
 $nativeMethodsSource = Get-Content -Path $nativeMethodsPath -Raw
-foreach ($match in [regex]::Matches($nativeMethodsSource, '\[LibraryImport\(LibraryName,\s*EntryPoint\s*=\s*"(?<entryPoint>dps_pwsh_[a-z0-9_]+)"\)\]')) {
+foreach ($match in [regex]::Matches($nativeMethodsSource, '\[LibraryImport\(LibraryName,\s*EntryPoint\s*=\s*"(?<entryPoint>multi_pwsh_[a-z0-9_]+)"\)\]')) {
     $actual.Add("native:$($match.Groups['entryPoint'].Value)")
 }
 
@@ -296,7 +296,7 @@ $libraryImports = @(
 )
 
 $sourceImportedExports = @(
-    [regex]::Matches($nativeMethodsSource, '\[LibraryImport\(LibraryName,\s*EntryPoint\s*=\s*"(?<entryPoint>dps_pwsh_[a-z0-9_]+)"\)\]') |
+    [regex]::Matches($nativeMethodsSource, '\[LibraryImport\(LibraryName,\s*EntryPoint\s*=\s*"(?<entryPoint>multi_pwsh_[a-z0-9_]+)"\)\]') |
         ForEach-Object { $_.Groups['entryPoint'].Value }
 )
 Assert-Sequence -Actual @($libraryImports.EntryPoint | Sort-Object) -Expected @($sourceImportedExports | Sort-Object) -Description 'Managed LibraryImport entry points'
@@ -310,9 +310,10 @@ $cdeclAttributes = [regex]::Matches($nativeMethodsSource, '\[\s*UnmanagedCallCon
 Assert-Equal -Actual $cdeclAttributes.Count -Expected $libraryImports.Count -Description 'Managed Cdecl import attribute count'
 
 $allRustExports = @(
-    [regex]::Matches($rustFfiSource, 'pub\s+(?:unsafe\s+)?extern\s+"C"\s+fn\s+(dps_pwsh_[a-z0-9_]+)\s*\(') |
+    [regex]::Matches($rustFfiSource, 'pub\s+(?:unsafe\s+)?extern\s+"C"\s+fn\s+(multi_pwsh_[a-z0-9_]+)\s*\(') |
         ForEach-Object { $_.Groups[1].Value }
 )
+Assert-Sequence -Actual @($allRustExports | Sort-Object) -Expected @($libraryImports.EntryPoint | Sort-Object) -Description 'Managed/Rust export set'
 foreach ($import in $libraryImports) {
     if ($allRustExports -notcontains $import.EntryPoint) {
         throw "Managed import '$($import.EntryPoint)' has no Rust export."

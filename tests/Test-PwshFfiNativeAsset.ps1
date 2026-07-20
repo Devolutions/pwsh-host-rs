@@ -157,13 +157,13 @@ internal static class Program
         nint library = NativeLibrary.Load(libraryPath);
         try
         {
-            nint export = NativeLibrary.GetExport(library, "dps_pwsh_get_abi_info");
+            nint export = NativeLibrary.GetExport(library, "multi_pwsh_get_abi_info");
             GetAbiInfoDelegate getAbiInfo = Marshal.GetDelegateForFunctionPointer<GetAbiInfoDelegate>(export);
             var abiInfo = new AbiInfo { Size = (uint)Marshal.SizeOf<AbiInfo>() };
             int status = getAbiInfo(ref abiInfo);
             if (status != 0)
             {
-                Console.Error.WriteLine($"dps_pwsh_get_abi_info returned {status}.");
+                Console.Error.WriteLine($"multi_pwsh_get_abi_info returned {status}.");
                 return 4;
             }
 

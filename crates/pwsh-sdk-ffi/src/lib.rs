@@ -247,7 +247,6 @@ struct State {
     next_operation_handle: u64,
     next_runspace_session_handle: u64,
     next_capability_handle: u64,
-    last_error: String,
 }
 
 struct Session {
@@ -551,7 +550,6 @@ impl Default for State {
             next_operation_handle: 1_u64 << 62,
             next_runspace_session_handle: 1_u64 << 61,
             next_capability_handle: 1_u64 << 60,
-            last_error: String::new(),
         }
     }
 }
@@ -569,15 +567,6 @@ thread_local! {
 
 fn state() -> &'static Mutex<State> {
     STATE.get_or_init(|| Mutex::new(State::default()))
-}
-
-fn fail(state: &mut State, status: Status, message: impl Into<String>) -> i32 {
-    state.last_error = message.into();
-    status.value()
-}
-
-fn clear_error(state: &mut State) {
-    state.last_error.clear();
 }
 
 unsafe fn utf8_input<'a>(ptr: *const u8, len: usize) -> Result<&'a str, Status> {
@@ -1413,22 +1402,6 @@ unsafe fn write_utf8(buffer: *mut u8, buffer_len: usize, required_len: *mut usiz
     write_bytes(buffer, buffer_len, required_len, value.as_bytes())
 }
 
-fn execute<F>(operation: F) -> i32
-where
-    F: FnOnce(&mut State) -> i32,
-{
-    match catch_unwind(AssertUnwindSafe(|| {
-        let mut state = match state().lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        operation(&mut state)
-    })) {
-        Ok(status) => status,
-        Err(_) => Status::Panic.value(),
-    }
-}
-
 unsafe fn prepare_call_result<'a>(result: *mut CallResult) -> Result<&'a mut CallResult, Status> {
     if result.is_null() || (*result).size < std::mem::size_of::<CallResult>() as u32 {
         return Err(Status::InvalidArgument);
@@ -1570,29 +1543,6 @@ where
         }
     }
     operation(&session.power_shell)
-}
-
-fn with_session<F>(handle: u64, serialize_operation: bool, operation: F) -> i32
-where
-    F: FnOnce(&FfiPowerShell) -> Result<Status, (Status, String)>,
-{
-    let result = match catch_unwind(AssertUnwindSafe(|| {
-        with_session_result(handle, serialize_operation, operation)
-    })) {
-        Ok(result) => result,
-        Err(_) => Err((
-            Status::Panic,
-            "an unexpected native panic was contained by the PowerShell FFI".to_owned(),
-        )),
-    };
-
-    execute(|state| match result {
-        Ok(status) => {
-            clear_error(state);
-            status.value()
-        }
-        Err((status, message)) => fail(state, status, message),
-    })
 }
 
 fn invoke_result(handle: u64) -> Result<u64, (Status, String)> {
@@ -3005,13 +2955,7 @@ fn validate_pool_options(options: *const SessionPoolOptions) -> Result<(), (Stat
     Ok(())
 }
 
-#[no_mangle]
-pub extern "C" fn dps_pwsh_abi_version() -> u32 {
-    ABI_VERSION
-}
-
-#[no_mangle]
-pub extern "C" fn dps_pwsh_feature_flags() -> u64 {
+fn feature_flags() -> u64 {
     FEATURE_STRUCTURED_INVOCATION_ERRORS
         | FEATURE_PER_CALL_DIAGNOSTICS
         | FEATURE_UTF8_SPANS
@@ -3032,20 +2976,20 @@ pub extern "C" fn dps_pwsh_feature_flags() -> u64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_get_abi_info(info: *mut AbiInfo) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_get_abi_info(info: *mut AbiInfo) -> i32 {
     if info.is_null() || (*info).size < std::mem::size_of::<AbiInfo>() as u32 {
         return Status::InvalidArgument.value();
     }
 
     (*info).abi_version = ABI_VERSION;
-    (*info).feature_flags = dps_pwsh_feature_flags();
+    (*info).feature_flags = feature_flags();
     (*info).minimum_compatible_abi_version = ABI_VERSION;
     (*info)._reserved = 0;
     Status::Success.value()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_initialize_utf8(payload_path: Utf8Span, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_initialize_utf8(payload_path: Utf8Span, result: *mut CallResult) -> i32 {
     v2_call(result, || {
         let payload_path = utf8_span(payload_path).map_err(|_| {
             (
@@ -3058,7 +3002,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_initialize_utf8(payload_path: Utf8Span, res
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_initialize_payload(
+pub unsafe extern "C" fn multi_pwsh_initialize_payload(
     activation: *const PayloadActivation,
     result: *mut CallResult,
 ) -> i32 {
@@ -3099,7 +3043,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_initialize_payload(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_create(handle: *mut u64, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_create(handle: *mut u64, result: *mut CallResult) -> i32 {
     v2_call(result, || {
         if handle.is_null() {
             return Err((Status::InvalidArgument, "handle output pointer is null".to_owned()));
@@ -3112,12 +3056,12 @@ pub unsafe extern "C" fn dps_pwsh_v2_create(handle: *mut u64, result: *mut CallR
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_release(handle: u64, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_release(handle: u64, result: *mut CallResult) -> i32 {
     v2_call(result, || release_session_result(handle))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_add_command_utf8(handle: u64, command: Utf8Span, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_add_command_utf8(handle: u64, command: Utf8Span, result: *mut CallResult) -> i32 {
     v2_call(result, || {
         let command = utf8_span(command)
             .map_err(|_| (Status::InvalidArgument, "command must be UTF-8 without NUL".to_owned()))?;
@@ -3131,7 +3075,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_add_command_utf8(handle: u64, command: Utf8
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_add_script_utf8(handle: u64, script: Utf8Span, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_add_script_utf8(handle: u64, script: Utf8Span, result: *mut CallResult) -> i32 {
     v2_call(result, || {
         let script =
             utf8_span(script).map_err(|_| (Status::InvalidArgument, "script must be UTF-8 without NUL".to_owned()))?;
@@ -3145,7 +3089,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_add_script_utf8(handle: u64, script: Utf8Sp
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_add_command_utf8_local(
+pub unsafe extern "C" fn multi_pwsh_add_command_utf8_local(
     handle: u64,
     command: Utf8Span,
     use_local_scope: u32,
@@ -3167,7 +3111,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_add_command_utf8_local(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_add_script_utf8_local(
+pub unsafe extern "C" fn multi_pwsh_add_script_utf8_local(
     handle: u64,
     script: Utf8Span,
     use_local_scope: u32,
@@ -3189,11 +3133,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_add_script_utf8_local(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_add_argument_utf8(
-    handle: u64,
-    argument: Utf8Span,
-    result: *mut CallResult,
-) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_add_argument_utf8(handle: u64, argument: Utf8Span, result: *mut CallResult) -> i32 {
     v2_call(result, || {
         let argument = utf8_span(argument)
             .map_err(|_| (Status::InvalidArgument, "argument must be UTF-8 without NUL".to_owned()))?;
@@ -3207,7 +3147,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_add_argument_utf8(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_add_argument_value(
+pub unsafe extern "C" fn multi_pwsh_add_argument_value(
     handle: u64,
     value: *const DataValue,
     result: *mut CallResult,
@@ -3224,7 +3164,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_add_argument_value(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_add_parameter_string_utf8(
+pub unsafe extern "C" fn multi_pwsh_add_parameter_string_utf8(
     handle: u64,
     name: Utf8Span,
     value: Utf8Span,
@@ -3253,7 +3193,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_add_parameter_string_utf8(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_add_parameter_i64(
+pub unsafe extern "C" fn multi_pwsh_add_parameter_i64(
     handle: u64,
     name: Utf8Span,
     value: i64,
@@ -3276,7 +3216,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_add_parameter_i64(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_add_parameter_value(
+pub unsafe extern "C" fn multi_pwsh_add_parameter_value(
     handle: u64,
     name: Utf8Span,
     value: *const DataValue,
@@ -3300,7 +3240,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_add_parameter_value(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_add_parameter_switch(handle: u64, name: Utf8Span, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_add_parameter_switch(handle: u64, name: Utf8Span, result: *mut CallResult) -> i32 {
     v2_call(result, || {
         let name = utf8_span(name).map_err(|_| {
             (
@@ -3318,7 +3258,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_add_parameter_switch(handle: u64, name: Utf
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_add_input_value(
+pub unsafe extern "C" fn multi_pwsh_add_input_value(
     handle: u64,
     value: *const DataValue,
     result: *mut CallResult,
@@ -3335,7 +3275,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_add_input_value(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_complete_input(handle: u64, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_complete_input(handle: u64, result: *mut CallResult) -> i32 {
     v2_call(result, || {
         with_session_result(handle, true, |session| {
             session
@@ -3347,7 +3287,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_complete_input(handle: u64, result: *mut Ca
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_reset_input(handle: u64, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_reset_input(handle: u64, result: *mut CallResult) -> i32 {
     v2_call(result, || {
         with_session_result(handle, true, |session| {
             session.reset_input().map(|_| Status::Success).map_err(managed_failure)
@@ -3356,7 +3296,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_reset_input(handle: u64, result: *mut CallR
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_add_statement(handle: u64, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_add_statement(handle: u64, result: *mut CallResult) -> i32 {
     v2_call(result, || {
         with_session_result(handle, true, |session| {
             session
@@ -3368,7 +3308,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_add_statement(handle: u64, result: *mut Cal
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_clear(handle: u64, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_clear(handle: u64, result: *mut CallResult) -> i32 {
     v2_call(result, || {
         with_session_result(handle, true, |session| {
             session.clear().map(|_| Status::Success).map_err(managed_failure)
@@ -3377,7 +3317,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_clear(handle: u64, result: *mut CallResult)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_invoke_utf8(
+pub unsafe extern "C" fn multi_pwsh_invoke_utf8(
     handle: u64,
     buffer: *mut u8,
     buffer_len: usize,
@@ -3401,7 +3341,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_invoke_utf8(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_get_invocation_error_count(
+pub unsafe extern "C" fn multi_pwsh_get_invocation_error_count(
     handle: u64,
     error_count: *mut u32,
     result: *mut CallResult,
@@ -3425,7 +3365,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_get_invocation_error_count(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_copy_invocation_error_field_utf8(
+pub unsafe extern "C" fn multi_pwsh_copy_invocation_error_field_utf8(
     handle: u64,
     error_index: u32,
     field: u32,
@@ -3465,12 +3405,12 @@ pub unsafe extern "C" fn dps_pwsh_v2_copy_invocation_error_field_utf8(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_stop(handle: u64, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_stop(handle: u64, result: *mut CallResult) -> i32 {
     v2_call(result, || stop_session_operation(handle))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_capability_register(
+pub unsafe extern "C" fn multi_pwsh_capability_register(
     registration: *const CapabilityRegistration,
     capability_handle: *mut u64,
     result: *mut CallResult,
@@ -3488,12 +3428,12 @@ pub unsafe extern "C" fn dps_pwsh_v2_capability_register(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_capability_release(capability_handle: u64, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_capability_release(capability_handle: u64, result: *mut CallResult) -> i32 {
     v2_call(result, || release_capabilities(capability_handle))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_set_capabilities(
+pub unsafe extern "C" fn multi_pwsh_set_capabilities(
     handle: u64,
     capability_handle: u64,
     result: *mut CallResult,
@@ -3502,7 +3442,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_set_capabilities(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_invoke(handle: u64, result_handle: *mut u64, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_invoke(handle: u64, result_handle: *mut u64, result: *mut CallResult) -> i32 {
     v2_call(result, || {
         if result_handle.is_null() {
             return Err((
@@ -3517,12 +3457,12 @@ pub unsafe extern "C" fn dps_pwsh_v2_invoke(handle: u64, result_handle: *mut u64
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_result_release(handle: u64, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_result_release(handle: u64, result: *mut CallResult) -> i32 {
     v2_call(result, || release_result(handle))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_result_get_info(
+pub unsafe extern "C" fn multi_pwsh_result_get_info(
     handle: u64,
     flags: *mut u32,
     sequence_count: *mut u32,
@@ -3551,7 +3491,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_result_get_info(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_result_get_metadata(
+pub unsafe extern "C" fn multi_pwsh_result_get_metadata(
     handle: u64,
     state: *mut u32,
     invocation_id: *mut u64,
@@ -3577,7 +3517,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_result_get_metadata(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_result_get_stream_info(
+pub unsafe extern "C" fn multi_pwsh_result_get_stream_info(
     handle: u64,
     stream: u32,
     record_count: *mut u32,
@@ -3613,7 +3553,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_result_get_stream_info(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_result_get_stream_record_info(
+pub unsafe extern "C" fn multi_pwsh_result_get_stream_record_info(
     handle: u64,
     stream: u32,
     record_index: u32,
@@ -3658,7 +3598,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_result_get_stream_record_info(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_result_copy_stream_record_field_utf8(
+pub unsafe extern "C" fn multi_pwsh_result_copy_stream_record_field_utf8(
     handle: u64,
     stream: u32,
     record_index: u32,
@@ -3705,7 +3645,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_result_copy_stream_record_field_utf8(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_result_get_stream_totals(
+pub unsafe extern "C" fn multi_pwsh_result_get_stream_totals(
     handle: u64,
     stream: u32,
     total_record_count: *mut u64,
@@ -3735,7 +3675,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_result_get_stream_totals(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_result_get_stream_record_projection_info(
+pub unsafe extern "C" fn multi_pwsh_result_get_stream_record_projection_info(
     handle: u64,
     stream: u32,
     record_index: u32,
@@ -3785,7 +3725,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_result_get_stream_record_projection_info(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_result_copy_stream_record_value(
+pub unsafe extern "C" fn multi_pwsh_result_copy_stream_record_value(
     handle: u64,
     stream: u32,
     record_index: u32,
@@ -3840,7 +3780,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_result_copy_stream_record_value(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_result_get_sequence_record(
+pub unsafe extern "C" fn multi_pwsh_result_get_sequence_record(
     handle: u64,
     sequence_index: u32,
     stream: *mut u32,
@@ -3889,7 +3829,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_result_get_sequence_record(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_invoke_async(
+pub unsafe extern "C" fn multi_pwsh_invoke_async(
     handle: u64,
     operation_handle: *mut u64,
     result: *mut CallResult,
@@ -3907,17 +3847,17 @@ pub unsafe extern "C" fn dps_pwsh_v2_invoke_async(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_operation_release(handle: u64, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_operation_release(handle: u64, result: *mut CallResult) -> i32 {
     v2_call(result, || release_operation(handle))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_operation_stop(handle: u64, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_operation_stop(handle: u64, result: *mut CallResult) -> i32 {
     v2_call(result, || stop_operation(handle))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_operation_poll(
+pub unsafe extern "C" fn multi_pwsh_operation_poll(
     handle: u64,
     operation_state: *mut u32,
     terminal_status: *mut i32,
@@ -3927,7 +3867,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_operation_poll(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_operation_wait(
+pub unsafe extern "C" fn multi_pwsh_operation_wait(
     handle: u64,
     timeout_milliseconds: u32,
     operation_state: *mut u32,
@@ -3940,7 +3880,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_operation_wait(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_operation_get_result(
+pub unsafe extern "C" fn multi_pwsh_operation_get_result(
     handle: u64,
     result_handle: *mut u64,
     result: *mut CallResult,
@@ -3958,7 +3898,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_operation_get_result(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_session_create(
+pub unsafe extern "C" fn multi_pwsh_session_create(
     options: *const SessionOptions,
     session_handle: *mut u64,
     result: *mut CallResult,
@@ -3976,12 +3916,12 @@ pub unsafe extern "C" fn dps_pwsh_v2_session_create(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_session_release(session_handle: u64, result: *mut CallResult) -> i32 {
+pub unsafe extern "C" fn multi_pwsh_session_release(session_handle: u64, result: *mut CallResult) -> i32 {
     v2_call(result, || release_runspace_session(session_handle))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_session_create_builder(
+pub unsafe extern "C" fn multi_pwsh_session_create_builder(
     session_handle: u64,
     builder_handle: *mut u64,
     result: *mut CallResult,
@@ -3999,7 +3939,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_session_create_builder(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_session_get_snapshot(
+pub unsafe extern "C" fn multi_pwsh_session_get_snapshot(
     session_handle: u64,
     snapshot: *mut SessionSnapshot,
     result: *mut CallResult,
@@ -4013,7 +3953,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_session_get_snapshot(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_session_get_event_info(
+pub unsafe extern "C" fn multi_pwsh_session_get_event_info(
     session_handle: u64,
     event_index: u32,
     sequence: *mut u64,
@@ -4043,7 +3983,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_session_get_event_info(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_session_set_variable(
+pub unsafe extern "C" fn multi_pwsh_session_set_variable(
     session_handle: u64,
     name: Utf8Span,
     value: *const DataValue,
@@ -4071,7 +4011,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_session_set_variable(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_session_remove_variable(
+pub unsafe extern "C" fn multi_pwsh_session_remove_variable(
     session_handle: u64,
     name: Utf8Span,
     removed: *mut u32,
@@ -4104,7 +4044,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_session_remove_variable(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_session_get_variable_snapshot(
+pub unsafe extern "C" fn multi_pwsh_session_get_variable_snapshot(
     session_handle: u64,
     name: Utf8Span,
     found: *mut u32,
@@ -4152,7 +4092,7 @@ pub unsafe extern "C" fn dps_pwsh_v2_session_get_variable_snapshot(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_v2_session_pool_create(
+pub unsafe extern "C" fn multi_pwsh_session_pool_create(
     options: *const SessionPoolOptions,
     pool_handle: *mut u64,
     result: *mut CallResult,
@@ -4171,281 +4111,6 @@ pub unsafe extern "C" fn dps_pwsh_v2_session_pool_create(
             "PowerShell session pools are intentionally unsupported: a shared in-process runspace cannot safely provide concurrent pool semantics."
                 .to_owned(),
         ))
-    })
-}
-
-#[no_mangle]
-#[allow(clippy::arc_with_non_send_sync)]
-pub unsafe extern "C" fn dps_pwsh_initialize_utf8(payload_path: *const u8, payload_path_len: usize) -> i32 {
-    let payload_path = match utf8_input(payload_path, payload_path_len) {
-        Ok(value) => value,
-        Err(_) => {
-            return execute(|state| fail(state, Status::InvalidArgument, "payload path must be UTF-8 without NUL"))
-        }
-    };
-    let initialization = catch_unwind(AssertUnwindSafe(|| initialize_unsafe_local_development(payload_path)));
-    execute(|state| match initialization {
-        Ok(Ok(status)) => {
-            clear_error(state);
-            status.value()
-        }
-        Ok(Err((status, message))) => fail(state, status, message),
-        Err(_) => fail(state, Status::Panic, "native PowerShell FFI initialization panicked"),
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_last_error_utf8(buffer: *mut u8, buffer_len: usize, required_len: *mut usize) -> i32 {
-    execute(|state| write_utf8(buffer, buffer_len, required_len, &state.last_error).value())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_create(handle: *mut u64) -> i32 {
-    execute(|state| {
-        if handle.is_null() {
-            return fail(state, Status::InvalidArgument, "handle output pointer is null");
-        }
-
-        let runtime = match &state.runtime {
-            Some(runtime) => Arc::clone(runtime),
-            None => return fail(state, Status::NotInitialized, "PowerShell runtime is not initialized"),
-        };
-        let power_shell = match FfiPowerShell::new_for_runtime(runtime) {
-            Ok(power_shell) => power_shell,
-            Err(error) => return fail(state, Status::HostFailure, error.to_string()),
-        };
-        let next_handle = state.next_handle;
-        state.next_handle = state.next_handle.checked_add(1).unwrap_or(1);
-        state.sessions.insert(
-            next_handle,
-            Arc::new(Session {
-                power_shell,
-                operation_active: Mutex::new(false),
-                runspace_session: None,
-                capability_registration: Mutex::new(None),
-                active_capability: Mutex::new(None),
-            }),
-        );
-        *handle = next_handle;
-        clear_error(state);
-        Status::Success.value()
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn dps_pwsh_release(handle: u64) -> i32 {
-    execute(|state| {
-        if state.sessions.remove(&handle).is_none() {
-            return fail(state, Status::InvalidHandle, "PowerShell handle is invalid");
-        }
-
-        clear_error(state);
-        Status::Success.value()
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_add_command_utf8(handle: u64, command: *const u8, command_len: usize) -> i32 {
-    let command = match utf8_input(command, command_len) {
-        Ok(value) => value,
-        Err(_) => return execute(|state| fail(state, Status::InvalidArgument, "command must be UTF-8 without NUL")),
-    };
-    with_session(handle, true, |session| {
-        session
-            .add_command(command)
-            .map(|_| Status::Success)
-            .map_err(managed_failure)
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_add_script_utf8(handle: u64, script: *const u8, script_len: usize) -> i32 {
-    let script = match utf8_input(script, script_len) {
-        Ok(value) => value,
-        Err(_) => return execute(|state| fail(state, Status::InvalidArgument, "script must be UTF-8 without NUL")),
-    };
-    with_session(handle, true, |session| {
-        session
-            .add_script(script)
-            .map(|_| Status::Success)
-            .map_err(managed_failure)
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_add_argument_utf8(handle: u64, argument: *const u8, argument_len: usize) -> i32 {
-    let argument = match utf8_input(argument, argument_len) {
-        Ok(value) => value,
-        Err(_) => return execute(|state| fail(state, Status::InvalidArgument, "argument must be UTF-8 without NUL")),
-    };
-    with_session(handle, true, |session| {
-        session
-            .add_argument_string(argument)
-            .map(|_| Status::Success)
-            .map_err(managed_failure)
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_add_parameter_string_utf8(
-    handle: u64,
-    name: *const u8,
-    name_len: usize,
-    value: *const u8,
-    value_len: usize,
-) -> i32 {
-    let name = match utf8_input(name, name_len) {
-        Ok(value) => value,
-        Err(_) => {
-            return execute(|state| {
-                fail(
-                    state,
-                    Status::InvalidArgument,
-                    "parameter name must be UTF-8 without NUL",
-                )
-            })
-        }
-    };
-    let value = match utf8_input(value, value_len) {
-        Ok(value) => value,
-        Err(_) => {
-            return execute(|state| {
-                fail(
-                    state,
-                    Status::InvalidArgument,
-                    "parameter value must be UTF-8 without NUL",
-                )
-            })
-        }
-    };
-    with_session(handle, true, |session| {
-        session
-            .add_parameter_string(name, value)
-            .map(|_| Status::Success)
-            .map_err(managed_failure)
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_add_parameter_i64(handle: u64, name: *const u8, name_len: usize, value: i64) -> i32 {
-    let name = match utf8_input(name, name_len) {
-        Ok(value) => value,
-        Err(_) => {
-            return execute(|state| {
-                fail(
-                    state,
-                    Status::InvalidArgument,
-                    "parameter name must be UTF-8 without NUL",
-                )
-            })
-        }
-    };
-    with_session(handle, true, |session| {
-        session
-            .add_parameter_long(name, value)
-            .map(|_| Status::Success)
-            .map_err(managed_failure)
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn dps_pwsh_add_statement(handle: u64) -> i32 {
-    with_session(handle, true, |session| {
-        session
-            .add_statement()
-            .map(|_| Status::Success)
-            .map_err(managed_failure)
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn dps_pwsh_clear(handle: u64) -> i32 {
-    with_session(handle, true, |session| {
-        session.clear().map(|_| Status::Success).map_err(managed_failure)
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_invoke_utf8(
-    handle: u64,
-    buffer: *mut u8,
-    buffer_len: usize,
-    required_len: *mut usize,
-) -> i32 {
-    with_session(handle, true, |session| {
-        let output = match session.invoke_to_string() {
-            Ok(output) => output,
-            Err(error) => return Err(managed_failure(error)),
-        };
-        Ok(unsafe { write_utf8(buffer, buffer_len, required_len, &output) })
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_get_invocation_error_count(handle: u64, error_count: *mut u32) -> i32 {
-    if error_count.is_null() {
-        return execute(|state| fail(state, Status::InvalidArgument, "error count output pointer is null"));
-    }
-
-    with_session(handle, true, |session| {
-        let count = session.invocation_error_count().map_err(managed_failure)?;
-        let count = u32::try_from(count).map_err(|_| {
-            (
-                Status::ManagedFailure,
-                "managed error count exceeds the ABI limit".to_owned(),
-            )
-        })?;
-        *error_count = count;
-        Ok(Status::Success)
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn dps_pwsh_copy_invocation_error_field_utf8(
-    handle: u64,
-    error_index: u32,
-    field: u32,
-    buffer: *mut u8,
-    buffer_len: usize,
-    required_len: *mut usize,
-) -> i32 {
-    let error_index = match i32::try_from(error_index) {
-        Ok(value) => value,
-        Err(_) => {
-            return execute(|state| {
-                fail(
-                    state,
-                    Status::InvalidArgument,
-                    "error index exceeds the managed ABI limit",
-                )
-            })
-        }
-    };
-    let field = match i32::try_from(field) {
-        Ok(value) => value,
-        Err(_) => {
-            return execute(|state| {
-                fail(
-                    state,
-                    Status::InvalidArgument,
-                    "error field exceeds the managed ABI limit",
-                )
-            })
-        }
-    };
-
-    with_session(handle, true, |session| {
-        let value = session
-            .invocation_error_field(error_index, field)
-            .map_err(managed_failure)?;
-        Ok(write_utf8(buffer, buffer_len, required_len, &value))
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn dps_pwsh_stop(handle: u64) -> i32 {
-    with_session(handle, false, |session| {
-        session.stop().map(|_| Status::Success).map_err(managed_failure)
     })
 }
 
@@ -4630,7 +4295,7 @@ mod tests {
         };
         let mut handle = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_create(&mut handle, &mut result) },
+            unsafe { multi_pwsh_create(&mut handle, &mut result) },
             Status::Backpressure.value()
         );
         assert_eq!(result.status, Status::Backpressure.value());
@@ -4657,8 +4322,8 @@ mod tests {
             | FEATURE_SESSION_VARIABLES
             | FEATURE_CAPABILITY_RPC;
 
-        assert_eq!(dps_pwsh_abi_version(), ABI_VERSION);
-        assert_eq!(dps_pwsh_feature_flags(), REQUIRED_FEATURES);
+        assert_eq!(ABI_VERSION, 2);
+        assert_eq!(feature_flags(), REQUIRED_FEATURES);
 
         let mut abi_info = AbiInfo {
             size: mem::size_of::<AbiInfo>() as u32,
@@ -4667,7 +4332,10 @@ mod tests {
             minimum_compatible_abi_version: 0,
             _reserved: u32::MAX,
         };
-        assert_eq!(unsafe { dps_pwsh_get_abi_info(&mut abi_info) }, Status::Success.value());
+        assert_eq!(
+            unsafe { multi_pwsh_get_abi_info(&mut abi_info) },
+            Status::Success.value()
+        );
         assert_eq!(abi_info.abi_version, ABI_VERSION);
         assert_eq!(abi_info.minimum_compatible_abi_version, ABI_VERSION);
         assert_eq!(abi_info.feature_flags, REQUIRED_FEATURES);
@@ -4681,7 +4349,7 @@ mod tests {
             _reserved: 0,
         };
         assert_eq!(
-            unsafe { dps_pwsh_get_abi_info(&mut undersized_abi_info) },
+            unsafe { multi_pwsh_get_abi_info(&mut undersized_abi_info) },
             Status::InvalidArgument.value()
         );
 
@@ -4715,7 +4383,7 @@ mod tests {
             },
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_initialize_payload(&invalid_activation, &mut call_result) },
+            unsafe { multi_pwsh_initialize_payload(&invalid_activation, &mut call_result) },
             Status::InvalidArgument.value()
         );
         assert_eq!(call_result.status, Status::InvalidArgument.value());
@@ -4732,7 +4400,7 @@ mod tests {
             diagnostic_written: 0,
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_create(std::ptr::null_mut(), &mut undersized_call_result) },
+            unsafe { multi_pwsh_create(std::ptr::null_mut(), &mut undersized_call_result) },
             Status::InvalidArgument.value()
         );
     }
@@ -4743,7 +4411,7 @@ mod tests {
         let mut call_result = v2_call_result(&mut diagnostic);
 
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(u64::MAX, &mut call_result) },
+            unsafe { multi_pwsh_release(u64::MAX, &mut call_result) },
             Status::InvalidHandle.value()
         );
         assert_eq!(call_result.status, Status::InvalidHandle.value());
@@ -4762,14 +4430,14 @@ mod tests {
             diagnostic_written: 0,
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(u64::MAX, &mut no_diagnostic_storage) },
+            unsafe { multi_pwsh_release(u64::MAX, &mut no_diagnostic_storage) },
             Status::InvalidArgument.value()
         );
 
         let mut undersized_call_result = v2_call_result(&mut diagnostic);
         undersized_call_result.size = (mem::size_of::<CallResult>() - 1) as u32;
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(u64::MAX, &mut undersized_call_result) },
+            unsafe { multi_pwsh_release(u64::MAX, &mut undersized_call_result) },
             Status::InvalidArgument.value()
         );
 
@@ -4793,13 +4461,13 @@ mod tests {
         };
         activation.size = (mem::size_of::<PayloadActivation>() - 1) as u32;
         assert_eq!(
-            unsafe { dps_pwsh_v2_initialize_payload(&activation, &mut call_result) },
+            unsafe { multi_pwsh_initialize_payload(&activation, &mut call_result) },
             Status::InvalidArgument.value()
         );
         activation.size = mem::size_of::<PayloadActivation>() as u32;
         activation.flags = 1;
         assert_eq!(
-            unsafe { dps_pwsh_v2_initialize_payload(&activation, &mut call_result) },
+            unsafe { multi_pwsh_initialize_payload(&activation, &mut call_result) },
             Status::InvalidArgument.value()
         );
         activation.flags = 0;
@@ -4808,7 +4476,7 @@ mod tests {
             len: 1,
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_initialize_payload(&activation, &mut call_result) },
+            unsafe { multi_pwsh_initialize_payload(&activation, &mut call_result) },
             Status::InvalidArgument.value()
         );
         let invalid_utf8 = [0xff_u8];
@@ -4817,7 +4485,7 @@ mod tests {
             len: invalid_utf8.len(),
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_initialize_payload(&activation, &mut call_result) },
+            unsafe { multi_pwsh_initialize_payload(&activation, &mut call_result) },
             Status::InvalidArgument.value()
         );
         let nul_utf8 = [b'x', 0];
@@ -4826,7 +4494,7 @@ mod tests {
             len: nul_utf8.len(),
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_initialize_payload(&activation, &mut call_result) },
+            unsafe { multi_pwsh_initialize_payload(&activation, &mut call_result) },
             Status::InvalidArgument.value()
         );
 
@@ -4835,12 +4503,12 @@ mod tests {
             len: 0,
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_add_script_utf8(u64::MAX, empty, &mut call_result) },
+            unsafe { multi_pwsh_add_script_utf8(u64::MAX, empty, &mut call_result) },
             Status::InvalidHandle.value()
         );
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     u64::MAX,
                     Utf8Span {
                         data: std::ptr::null(),
@@ -4853,7 +4521,7 @@ mod tests {
         );
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     u64::MAX,
                     Utf8Span {
                         data: invalid_utf8.as_ptr(),
@@ -4866,7 +4534,7 @@ mod tests {
         );
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     u64::MAX,
                     Utf8Span {
                         data: nul_utf8.as_ptr(),
@@ -4879,7 +4547,7 @@ mod tests {
         );
 
         assert_eq!(
-            unsafe { dps_pwsh_v2_add_argument_value(u64::MAX, std::ptr::null(), &mut call_result) },
+            unsafe { multi_pwsh_add_argument_value(u64::MAX, std::ptr::null(), &mut call_result) },
             Status::InvalidArgument.value()
         );
         let mut data_value = DataValue {
@@ -4891,32 +4559,32 @@ mod tests {
             data_len: invalid_utf8.len(),
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_add_argument_value(u64::MAX, &data_value, &mut call_result) },
+            unsafe { multi_pwsh_add_argument_value(u64::MAX, &data_value, &mut call_result) },
             Status::InvalidArgument.value()
         );
         data_value.size = mem::size_of::<DataValue>() as u32;
         data_value.flags = 1;
         assert_eq!(
-            unsafe { dps_pwsh_v2_add_argument_value(u64::MAX, &data_value, &mut call_result) },
+            unsafe { multi_pwsh_add_argument_value(u64::MAX, &data_value, &mut call_result) },
             Status::InvalidArgument.value()
         );
         data_value.flags = 0;
         data_value.data = std::ptr::null();
         data_value.data_len = 1;
         assert_eq!(
-            unsafe { dps_pwsh_v2_add_argument_value(u64::MAX, &data_value, &mut call_result) },
+            unsafe { multi_pwsh_add_argument_value(u64::MAX, &data_value, &mut call_result) },
             Status::InvalidArgument.value()
         );
         data_value.data = invalid_utf8.as_ptr();
         data_value.data_len = invalid_utf8.len();
         assert_eq!(
-            unsafe { dps_pwsh_v2_add_argument_value(u64::MAX, &data_value, &mut call_result) },
+            unsafe { multi_pwsh_add_argument_value(u64::MAX, &data_value, &mut call_result) },
             Status::InvalidArgument.value()
         );
         data_value.data = nul_utf8.as_ptr();
         data_value.data_len = nul_utf8.len();
         assert_eq!(
-            unsafe { dps_pwsh_v2_add_argument_value(u64::MAX, &data_value, &mut call_result) },
+            unsafe { multi_pwsh_add_argument_value(u64::MAX, &data_value, &mut call_result) },
             Status::InvalidArgument.value()
         );
 
@@ -4927,13 +4595,13 @@ mod tests {
         };
         let mut session_handle = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_create(&session_options, &mut session_handle, &mut call_result) },
+            unsafe { multi_pwsh_session_create(&session_options, &mut session_handle, &mut call_result) },
             Status::InvalidArgument.value()
         );
         session_options.size = mem::size_of::<SessionOptions>() as u32;
         session_options._reserved = 1;
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_create(&session_options, &mut session_handle, &mut call_result) },
+            unsafe { multi_pwsh_session_create(&session_options, &mut session_handle, &mut call_result) },
             Status::InvalidArgument.value()
         );
         session_options._reserved = 0;
@@ -4942,7 +4610,7 @@ mod tests {
             len: 1,
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_create(&session_options, &mut session_handle, &mut call_result) },
+            unsafe { multi_pwsh_session_create(&session_options, &mut session_handle, &mut call_result) },
             Status::InvalidArgument.value()
         );
 
@@ -4955,12 +4623,12 @@ mod tests {
         };
         let mut pool_handle = u64::MAX;
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_pool_create(&pool_options, &mut pool_handle, &mut call_result) },
+            unsafe { multi_pwsh_session_pool_create(&pool_options, &mut pool_handle, &mut call_result) },
             Status::InvalidArgument.value()
         );
         pool_options.size = mem::size_of::<SessionPoolOptions>() as u32;
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_pool_create(&pool_options, &mut pool_handle, &mut call_result) },
+            unsafe { multi_pwsh_session_pool_create(&pool_options, &mut pool_handle, &mut call_result) },
             Status::UnsupportedCapability.value()
         );
         assert_eq!(pool_handle, 0);
@@ -5015,7 +4683,10 @@ mod tests {
             minimum_compatible_abi_version: 0,
             _reserved: 0,
         };
-        assert_eq!(unsafe { dps_pwsh_get_abi_info(&mut abi_info) }, Status::Success.value());
+        assert_eq!(
+            unsafe { multi_pwsh_get_abi_info(&mut abi_info) },
+            Status::Success.value()
+        );
         assert_eq!(abi_info.abi_version, ABI_VERSION);
         assert_eq!(abi_info.minimum_compatible_abi_version, ABI_VERSION);
         assert_ne!(abi_info.feature_flags & FEATURE_PER_CALL_DIAGNOSTICS, 0);
@@ -5041,7 +4712,7 @@ mod tests {
         };
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_initialize_payload(
+                multi_pwsh_initialize_payload(
                     &PayloadActivation {
                         size: std::mem::size_of::<PayloadActivation>() as u32,
                         trust_policy: 0,
@@ -5066,7 +4737,7 @@ mod tests {
 
         let mut v2_handle = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_create(&mut v2_handle, &mut call_result) },
+            unsafe { multi_pwsh_create(&mut v2_handle, &mut call_result) },
             Status::Success.value()
         );
         let empty = Utf8Span {
@@ -5074,23 +4745,23 @@ mod tests {
             len: 0,
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_add_script_utf8(v2_handle, empty, &mut call_result) },
+            unsafe { multi_pwsh_add_script_utf8(v2_handle, empty, &mut call_result) },
             Status::Success.value()
         );
         let mut required = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke_utf8(v2_handle, std::ptr::null_mut(), 0, &mut required, &mut call_result,) },
+            unsafe { multi_pwsh_invoke_utf8(v2_handle, std::ptr::null_mut(), 0, &mut required, &mut call_result,) },
             Status::Success.value()
         );
         assert_eq!(required, 0);
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(v2_handle, &mut call_result) },
+            unsafe { multi_pwsh_release(v2_handle, &mut call_result) },
             Status::Success.value()
         );
 
         let mut immutable_builder = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_create(&mut immutable_builder, &mut call_result) },
+            unsafe { multi_pwsh_create(&mut immutable_builder, &mut call_result) },
             Status::Success.value()
         );
         let immutable_script = r#"
@@ -5105,7 +4776,7 @@ mod tests {
         "#;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     immutable_builder,
                     Utf8Span {
                         data: immutable_script.as_ptr(),
@@ -5118,7 +4789,7 @@ mod tests {
         );
         let mut immutable_result = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke(immutable_builder, &mut immutable_result, &mut call_result) },
+            unsafe { multi_pwsh_invoke(immutable_builder, &mut immutable_result, &mut call_result) },
             Status::Success.value()
         );
         assert_ne!(immutable_result, 0);
@@ -5126,7 +4797,7 @@ mod tests {
         let mut immutable_sequence_count = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_get_info(
+                multi_pwsh_result_get_info(
                     immutable_result,
                     &mut immutable_flags,
                     &mut immutable_sequence_count,
@@ -5146,7 +4817,7 @@ mod tests {
             let mut flags = 0;
             assert_eq!(
                 unsafe {
-                    dps_pwsh_v2_result_get_stream_info(
+                    multi_pwsh_result_get_stream_info(
                         immutable_result,
                         stream,
                         &mut count,
@@ -5167,7 +4838,7 @@ mod tests {
         let mut required = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_copy_stream_record_field_utf8(
+                multi_pwsh_result_copy_stream_record_field_utf8(
                     immutable_result,
                     0,
                     0,
@@ -5183,7 +4854,7 @@ mod tests {
         let mut immutable_output = vec![0_u8; required];
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_copy_stream_record_field_utf8(
+                multi_pwsh_result_copy_stream_record_field_utf8(
                     immutable_result,
                     0,
                     0,
@@ -5201,7 +4872,7 @@ mod tests {
         let mut output_dropped = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_get_stream_totals(
+                multi_pwsh_result_get_stream_totals(
                     immutable_result,
                     0,
                     &mut output_total,
@@ -5220,7 +4891,7 @@ mod tests {
         let mut scalar_projection_flags = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_get_stream_record_projection_info(
+                multi_pwsh_result_get_stream_record_projection_info(
                     immutable_result,
                     0,
                     0,
@@ -5239,7 +4910,7 @@ mod tests {
         required = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_copy_stream_record_value(
+                multi_pwsh_result_copy_stream_record_value(
                     immutable_result,
                     0,
                     0,
@@ -5257,7 +4928,7 @@ mod tests {
         let mut scalar_payload = vec![0_u8; required];
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_copy_stream_record_value(
+                multi_pwsh_result_copy_stream_record_value(
                     immutable_result,
                     0,
                     0,
@@ -5280,7 +4951,7 @@ mod tests {
         let mut property_projection_flags = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_get_stream_record_projection_info(
+                multi_pwsh_result_get_stream_record_projection_info(
                     immutable_result,
                     0,
                     1,
@@ -5301,7 +4972,7 @@ mod tests {
         required = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_copy_stream_record_value(
+                multi_pwsh_result_copy_stream_record_value(
                     immutable_result,
                     0,
                     1,
@@ -5322,7 +4993,7 @@ mod tests {
         let mut error_dropped = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_get_stream_totals(
+                multi_pwsh_result_get_stream_totals(
                     immutable_result,
                     1,
                     &mut error_total,
@@ -5336,7 +5007,7 @@ mod tests {
         let mut error_projection_flags = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_get_stream_record_projection_info(
+                multi_pwsh_result_get_stream_record_projection_info(
                     immutable_result,
                     1,
                     0,
@@ -5355,7 +5026,7 @@ mod tests {
         required = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_copy_stream_record_value(
+                multi_pwsh_result_copy_stream_record_value(
                     immutable_result,
                     1,
                     0,
@@ -5371,18 +5042,18 @@ mod tests {
         );
         assert_eq!((target_kind, required), (4, 8));
         assert_eq!(
-            unsafe { dps_pwsh_v2_clear(immutable_builder, &mut call_result) },
+            unsafe { multi_pwsh_clear(immutable_builder, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(immutable_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(immutable_builder, &mut call_result) },
             Status::Success.value()
         );
         let mut output_count_after_builder_release = 0;
         let mut output_flags_after_builder_release = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_get_stream_info(
+                multi_pwsh_result_get_stream_info(
                     immutable_result,
                     0,
                     &mut output_count_after_builder_release,
@@ -5397,7 +5068,7 @@ mod tests {
         required = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_copy_stream_record_value(
+                multi_pwsh_result_copy_stream_record_value(
                     immutable_result,
                     0,
                     1,
@@ -5416,7 +5087,7 @@ mod tests {
         required = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_copy_stream_record_field_utf8(
+                multi_pwsh_result_copy_stream_record_field_utf8(
                     immutable_result,
                     0,
                     0,
@@ -5432,7 +5103,7 @@ mod tests {
         let mut immutable_output_after_builder_release = vec![0_u8; required];
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_copy_stream_record_field_utf8(
+                multi_pwsh_result_copy_stream_record_field_utf8(
                     immutable_result,
                     0,
                     0,
@@ -5450,19 +5121,19 @@ mod tests {
             "immutable-output"
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_release(immutable_result, &mut call_result) },
+            unsafe { multi_pwsh_result_release(immutable_result, &mut call_result) },
             Status::Success.value()
         );
 
         let mut bounded_builder = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_create(&mut bounded_builder, &mut call_result) },
+            unsafe { multi_pwsh_create(&mut bounded_builder, &mut call_result) },
             Status::Success.value()
         );
         let bounded_script = "1..40 | ForEach-Object { Write-Output $_; Write-Warning $_ }";
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     bounded_builder,
                     Utf8Span {
                         data: bounded_script.as_ptr(),
@@ -5475,14 +5146,14 @@ mod tests {
         );
         let mut bounded_result = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke(bounded_builder, &mut bounded_result, &mut call_result) },
+            unsafe { multi_pwsh_invoke(bounded_builder, &mut bounded_result, &mut call_result) },
             Status::Success.value()
         );
         let mut bounded_warning_count = 0;
         let mut bounded_warning_flags = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_get_stream_info(
+                multi_pwsh_result_get_stream_info(
                     bounded_result,
                     2,
                     &mut bounded_warning_count,
@@ -5498,7 +5169,7 @@ mod tests {
         let mut bounded_output_flags = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_get_stream_info(
+                multi_pwsh_result_get_stream_info(
                     bounded_result,
                     0,
                     &mut bounded_output_count,
@@ -5511,17 +5182,17 @@ mod tests {
         assert_eq!(bounded_output_count, 32);
         assert_ne!(bounded_output_flags, 0);
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_release(bounded_result, &mut call_result) },
+            unsafe { multi_pwsh_result_release(bounded_result, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_clear(bounded_builder, &mut call_result) },
+            unsafe { multi_pwsh_clear(bounded_builder, &mut call_result) },
             Status::Success.value()
         );
         let replacement_script = "Write-Output 'stream-buffers-replaced'";
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     bounded_builder,
                     Utf8Span {
                         data: replacement_script.as_ptr(),
@@ -5534,14 +5205,14 @@ mod tests {
         );
         let mut replacement_result = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke(bounded_builder, &mut replacement_result, &mut call_result) },
+            unsafe { multi_pwsh_invoke(bounded_builder, &mut replacement_result, &mut call_result) },
             Status::Success.value()
         );
         let mut replacement_warning_count = 0;
         let mut replacement_warning_flags = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_get_stream_info(
+                multi_pwsh_result_get_stream_info(
                     replacement_result,
                     2,
                     &mut replacement_warning_count,
@@ -5554,22 +5225,22 @@ mod tests {
         assert_eq!(replacement_warning_count, 0);
         assert_eq!(replacement_warning_flags, 0);
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_release(replacement_result, &mut call_result) },
+            unsafe { multi_pwsh_result_release(replacement_result, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(bounded_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(bounded_builder, &mut call_result) },
             Status::Success.value()
         );
 
         let mut invalid_state_handle = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_create(&mut invalid_state_handle, &mut call_result) },
+            unsafe { multi_pwsh_create(&mut invalid_state_handle, &mut call_result) },
             Status::Success.value()
         );
         let mut error_count = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_get_invocation_error_count(invalid_state_handle, &mut error_count, &mut call_result) },
+            unsafe { multi_pwsh_get_invocation_error_count(invalid_state_handle, &mut error_count, &mut call_result) },
             Status::ManagedFailure.value()
         );
         assert_eq!(call_result.status, Status::ManagedFailure.value());
@@ -5582,153 +5253,9 @@ mod tests {
         assert_ne!(call_result.flags & CALL_RESULT_DIAGNOSTIC_TRUNCATED, 0);
         assert!(call_result.diagnostic_required > call_result.diagnostic_written);
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(invalid_state_handle, &mut call_result) },
+            unsafe { multi_pwsh_release(invalid_state_handle, &mut call_result) },
             Status::Success.value()
         );
-
-        assert_ne!(dps_pwsh_feature_flags() & FEATURE_STRUCTURED_INVOCATION_ERRORS, 0);
-
-        let handle = create_session();
-
-        let script = "'ffi-explicit-payload'";
-        assert_eq!(
-            unsafe { dps_pwsh_add_script_utf8(handle, script.as_ptr(), script.len()) },
-            Status::Success.value()
-        );
-        assert_eq!(invoke_output(handle), "ffi-explicit-payload\r\n");
-        assert_eq!(dps_pwsh_release(handle), Status::Success.value());
-
-        let unicode_handle = create_session();
-        let unicode_script = "'héllo'";
-        assert_eq!(
-            unsafe { dps_pwsh_add_script_utf8(unicode_handle, unicode_script.as_ptr(), unicode_script.len(),) },
-            Status::Success.value()
-        );
-        assert_eq!(invoke_output(unicode_handle), "héllo\r\n");
-        assert_eq!(dps_pwsh_release(unicode_handle), Status::Success.value());
-
-        let parameter_handle = create_session();
-        let command = "Write-Output";
-        let parameter = "InputObject";
-        assert_eq!(
-            unsafe { dps_pwsh_add_command_utf8(parameter_handle, command.as_ptr(), command.len()) },
-            Status::Success.value()
-        );
-        assert_eq!(
-            unsafe { dps_pwsh_add_parameter_i64(parameter_handle, parameter.as_ptr(), parameter.len(), 42,) },
-            Status::Success.value()
-        );
-        assert_eq!(invoke_output(parameter_handle), "42\r\n");
-        assert_eq!(dps_pwsh_release(parameter_handle), Status::Success.value());
-
-        let statement_handle = create_session();
-        let first = "'first'";
-        let second = "'second'";
-        assert_eq!(
-            unsafe { dps_pwsh_add_script_utf8(statement_handle, first.as_ptr(), first.len()) },
-            Status::Success.value()
-        );
-        assert_eq!(dps_pwsh_add_statement(statement_handle), Status::Success.value());
-        assert_eq!(
-            unsafe { dps_pwsh_add_script_utf8(statement_handle, second.as_ptr(), second.len()) },
-            Status::Success.value()
-        );
-        assert_eq!(invoke_output(statement_handle), "first\r\nsecond\r\n");
-        assert_eq!(dps_pwsh_release(statement_handle), Status::Success.value());
-
-        let clear_handle = create_session();
-        let discarded = "'discarded'";
-        let kept = "'kept'";
-        assert_eq!(
-            unsafe { dps_pwsh_add_script_utf8(clear_handle, discarded.as_ptr(), discarded.len()) },
-            Status::Success.value()
-        );
-        assert_eq!(dps_pwsh_clear(clear_handle), Status::Success.value());
-        assert_eq!(
-            unsafe { dps_pwsh_add_script_utf8(clear_handle, kept.as_ptr(), kept.len()) },
-            Status::Success.value()
-        );
-        assert_eq!(invoke_output(clear_handle), "kept\r\n");
-        assert_eq!(dps_pwsh_release(clear_handle), Status::Success.value());
-        assert_eq!(
-            unsafe { dps_pwsh_add_script_utf8(clear_handle, kept.as_ptr(), kept.len()) },
-            Status::InvalidHandle.value()
-        );
-
-        let cached_output_handle = create_session();
-        let increment = "$global:DpsPwshFfiInvocationCounter = 0; $global:DpsPwshFfiInvocationCounter++; $global:DpsPwshFfiInvocationCounter";
-        assert_eq!(
-            unsafe { dps_pwsh_add_script_utf8(cached_output_handle, increment.as_ptr(), increment.len(),) },
-            Status::Success.value()
-        );
-        assert_eq!(invoke_output(cached_output_handle), "1\r\n");
-        assert_eq!(invoke_output(cached_output_handle), "1\r\n");
-        assert_eq!(dps_pwsh_release(cached_output_handle), Status::Success.value());
-
-        let cancellation_handle = create_session();
-        let blocking_script = "Start-Sleep -Seconds 30; 'unexpected completion'";
-        assert_eq!(
-            unsafe { dps_pwsh_add_script_utf8(cancellation_handle, blocking_script.as_ptr(), blocking_script.len(),) },
-            Status::Success.value()
-        );
-        let (completion_sender, completion_receiver) = std::sync::mpsc::channel();
-        let invoker = std::thread::spawn(move || {
-            let mut required = 0;
-            let status = unsafe { dps_pwsh_invoke_utf8(cancellation_handle, std::ptr::null_mut(), 0, &mut required) };
-            completion_sender.send((status, required)).unwrap();
-        });
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        assert_eq!(dps_pwsh_stop(cancellation_handle), Status::Success.value());
-        let (status, required) = completion_receiver
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("Stop must complete the active invocation");
-        assert!(
-            status == Status::ManagedFailure.value() || status == Status::Success.value(),
-            "unexpected cancellation status {}",
-            status
-        );
-        assert_eq!(required, 0, "stopped invocation must not return script output");
-        invoker.join().unwrap();
-        assert_eq!(dps_pwsh_release(cancellation_handle), Status::Success.value());
-
-        let non_terminating_error_handle = create_session();
-        let non_terminating_error = "Write-Error -Message 'ffi-non-terminating-error'";
-        assert_eq!(
-            unsafe {
-                dps_pwsh_add_script_utf8(
-                    non_terminating_error_handle,
-                    non_terminating_error.as_ptr(),
-                    non_terminating_error.len(),
-                )
-            },
-            Status::Success.value()
-        );
-        assert_eq!(invoke_output(non_terminating_error_handle), "");
-        assert_eq!(invocation_error_count(non_terminating_error_handle), 1);
-        assert!(invocation_error_field(non_terminating_error_handle, 0, 0).contains("ffi-non-terminating-error"));
-        assert!(!invocation_error_field(non_terminating_error_handle, 0, 3).is_empty());
-        assert_eq!(dps_pwsh_release(non_terminating_error_handle), Status::Success.value());
-
-        let terminating_error_handle = create_session();
-        let terminating_error = "throw 'ffi-terminating-error'";
-        assert_eq!(
-            unsafe {
-                dps_pwsh_add_script_utf8(
-                    terminating_error_handle,
-                    terminating_error.as_ptr(),
-                    terminating_error.len(),
-                )
-            },
-            Status::Success.value()
-        );
-        let mut required = 0;
-        assert_eq!(
-            unsafe { dps_pwsh_invoke_utf8(terminating_error_handle, std::ptr::null_mut(), 0, &mut required,) },
-            Status::ManagedFailure.value()
-        );
-        assert_eq!(invocation_error_count(terminating_error_handle), 1);
-        assert!(invocation_error_field(terminating_error_handle, 0, 0).contains("ffi-terminating-error"));
-        assert_eq!(dps_pwsh_release(terminating_error_handle), Status::Success.value());
     }
 
     #[test]
@@ -5739,13 +5266,13 @@ mod tests {
         let mut diagnostic = [0_u8; 512];
         let mut call_result = v2_call_result(&mut diagnostic);
         initialize_v2_trusted(&payload, &mut call_result);
-        assert_ne!(dps_pwsh_feature_flags() & FEATURE_ASYNC_OPERATIONS, 0);
+        assert_ne!(feature_flags() & FEATURE_ASYNC_OPERATIONS, 0);
 
         let success_builder = v2_create_session(&mut call_result);
         let success_script = "$input | ForEach-Object { Start-Sleep -Milliseconds 250; $_ * 2 }";
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     success_builder,
                     Utf8Span {
                         data: success_script.as_ptr(),
@@ -5758,35 +5285,35 @@ mod tests {
         );
         add_v2_input_value(success_builder, 4, &3_i64.to_le_bytes(), &mut call_result);
         assert_eq!(
-            unsafe { dps_pwsh_v2_complete_input(success_builder, &mut call_result) },
+            unsafe { multi_pwsh_complete_input(success_builder, &mut call_result) },
             Status::Success.value()
         );
         let mut success_operation = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke_async(success_builder, &mut success_operation, &mut call_result) },
+            unsafe { multi_pwsh_invoke_async(success_builder, &mut success_operation, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_complete_input(success_builder, &mut call_result) },
+            unsafe { multi_pwsh_complete_input(success_builder, &mut call_result) },
             Status::Backpressure.value()
         );
         let mut operation_state = 0;
         let mut terminal_status = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_operation_get_result(success_operation, std::ptr::null_mut(), &mut call_result) },
+            unsafe { multi_pwsh_operation_get_result(success_operation, std::ptr::null_mut(), &mut call_result) },
             Status::InvalidArgument.value()
         );
         let mut result_before_terminal = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_operation_get_result(success_operation, &mut result_before_terminal, &mut call_result)
+                multi_pwsh_operation_get_result(success_operation, &mut result_before_terminal, &mut call_result)
             },
             Status::OperationNotTerminal.value()
         );
         assert_eq!(call_result.status, Status::OperationNotTerminal.value());
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_operation_wait(
+                multi_pwsh_operation_wait(
                     success_operation,
                     5_000,
                     &mut operation_state,
@@ -5800,20 +5327,20 @@ mod tests {
         assert_eq!(terminal_status, Status::Success.value());
         let mut success_result = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_operation_get_result(success_operation, &mut success_result, &mut call_result) },
+            unsafe { multi_pwsh_operation_get_result(success_operation, &mut success_result, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(v2_result_output(success_result, &mut call_result), vec!["6".to_owned()]);
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_release(success_result, &mut call_result) },
+            unsafe { multi_pwsh_result_release(success_result, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_operation_release(success_operation, &mut call_result) },
+            unsafe { multi_pwsh_operation_release(success_operation, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(success_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(success_builder, &mut call_result) },
             Status::Success.value()
         );
 
@@ -5821,7 +5348,7 @@ mod tests {
         let cancellation_script = "Start-Sleep -Seconds 30; 'unexpected completion'";
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     cancellation_builder,
                     Utf8Span {
                         data: cancellation_script.as_ptr(),
@@ -5834,23 +5361,23 @@ mod tests {
         );
         let mut cancellation_operation = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke_async(cancellation_builder, &mut cancellation_operation, &mut call_result) },
+            unsafe { multi_pwsh_invoke_async(cancellation_builder, &mut cancellation_operation, &mut call_result) },
             Status::Success.value()
         );
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
-            unsafe { dps_pwsh_v2_operation_stop(cancellation_operation, &mut call_result) },
+            unsafe { multi_pwsh_operation_stop(cancellation_operation, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_operation_stop(cancellation_operation, &mut call_result) },
+            unsafe { multi_pwsh_operation_stop(cancellation_operation, &mut call_result) },
             Status::Success.value()
         );
         operation_state = 0;
         terminal_status = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_operation_wait(
+                multi_pwsh_operation_wait(
                     cancellation_operation,
                     5_000,
                     &mut operation_state,
@@ -5867,17 +5394,15 @@ mod tests {
             .contains("cancelled"));
         let mut cancelled_result = 0;
         assert_eq!(
-            unsafe {
-                dps_pwsh_v2_operation_get_result(cancellation_operation, &mut cancelled_result, &mut call_result)
-            },
+            unsafe { multi_pwsh_operation_get_result(cancellation_operation, &mut cancelled_result, &mut call_result) },
             Status::OperationCancelled.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_operation_release(cancellation_operation, &mut call_result) },
+            unsafe { multi_pwsh_operation_release(cancellation_operation, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(cancellation_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(cancellation_builder, &mut call_result) },
             Status::Success.value()
         );
 
@@ -5885,7 +5410,7 @@ mod tests {
         let race_script = "Start-Sleep -Seconds 30; 'release-race'";
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     race_builder,
                     Utf8Span {
                         data: race_script.as_ptr(),
@@ -5898,7 +5423,7 @@ mod tests {
         );
         let mut race_operation = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke_async(race_builder, &mut race_operation, &mut call_result) },
+            unsafe { multi_pwsh_invoke_async(race_builder, &mut race_operation, &mut call_result) },
             Status::Success.value()
         );
         let poller = std::thread::spawn(move || {
@@ -5916,7 +5441,7 @@ mod tests {
                     diagnostic_written: 0,
                 };
                 let poll_status =
-                    unsafe { dps_pwsh_v2_operation_poll(race_operation, &mut state, &mut status, &mut call_result) };
+                    unsafe { multi_pwsh_operation_poll(race_operation, &mut state, &mut status, &mut call_result) };
                 assert!(
                     poll_status == Status::Success.value()
                         || poll_status == Status::OperationCancelled.value()
@@ -5928,12 +5453,12 @@ mod tests {
         });
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(
-            unsafe { dps_pwsh_v2_operation_release(race_operation, &mut call_result) },
+            unsafe { multi_pwsh_operation_release(race_operation, &mut call_result) },
             Status::Success.value()
         );
         poller.join().unwrap();
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(race_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(race_builder, &mut call_result) },
             Status::Success.value()
         );
     }
@@ -5949,16 +5474,16 @@ mod tests {
 
         let stale_builder = v2_create_session(&mut call_result);
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(stale_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(stale_builder, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(stale_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(stale_builder, &mut call_result) },
             Status::InvalidHandle.value()
         );
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     stale_builder,
                     Utf8Span {
                         data: b"'stale'".as_ptr(),
@@ -5975,7 +5500,7 @@ mod tests {
             "released builder handles must not be reused"
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(fresh_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(fresh_builder, &mut call_result) },
             Status::Success.value()
         );
 
@@ -5983,7 +5508,7 @@ mod tests {
         let cancellation_script = "1..50 | ForEach-Object { Start-Sleep -Milliseconds 100; Write-Output $_ }";
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     cancellation_builder,
                     Utf8Span {
                         data: cancellation_script.as_ptr(),
@@ -5996,7 +5521,7 @@ mod tests {
         );
         let mut cancellation_operation = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke_async(cancellation_builder, &mut cancellation_operation, &mut call_result,) },
+            unsafe { multi_pwsh_invoke_async(cancellation_builder, &mut cancellation_operation, &mut call_result,) },
             Status::Success.value()
         );
 
@@ -6006,7 +5531,7 @@ mod tests {
             std::thread::spawn(move || {
                 let mut result = v2_call_result_without_diagnostic();
                 barrier.wait();
-                unsafe { dps_pwsh_v2_operation_stop(cancellation_operation, &mut result) }
+                unsafe { multi_pwsh_operation_stop(cancellation_operation, &mut result) }
             })
         };
         let repeated_operation_stop = {
@@ -6014,7 +5539,7 @@ mod tests {
             std::thread::spawn(move || {
                 let mut result = v2_call_result_without_diagnostic();
                 barrier.wait();
-                unsafe { dps_pwsh_v2_operation_stop(cancellation_operation, &mut result) }
+                unsafe { multi_pwsh_operation_stop(cancellation_operation, &mut result) }
             })
         };
         let builder_stop = {
@@ -6022,7 +5547,7 @@ mod tests {
             std::thread::spawn(move || {
                 let mut result = v2_call_result_without_diagnostic();
                 barrier.wait();
-                unsafe { dps_pwsh_v2_stop(cancellation_builder, &mut result) }
+                unsafe { multi_pwsh_stop(cancellation_builder, &mut result) }
             })
         };
         let builder_release = {
@@ -6030,7 +5555,7 @@ mod tests {
             std::thread::spawn(move || {
                 let mut result = v2_call_result_without_diagnostic();
                 barrier.wait();
-                unsafe { dps_pwsh_v2_release(cancellation_builder, &mut result) }
+                unsafe { multi_pwsh_release(cancellation_builder, &mut result) }
             })
         };
         assert_eq!(operation_stop.join().unwrap(), Status::Success.value());
@@ -6048,7 +5573,7 @@ mod tests {
         let mut terminal_status = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_operation_wait(
+                multi_pwsh_operation_wait(
                     cancellation_operation,
                     5_000,
                     &mut operation_state,
@@ -6061,14 +5586,12 @@ mod tests {
         assert_eq!(operation_state, OperationState::Cancelled as u32);
         assert_eq!(terminal_status, Status::OperationCancelled.value());
         assert_eq!(
-            unsafe { dps_pwsh_v2_operation_stop(cancellation_operation, &mut call_result) },
+            unsafe { multi_pwsh_operation_stop(cancellation_operation, &mut call_result) },
             Status::Success.value()
         );
         let mut cancelled_result = u64::MAX;
         assert_eq!(
-            unsafe {
-                dps_pwsh_v2_operation_get_result(cancellation_operation, &mut cancelled_result, &mut call_result)
-            },
+            unsafe { multi_pwsh_operation_get_result(cancellation_operation, &mut cancelled_result, &mut call_result) },
             Status::OperationCancelled.value()
         );
         assert_eq!(
@@ -6077,16 +5600,16 @@ mod tests {
             "cancelled operations must not return successful partial output"
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_operation_release(cancellation_operation, &mut call_result) },
+            unsafe { multi_pwsh_operation_release(cancellation_operation, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_operation_release(cancellation_operation, &mut call_result) },
+            unsafe { multi_pwsh_operation_release(cancellation_operation, &mut call_result) },
             Status::InvalidHandle.value()
         );
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_operation_poll(
+                multi_pwsh_operation_poll(
                     cancellation_operation,
                     &mut operation_state,
                     &mut terminal_status,
@@ -6096,7 +5619,7 @@ mod tests {
             Status::InvalidHandle.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(cancellation_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(cancellation_builder, &mut call_result) },
             Status::InvalidHandle.value()
         );
 
@@ -6104,7 +5627,7 @@ mod tests {
         let result_script = "'result-outlives-builder'";
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     result_builder,
                     Utf8Span {
                         data: result_script.as_ptr(),
@@ -6117,7 +5640,7 @@ mod tests {
         );
         let result_handle = v2_invoke(result_builder, &mut call_result);
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(result_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(result_builder, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
@@ -6125,40 +5648,40 @@ mod tests {
             vec!["result-outlives-builder".to_owned()]
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_release(result_handle, &mut call_result) },
+            unsafe { multi_pwsh_result_release(result_handle, &mut call_result) },
             Status::Success.value()
         );
         let mut result_flags = 0;
         let mut sequence_count = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_get_info(result_handle, &mut result_flags, &mut sequence_count, &mut call_result)
+                multi_pwsh_result_get_info(result_handle, &mut result_flags, &mut sequence_count, &mut call_result)
             },
             Status::InvalidHandle.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_release(result_handle, &mut call_result) },
+            unsafe { multi_pwsh_result_release(result_handle, &mut call_result) },
             Status::InvalidHandle.value()
         );
 
         let session_options = empty_session_options();
         let mut session_handle = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_create(&session_options, &mut session_handle, &mut call_result) },
+            unsafe { multi_pwsh_session_create(&session_options, &mut session_handle, &mut call_result) },
             Status::Success.value()
         );
         let mut session_builder = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_create_builder(session_handle, &mut session_builder, &mut call_result) },
+            unsafe { multi_pwsh_session_create_builder(session_handle, &mut session_builder, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_release(session_handle, &mut call_result) },
+            unsafe { multi_pwsh_session_release(session_handle, &mut call_result) },
             Status::Success.value()
         );
         let mut rejected_builder = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_create_builder(session_handle, &mut rejected_builder, &mut call_result) },
+            unsafe { multi_pwsh_session_create_builder(session_handle, &mut rejected_builder, &mut call_result) },
             Status::InvalidHandle.value()
         );
         let mut stale_snapshot = SessionSnapshot {
@@ -6172,13 +5695,13 @@ mod tests {
             history_count: 0,
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_get_snapshot(session_handle, &mut stale_snapshot, &mut call_result) },
+            unsafe { multi_pwsh_session_get_snapshot(session_handle, &mut stale_snapshot, &mut call_result) },
             Status::InvalidHandle.value()
         );
         let session_script = "'builder-outlives-session'";
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     session_builder,
                     Utf8Span {
                         data: session_script.as_ptr(),
@@ -6195,11 +5718,11 @@ mod tests {
             vec!["builder-outlives-session".to_owned()]
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_release(session_result, &mut call_result) },
+            unsafe { multi_pwsh_result_release(session_result, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(session_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(session_builder, &mut call_result) },
             Status::Success.value()
         );
 
@@ -6209,7 +5732,7 @@ mod tests {
         for builder in [first_builder, second_builder] {
             assert_eq!(
                 unsafe {
-                    dps_pwsh_v2_add_script_utf8(
+                    multi_pwsh_add_script_utf8(
                         builder,
                         Utf8Span {
                             data: serialized_script.as_ptr(),
@@ -6225,11 +5748,11 @@ mod tests {
         let mut first_operation = 0;
         let mut second_operation = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke_async(first_builder, &mut first_operation, &mut call_result) },
+            unsafe { multi_pwsh_invoke_async(first_builder, &mut first_operation, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke_async(second_builder, &mut second_operation, &mut call_result) },
+            unsafe { multi_pwsh_invoke_async(second_builder, &mut second_operation, &mut call_result) },
             Status::Success.value()
         );
         for operation in [first_operation, second_operation] {
@@ -6237,7 +5760,7 @@ mod tests {
             terminal_status = 0;
             assert_eq!(
                 unsafe {
-                    dps_pwsh_v2_operation_wait(
+                    multi_pwsh_operation_wait(
                         operation,
                         5_000,
                         &mut operation_state,
@@ -6251,15 +5774,15 @@ mod tests {
             assert_eq!(terminal_status, Status::Success.value());
             let mut result = 0;
             assert_eq!(
-                unsafe { dps_pwsh_v2_operation_get_result(operation, &mut result, &mut call_result) },
+                unsafe { multi_pwsh_operation_get_result(operation, &mut result, &mut call_result) },
                 Status::Success.value()
             );
             assert_eq!(
-                unsafe { dps_pwsh_v2_result_release(result, &mut call_result) },
+                unsafe { multi_pwsh_result_release(result, &mut call_result) },
                 Status::Success.value()
             );
             assert_eq!(
-                unsafe { dps_pwsh_v2_operation_release(operation, &mut call_result) },
+                unsafe { multi_pwsh_operation_release(operation, &mut call_result) },
                 Status::Success.value()
             );
         }
@@ -6269,7 +5792,7 @@ mod tests {
         );
         for builder in [first_builder, second_builder] {
             assert_eq!(
-                unsafe { dps_pwsh_v2_release(builder, &mut call_result) },
+                unsafe { multi_pwsh_release(builder, &mut call_result) },
                 Status::Success.value()
             );
         }
@@ -6283,10 +5806,10 @@ mod tests {
         let mut diagnostic = [0_u8; 512];
         let mut call_result = v2_call_result(&mut diagnostic);
         initialize_v2_trusted(&payload, &mut call_result);
-        assert_ne!(dps_pwsh_feature_flags() & FEATURE_SESSIONS, 0);
-        assert_ne!(dps_pwsh_feature_flags() & FEATURE_SESSION_POLLING, 0);
-        assert_ne!(dps_pwsh_feature_flags() & FEATURE_SESSION_POOL_REJECTION, 0);
-        assert_ne!(dps_pwsh_feature_flags() & FEATURE_SESSION_VARIABLES, 0);
+        assert_ne!(feature_flags() & FEATURE_SESSIONS, 0);
+        assert_ne!(feature_flags() & FEATURE_SESSION_POLLING, 0);
+        assert_ne!(feature_flags() & FEATURE_SESSION_POOL_REJECTION, 0);
+        assert_ne!(feature_flags() & FEATURE_SESSION_VARIABLES, 0);
 
         let configured_options = SessionOptions {
             history_mode: 1,
@@ -6298,7 +5821,7 @@ mod tests {
         };
         let mut configured_session = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_create(&configured_options, &mut configured_session, &mut call_result) },
+            unsafe { multi_pwsh_session_create(&configured_options, &mut configured_session, &mut call_result) },
             Status::Success.value()
         );
         assert_ne!(configured_session, 0);
@@ -6313,7 +5836,7 @@ mod tests {
             history_count: 0,
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_get_snapshot(configured_session, &mut snapshot, &mut call_result) },
+            unsafe { multi_pwsh_session_get_snapshot(configured_session, &mut snapshot, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(snapshot.state, 1);
@@ -6332,7 +5855,7 @@ mod tests {
         };
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_session_set_variable(
+                multi_pwsh_session_set_variable(
                     configured_session,
                     Utf8Span {
                         data: variable_name.as_ptr(),
@@ -6349,7 +5872,7 @@ mod tests {
         let mut required_length = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_session_get_variable_snapshot(
+                multi_pwsh_session_get_variable_snapshot(
                     configured_session,
                     Utf8Span {
                         data: variable_name.as_ptr(),
@@ -6371,7 +5894,7 @@ mod tests {
         let mut variable_snapshot = vec![0_u8; required_length];
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_session_get_variable_snapshot(
+                multi_pwsh_session_get_variable_snapshot(
                     configured_session,
                     Utf8Span {
                         data: variable_name.as_ptr(),
@@ -6393,7 +5916,7 @@ mod tests {
         let mut removed = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_session_remove_variable(
+                multi_pwsh_session_remove_variable(
                     configured_session,
                     Utf8Span {
                         data: variable_name.as_ptr(),
@@ -6408,7 +5931,7 @@ mod tests {
         assert_eq!(removed, 1);
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_session_remove_variable(
+                multi_pwsh_session_remove_variable(
                     configured_session,
                     Utf8Span {
                         data: variable_name.as_ptr(),
@@ -6424,15 +5947,13 @@ mod tests {
 
         let mut configured_builder = 0;
         assert_eq!(
-            unsafe {
-                dps_pwsh_v2_session_create_builder(configured_session, &mut configured_builder, &mut call_result)
-            },
+            unsafe { multi_pwsh_session_create_builder(configured_session, &mut configured_builder, &mut call_result) },
             Status::Success.value()
         );
         let configured_script = "Write-Output \"$ErrorActionPreference|$WarningPreference|$VerbosePreference\"";
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     configured_builder,
                     Utf8Span {
                         data: configured_script.as_ptr(),
@@ -6449,11 +5970,11 @@ mod tests {
             vec!["Stop|Continue|Continue".to_owned()]
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_release(configured_result, &mut call_result) },
+            unsafe { multi_pwsh_result_release(configured_result, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_get_snapshot(configured_session, &mut snapshot, &mut call_result) },
+            unsafe { multi_pwsh_session_get_snapshot(configured_session, &mut snapshot, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(snapshot.active_pipeline_count, 0);
@@ -6464,7 +5985,7 @@ mod tests {
         let mut event_flags = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_session_get_event_info(
+                multi_pwsh_session_get_event_info(
                     configured_session,
                     0,
                     &mut event_sequence,
@@ -6483,17 +6004,17 @@ mod tests {
         let mut first_builder = 0;
         let mut second_builder = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_create_builder(configured_session, &mut first_builder, &mut call_result) },
+            unsafe { multi_pwsh_session_create_builder(configured_session, &mut first_builder, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_create_builder(configured_session, &mut second_builder, &mut call_result) },
+            unsafe { multi_pwsh_session_create_builder(configured_session, &mut second_builder, &mut call_result) },
             Status::Success.value()
         );
         for (builder, script) in [(first_builder, first_script), (second_builder, second_script)] {
             assert_eq!(
                 unsafe {
-                    dps_pwsh_v2_add_script_utf8(
+                    multi_pwsh_add_script_utf8(
                         builder,
                         Utf8Span {
                             data: script.as_ptr(),
@@ -6508,11 +6029,11 @@ mod tests {
         let mut first_operation = 0;
         let mut second_operation = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke_async(first_builder, &mut first_operation, &mut call_result) },
+            unsafe { multi_pwsh_invoke_async(first_builder, &mut first_operation, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke_async(second_builder, &mut second_operation, &mut call_result) },
+            unsafe { multi_pwsh_invoke_async(second_builder, &mut second_operation, &mut call_result) },
             Status::Backpressure.value()
         );
         assert_eq!(second_operation, 0);
@@ -6521,7 +6042,7 @@ mod tests {
             let mut terminal_status = 0;
             assert_eq!(
                 unsafe {
-                    dps_pwsh_v2_operation_wait(
+                    multi_pwsh_operation_wait(
                         operation,
                         5_000,
                         &mut operation_state,
@@ -6535,27 +6056,27 @@ mod tests {
             assert_eq!(terminal_status, Status::Success.value());
             let mut result = 0;
             assert_eq!(
-                unsafe { dps_pwsh_v2_operation_get_result(operation, &mut result, &mut call_result) },
+                unsafe { multi_pwsh_operation_get_result(operation, &mut result, &mut call_result) },
                 Status::Success.value()
             );
             assert_eq!(
-                unsafe { dps_pwsh_v2_result_release(result, &mut call_result) },
+                unsafe { multi_pwsh_result_release(result, &mut call_result) },
                 Status::Success.value()
             );
             assert_eq!(
-                unsafe { dps_pwsh_v2_operation_release(operation, &mut call_result) },
+                unsafe { multi_pwsh_operation_release(operation, &mut call_result) },
                 Status::Success.value()
             );
         }
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke_async(second_builder, &mut second_operation, &mut call_result) },
+            unsafe { multi_pwsh_invoke_async(second_builder, &mut second_operation, &mut call_result) },
             Status::Success.value()
         );
         let mut operation_state = 0;
         let mut terminal_status = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_operation_wait(
+                multi_pwsh_operation_wait(
                     second_operation,
                     5_000,
                     &mut operation_state,
@@ -6569,46 +6090,46 @@ mod tests {
         assert_eq!(terminal_status, Status::Success.value());
         let mut second_result = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_operation_get_result(second_operation, &mut second_result, &mut call_result) },
+            unsafe { multi_pwsh_operation_get_result(second_operation, &mut second_result, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_release(second_result, &mut call_result) },
+            unsafe { multi_pwsh_result_release(second_result, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_operation_release(second_operation, &mut call_result) },
+            unsafe { multi_pwsh_operation_release(second_operation, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(first_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(first_builder, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(second_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(second_builder, &mut call_result) },
             Status::Success.value()
         );
         for _ in 0..13 {
             let event_result = v2_invoke(configured_builder, &mut call_result);
             assert_eq!(
-                unsafe { dps_pwsh_v2_result_release(event_result, &mut call_result) },
+                unsafe { multi_pwsh_result_release(event_result, &mut call_result) },
                 Status::Success.value()
             );
         }
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_get_snapshot(configured_session, &mut snapshot, &mut call_result) },
+            unsafe { multi_pwsh_session_get_snapshot(configured_session, &mut snapshot, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(snapshot.event_count, 32);
         assert_ne!(snapshot.flags & 1, 0);
 
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_release(configured_session, &mut call_result) },
+            unsafe { multi_pwsh_session_release(configured_session, &mut call_result) },
             Status::Success.value()
         );
         let mut lifetime_result = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke(configured_builder, &mut lifetime_result, &mut call_result) },
+            unsafe { multi_pwsh_invoke(configured_builder, &mut lifetime_result, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
@@ -6616,11 +6137,11 @@ mod tests {
             vec!["Stop|Continue|Continue".to_owned()]
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_release(lifetime_result, &mut call_result) },
+            unsafe { multi_pwsh_result_release(lifetime_result, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(configured_builder, &mut call_result) },
+            unsafe { multi_pwsh_release(configured_builder, &mut call_result) },
             Status::Success.value()
         );
 
@@ -6631,7 +6152,7 @@ mod tests {
         };
         let mut rejected_session = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_create(&rejected_current_options, &mut rejected_session, &mut call_result) },
+            unsafe { multi_pwsh_session_create(&rejected_current_options, &mut rejected_session, &mut call_result) },
             Status::UnsupportedCapability.value()
         );
         assert_eq!(rejected_session, 0);
@@ -6648,7 +6169,7 @@ mod tests {
         };
         let mut pool_handle = u64::MAX;
         assert_eq!(
-            unsafe { dps_pwsh_v2_session_pool_create(&pool_options, &mut pool_handle, &mut call_result) },
+            unsafe { multi_pwsh_session_pool_create(&pool_options, &mut pool_handle, &mut call_result) },
             Status::UnsupportedCapability.value()
         );
         assert_eq!(pool_handle, 0);
@@ -6797,8 +6318,13 @@ mod tests {
     }
 
     #[test]
-    fn execute_contains_native_panics() {
-        assert_eq!(execute(|_| panic!("test panic containment")), Status::Panic.value());
+    fn calls_contain_native_panics() {
+        let mut call_result = v2_call_result_without_diagnostic();
+        assert_eq!(
+            unsafe { v2_call(&mut call_result, || panic!("test panic containment")) },
+            Status::Panic.value()
+        );
+        assert_eq!(call_result.status, Status::Panic.value());
     }
 
     #[test]
@@ -6809,9 +6335,9 @@ mod tests {
         let mut diagnostic = [0_u8; 512];
         let mut call_result = v2_call_result(&mut diagnostic);
         initialize_v2_trusted(&payload, &mut call_result);
-        assert_ne!(dps_pwsh_feature_flags() & FEATURE_TAGGED_VALUES, 0);
-        assert_ne!(dps_pwsh_feature_flags() & FEATURE_COMMAND_OPTIONS, 0);
-        assert_ne!(dps_pwsh_feature_flags() & FEATURE_BOUNDED_INPUT, 0);
+        assert_ne!(feature_flags() & FEATURE_TAGGED_VALUES, 0);
+        assert_ne!(feature_flags() & FEATURE_COMMAND_OPTIONS, 0);
+        assert_ne!(feature_flags() & FEATURE_BOUNDED_INPUT, 0);
 
         let value_handle = v2_create_session(&mut call_result);
         let value_script = r#"
@@ -6836,7 +6362,7 @@ mod tests {
         "#;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     value_handle,
                     Utf8Span {
                         data: value_script.as_ptr(),
@@ -6885,7 +6411,7 @@ mod tests {
         let mut had_errors = 0;
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_result_get_metadata(
+                multi_pwsh_result_get_metadata(
                     value_result,
                     &mut state,
                     &mut invocation_id,
@@ -6903,11 +6429,11 @@ mod tests {
             vec!["True|True|True|True|True|True|True|True|True|True|True|True|True|True|True".to_owned()]
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_release(value_result, &mut call_result) },
+            unsafe { multi_pwsh_result_release(value_result, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(value_handle, &mut call_result) },
+            unsafe { multi_pwsh_release(value_handle, &mut call_result) },
             Status::Success.value()
         );
 
@@ -6915,7 +6441,7 @@ mod tests {
         let switch_script = "param([switch] $Flag) if ($Flag) { 'switch' }";
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8_local(
+                multi_pwsh_add_script_utf8_local(
                     command_handle,
                     Utf8Span {
                         data: switch_script.as_ptr(),
@@ -6930,7 +6456,7 @@ mod tests {
         let flag = "Flag";
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_parameter_switch(
+                multi_pwsh_add_parameter_switch(
                     command_handle,
                     Utf8Span {
                         data: flag.as_ptr(),
@@ -6942,13 +6468,13 @@ mod tests {
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_add_statement(command_handle, &mut call_result) },
+            unsafe { multi_pwsh_add_statement(command_handle, &mut call_result) },
             Status::Success.value()
         );
         let second_statement = "'multiple-statements'";
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8_local(
+                multi_pwsh_add_script_utf8_local(
                     command_handle,
                     Utf8Span {
                         data: second_statement.as_ptr(),
@@ -6966,11 +6492,11 @@ mod tests {
             vec!["switch".to_owned(), "multiple-statements".to_owned()]
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_release(command_result, &mut call_result) },
+            unsafe { multi_pwsh_result_release(command_result, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(command_handle, &mut call_result) },
+            unsafe { multi_pwsh_release(command_handle, &mut call_result) },
             Status::Success.value()
         );
 
@@ -6978,7 +6504,7 @@ mod tests {
         let input_script = "$input | ForEach-Object { $_ * 2 }";
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_script_utf8(
+                multi_pwsh_add_script_utf8(
                     input_handle,
                     Utf8Span {
                         data: input_script.as_ptr(),
@@ -6992,7 +6518,7 @@ mod tests {
         add_v2_input_value(input_handle, 4, &3_i64.to_le_bytes(), &mut call_result);
         let mut incomplete_result = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke(input_handle, &mut incomplete_result, &mut call_result) },
+            unsafe { multi_pwsh_invoke(input_handle, &mut incomplete_result, &mut call_result) },
             Status::InputNotCompleted.value()
         );
         assert_eq!(call_result.status, Status::InputNotCompleted.value());
@@ -7000,13 +6526,13 @@ mod tests {
             .unwrap()
             .contains("CompleteInput"));
         assert_eq!(
-            unsafe { dps_pwsh_v2_reset_input(input_handle, &mut call_result) },
+            unsafe { multi_pwsh_reset_input(input_handle, &mut call_result) },
             Status::Success.value()
         );
         add_v2_input_value(input_handle, 4, &3_i64.to_le_bytes(), &mut call_result);
         add_v2_input_value(input_handle, 4, &4_i64.to_le_bytes(), &mut call_result);
         assert_eq!(
-            unsafe { dps_pwsh_v2_complete_input(input_handle, &mut call_result) },
+            unsafe { multi_pwsh_complete_input(input_handle, &mut call_result) },
             Status::Success.value()
         );
         let input_result = v2_invoke(input_handle, &mut call_result);
@@ -7015,11 +6541,11 @@ mod tests {
             vec!["6".to_owned(), "8".to_owned()]
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_release(input_result, &mut call_result) },
+            unsafe { multi_pwsh_result_release(input_result, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(input_handle, &mut call_result) },
+            unsafe { multi_pwsh_release(input_handle, &mut call_result) },
             Status::Success.value()
         );
 
@@ -7037,16 +6563,16 @@ mod tests {
             data_len: 8,
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_add_input_value(backpressure_handle, &value, &mut call_result) },
+            unsafe { multi_pwsh_add_input_value(backpressure_handle, &value, &mut call_result) },
             Status::Backpressure.value()
         );
         assert_eq!(call_result.status, Status::Backpressure.value());
         assert_eq!(
-            unsafe { dps_pwsh_v2_reset_input(backpressure_handle, &mut call_result) },
+            unsafe { multi_pwsh_reset_input(backpressure_handle, &mut call_result) },
             Status::Success.value()
         );
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(backpressure_handle, &mut call_result) },
+            unsafe { multi_pwsh_release(backpressure_handle, &mut call_result) },
             Status::Success.value()
         );
 
@@ -7060,12 +6586,12 @@ mod tests {
             data_len: 0,
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_add_argument_value(rejection_handle, &unsupported, &mut call_result) },
+            unsafe { multi_pwsh_add_argument_value(rejection_handle, &unsupported, &mut call_result) },
             Status::UnsupportedValue.value()
         );
         assert_eq!(call_result.status, Status::UnsupportedValue.value());
         assert_eq!(
-            unsafe { dps_pwsh_v2_release(rejection_handle, &mut call_result) },
+            unsafe { multi_pwsh_release(rejection_handle, &mut call_result) },
             Status::Success.value()
         );
     }
@@ -7101,7 +6627,7 @@ mod tests {
         let manifest_path = manifest_path.to_str().unwrap();
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_initialize_payload(
+                multi_pwsh_initialize_payload(
                     &PayloadActivation {
                         size: std::mem::size_of::<PayloadActivation>() as u32,
                         trust_policy: 0,
@@ -7131,7 +6657,7 @@ mod tests {
     fn v2_create_session(call_result: &mut CallResult) -> u64 {
         let mut handle = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_create(&mut handle, call_result) },
+            unsafe { multi_pwsh_create(&mut handle, call_result) },
             Status::Success.value()
         );
         handle
@@ -7148,7 +6674,7 @@ mod tests {
         };
         assert_eq!(
             unsafe {
-                dps_pwsh_v2_add_parameter_value(
+                multi_pwsh_add_parameter_value(
                     handle,
                     Utf8Span {
                         data: name.as_ptr(),
@@ -7172,7 +6698,7 @@ mod tests {
             data_len: payload.len(),
         };
         assert_eq!(
-            unsafe { dps_pwsh_v2_add_input_value(handle, &value, call_result) },
+            unsafe { multi_pwsh_add_input_value(handle, &value, call_result) },
             Status::Success.value()
         );
     }
@@ -7180,7 +6706,7 @@ mod tests {
     fn v2_invoke(handle: u64, call_result: &mut CallResult) -> u64 {
         let mut result_handle = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_invoke(handle, &mut result_handle, call_result) },
+            unsafe { multi_pwsh_invoke(handle, &mut result_handle, call_result) },
             Status::Success.value()
         );
         result_handle
@@ -7190,14 +6716,14 @@ mod tests {
         let mut count = 0;
         let mut flags = 0;
         assert_eq!(
-            unsafe { dps_pwsh_v2_result_get_stream_info(result_handle, 0, &mut count, &mut flags, call_result) },
+            unsafe { multi_pwsh_result_get_stream_info(result_handle, 0, &mut count, &mut flags, call_result) },
             Status::Success.value()
         );
         let mut values = Vec::with_capacity(count as usize);
         for index in 0..count {
             let mut required = 0;
             let status = unsafe {
-                dps_pwsh_v2_result_copy_stream_record_field_utf8(
+                multi_pwsh_result_copy_stream_record_field_utf8(
                     result_handle,
                     0,
                     index,
@@ -7212,7 +6738,7 @@ mod tests {
             let mut value = vec![0_u8; required];
             assert_eq!(
                 unsafe {
-                    dps_pwsh_v2_result_copy_stream_record_field_utf8(
+                    multi_pwsh_result_copy_stream_record_field_utf8(
                         result_handle,
                         0,
                         index,
@@ -7252,68 +6778,5 @@ mod tests {
             payload.extend_from_slice(value);
         }
         payload
-    }
-
-    fn create_session() -> u64 {
-        let mut handle = 0;
-        assert_eq!(unsafe { dps_pwsh_create(&mut handle) }, Status::Success.value());
-        handle
-    }
-
-    fn invoke_output(handle: u64) -> String {
-        let mut required = 0;
-        let status = unsafe { dps_pwsh_invoke_utf8(handle, std::ptr::null_mut(), 0, &mut required) };
-        if status == Status::Success.value() {
-            assert_eq!(required, 0);
-            return String::new();
-        }
-        assert_eq!(status, Status::BufferTooSmall.value());
-
-        let mut output = vec![0; required];
-        assert_eq!(
-            unsafe { dps_pwsh_invoke_utf8(handle, output.as_mut_ptr(), output.len(), &mut required) },
-            Status::Success.value()
-        );
-        String::from_utf8(output).unwrap()
-    }
-
-    fn invocation_error_count(handle: u64) -> u32 {
-        let mut count = 0;
-        assert_eq!(
-            unsafe { dps_pwsh_get_invocation_error_count(handle, &mut count) },
-            Status::Success.value()
-        );
-        count
-    }
-
-    fn invocation_error_field(handle: u64, error_index: u32, field: u32) -> String {
-        let mut required = 0;
-        let status = unsafe {
-            dps_pwsh_copy_invocation_error_field_utf8(
-                handle,
-                error_index,
-                field,
-                std::ptr::null_mut(),
-                0,
-                &mut required,
-            )
-        };
-        assert!(status == Status::Success.value() || status == Status::BufferTooSmall.value());
-
-        let mut value = vec![0; required];
-        assert_eq!(
-            unsafe {
-                dps_pwsh_copy_invocation_error_field_utf8(
-                    handle,
-                    error_index,
-                    field,
-                    value.as_mut_ptr(),
-                    value.len(),
-                    &mut required,
-                )
-            },
-            Status::Success.value()
-        );
-        String::from_utf8(value).unwrap()
     }
 }

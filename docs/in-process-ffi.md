@@ -21,28 +21,25 @@ PowerShell runtime versions, or runtime unloading in the same process.
 
 ## Lifecycle and ABI
 
-- `dps_pwsh_v2_initialize_payload` is process-global and accepts one canonical
+- `multi_pwsh_initialize_payload` is process-global and accepts one canonical
   payload directory only. Repeating it with the same payload succeeds; selecting
-  a different payload returns `DPS_PWSH_INCOMPATIBLE_PAYLOAD`.
-- The native product ABI is v2. Call `dps_pwsh_get_abi_info` before
-  initialization, verify its compatible version and feature flags, then use the
-  `dps_pwsh_v2_*` exports. The injected managed function table is independently
-  versioned at v2.
-- v2 uses sized, caller-owned `dps_pwsh_call_result` structures. Each operation
+  a different payload returns `MULTI_PWSH_INCOMPATIBLE_PAYLOAD`.
+- The native product ABI reports its compatible version and feature flags through
+  `multi_pwsh_get_abi_info`; the managed package and native asset ship together
+  and use the unversioned `multi_pwsh_*` exports. The injected managed function
+  table independently reports its compatibility version.
+- The supported ABI uses sized, caller-owned `multi_pwsh_call_result` structures. Each operation
   returns its own bounded UTF-8 diagnostic and truncation metadata, so concurrent
-  calls never read a process-global error slot. `dps_pwsh_utf8_span` permits
+  calls never read a process-global error slot. `multi_pwsh_utf8_span` permits
   `(NULL, 0)` for an empty value; the library never retains caller memory.
-- The v1 exports and `dps_pwsh_last_error_utf8` remain as preview compatibility
-  shims only. New consumers must not use them because their diagnostic state is
-  process-global.
 - The caller owns all input and output buffers. UTF-8 fields use a two-pass
   required-length query and never retain caller memory.
-- `dps_pwsh_v2_create` returns an opaque builder handle. `dps_pwsh_v2_release`
+- `multi_pwsh_create` returns an opaque builder handle. `multi_pwsh_release`
   disposes its managed `GCHandle`; handles are never reused by the current
-  process. `dps_pwsh_v2_invoke` instead returns a distinct immutable result
-  handle. Release it explicitly with `dps_pwsh_v2_result_release`; it remains
+  process. `multi_pwsh_invoke` instead returns a distinct immutable result
+  handle. Release it explicitly with `multi_pwsh_result_release`; it remains
   readable after the builder is cleared, mutated, or released.
-  - `dps_pwsh_v2_result_get_metadata` reports the immutable invocation ID,
+  - `multi_pwsh_result_get_metadata` reports the immutable invocation ID,
     terminal synchronous state (`Completed` or `Terminated`), and `had_errors`
     bit alongside the retained stream snapshot.
 - Exports contain Rust panics and return fixed status codes without unwinding
@@ -55,13 +52,13 @@ PowerShell runtime versions, or runtime unloading in the same process.
   pipeline so cancellation is not blocked behind `Invoke`.
 - A v2 session is a separate opaque handle, not a builder alias. A session owns
   (or narrowly borrows) one local runspace; builders created by
-  `dps_pwsh_v2_session_create_builder` keep an internal managed lease, so they
+  `multi_pwsh_session_create_builder` keep an internal managed lease, so they
   remain valid if the public session handle is released first. Session release
   prevents new builders and closes an owned runspace after the final builder
   lease is released. Immutable results and operations remain independently
   owned as before.
 - Explicit native release consumes its raw handle: a second release or any
-  later use deterministically returns `DPS_PWSH_INVALID_HANDLE`. In contrast,
+  later use deterministically returns `MULTI_PWSH_INVALID_HANDLE`. In contrast,
   the facade's `IDisposable` implementations are idempotent and their
   `SafeHandle` leases keep an in-flight facade call alive until that call
   returns.
@@ -69,7 +66,7 @@ PowerShell runtime versions, or runtime unloading in the same process.
 ## Payload trust and activation
 
 Production activation is deliberately **not** an existence check. Before
-loading `hostfxr`, `dps_pwsh_v2_initialize_payload` canonicalizes the payload
+loading `hostfxr`, `multi_pwsh_initialize_payload` canonicalizes the payload
 and manifest paths, parses the manifest, verifies the caller-supplied SHA-256
 pin of the complete manifest bytes, checks the target RID/architecture, and
 SHA-256 verifies every declared file. A hash-pinned manifest must declare
@@ -175,37 +172,37 @@ conventional `devolutions-pwsh-payload.json` beside the payload.
 
 ### Async operations and cancellation
 
-`dps_pwsh_v2_invoke_async` returns an opaque operation handle. It is a genuine
+`multi_pwsh_invoke_async` returns an opaque operation handle. It is a genuine
 native-owned invocation: the Rust bridge retains the builder and its managed
 pipeline until the operation reaches a terminal state. It is not a managed
 `Task.Run` wrapper around synchronous `Invoke`.
 
-- `dps_pwsh_v2_operation_poll` and `dps_pwsh_v2_operation_wait` report
+- `multi_pwsh_operation_poll` and `multi_pwsh_operation_wait` report
   `Pending`, `Running`, `Completed`, `Cancelled`, or `Failed`, together with
   the terminal status. A wait timeout reports the current non-terminal state;
   `UINT32_MAX` waits indefinitely.
-- `dps_pwsh_v2_operation_stop` is idempotent. The first stop request wins over
+- `multi_pwsh_operation_stop` is idempotent. The first stop request wins over
   any concurrent successful completion: the operation becomes `Cancelled`,
-  returns `DPS_PWSH_OPERATION_CANCELLED_STATUS`, and never exposes an
+  returns `MULTI_PWSH_OPERATION_CANCELLED_STATUS`, and never exposes an
   immutable result. This prevents a caller from accepting partial script
   output as a successful result. Repeated stop calls and stop after a terminal
   state succeed.
 - A completed operation exposes immutable result snapshots through
-  `dps_pwsh_v2_operation_get_result`. Retrieval before terminal completion
-  returns `DPS_PWSH_OPERATION_NOT_TERMINAL`; cancelled and failed operations
+  `multi_pwsh_operation_get_result`. Retrieval before terminal completion
+  returns `MULTI_PWSH_OPERATION_NOT_TERMINAL`; cancelled and failed operations
   return their terminal status plus the operation's bounded (4 KiB) diagnostic.
   Result handles are independently released with
-  `dps_pwsh_v2_result_release` and can outlive the operation handle.
-- `dps_pwsh_v2_operation_release` is explicit single-owner release. Releasing an
+  `multi_pwsh_result_release` and can outlive the operation handle.
+- `multi_pwsh_operation_release` is explicit single-owner release. Releasing an
   active operation first requests cancellation, then detaches the caller's
   handle. Existing native calls and the worker retain internal references, so
   no release race can free a pipeline while it is executing. The raw operation
   handle is then stale and a repeated release deterministically returns
-  `DPS_PWSH_INVALID_HANDLE`; `PowerShellInvocationOperation.Dispose()` remains
+  `MULTI_PWSH_INVALID_HANDLE`; `PowerShellInvocationOperation.Dispose()` remains
   idempotent. Releasing a builder with an active operation likewise requests
   cancellation.
 - A builder is immutable while its async operation is active. Builder mutation,
-  synchronous invocation, and input calls return `DPS_PWSH_BACKPRESSURE`
+  synchronous invocation, and input calls return `MULTI_PWSH_BACKPRESSURE`
   until terminal completion. Builder `Stop` targets its active operation and
   has the same cancellation-wins semantics.
 
@@ -279,9 +276,9 @@ are process-globally serialized and copied-variable access rejects an active
 async session operation.
 
 `PowerShellSessionPoolOptions` and `CreateSessionPool` form an explicit
-rejection boundary. `dps_pwsh_v2_session_pool_create` validates a bounded
+rejection boundary. `multi_pwsh_session_pool_create` validates a bounded
 maximum of 1–64 sessions (with a minimum no greater than that) then always returns
-`DPS_PWSH_UNSUPPORTED_CAPABILITY`: the current single CoreCLR, local-runspace
+`MULTI_PWSH_UNSUPPORTED_CAPABILITY`: the current single CoreCLR, local-runspace
 model has no safe pool lifecycle/concurrency implementation. It does not
 pretend that serializing one runspace is a pool.
 
@@ -294,7 +291,7 @@ discard a partially built pipeline after an item fails.
 
 ## Tagged values and input
 
-`dps_pwsh_data_value` is the only native value-transfer envelope. Its `kind`,
+`multi_pwsh_data_value` is the only native value-transfer envelope. Its `kind`,
 bounded caller-owned payload, and zero flags are copied synchronously by the
 call. It never carries a CLR object, `PSObject`, delegate, handle, reflection
 request, or JSON document. The facade exposes the same contract as immutable
@@ -324,9 +321,9 @@ raw `object`.
 
 `AddInput` copies one tagged value into a synchronous per-builder collection.
 The collection accepts at most 64 values and 64 KiB of payload; exceeding
-either bound returns `DPS_PWSH_BACKPRESSURE`. Call `CompleteInput` before
+either bound returns `MULTI_PWSH_BACKPRESSURE`. Call `CompleteInput` before
 `Invoke` after starting input. Invoking an uncompleted collection returns
-`DPS_PWSH_INPUT_NOT_COMPLETED` and retains the input so it can be completed or
+`MULTI_PWSH_INPUT_NOT_COMPLETED` and retains the input so it can be completed or
 `ResetInput` can discard it. Invoking without ever starting input retains the
 ordinary no-input behavior. Completion, reset, clear, release, and invocation
 all discard the managed input collection after its defined use, preventing
@@ -338,12 +335,12 @@ producer concurrently with `InvokeAsync`, adding input after start, and
 reopening completed input are intentionally unsupported. This preserves an
 explicit copied-input lifetime and deterministic cancellation boundary.
 
-`dps_pwsh_v2_result_get_stream_info` and indexed record APIs expose output,
+`multi_pwsh_result_get_stream_info` and indexed record APIs expose output,
 error, warning, verbose, debug, information, and progress. Retained records
 carry a global capture sequence available through
-`dps_pwsh_v2_result_get_sequence_record`. Each stream retains at most 32
+`multi_pwsh_result_get_sequence_record`. Each stream retains at most 32
 records; each field retains at most 4,096 UTF-16 code units.
-`dps_pwsh_v2_result_get_stream_totals` reports all observed and dropped
+`multi_pwsh_result_get_stream_totals` reports all observed and dropped
 records, not merely the retained ring. Result, stream, and record flags report
 terminating invocation, dropped sequence/stream records, and field truncation.
 Managed stream buffers are cleared before and after every result invocation,
