@@ -341,7 +341,7 @@ jobs:
             runtime_id: linux-x64
             native_file: libmulti_pwsh_sdk.so
             packaged_file: libmulti-pwsh-sdk.so
-          - os: macos-13
+          - os: macos-15-intel
             runtime_id: osx-x64
             native_file: libmulti_pwsh_sdk.dylib
             packaged_file: libmulti-pwsh-sdk.dylib
