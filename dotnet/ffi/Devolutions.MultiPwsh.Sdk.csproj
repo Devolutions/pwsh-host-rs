@@ -32,10 +32,10 @@
     <None Include="buildTransitive\Devolutions.MultiPwsh.Sdk.targets"
           Pack="true"
           PackagePath="buildTransitive\" />
-    <None Include="devolutions-pwsh-payload.manifest.template.json"
-          Pack="true"
-          PackagePath="contentFiles\any\any\"
-          Visible="false" />
+    <Content Include="devolutions-pwsh-payload.manifest.template.json"
+             Pack="true"
+             PackagePath="contentFiles\any\any\"
+             Visible="false" />
     <None Include="$(PwshFfiNativeLibrary)"
           Condition="'$(PwshFfiNativeStagingRoot)' == ''"
           Pack="true"

@@ -5,8 +5,7 @@ The library receives an explicit PowerShell payload directory, loads that
 payload's `hostfxr`, initializes `pwsh.dll`, injects
 `Devolutions.PowerShell.SDK.Bindings`, and invokes its unmanaged function table.
 
-The `dotnet/ffi` facade uses only `LibraryImport` and the native header at
-`crates/pwsh-ffi/include/devolutions_pwsh_ffi.h`. It has no
+The `dotnet/ffi` facade uses only `LibraryImport`. It has no
 `System.Management.Automation` or `Microsoft.PowerShell.*` dependency.
 
 ## Experimental runtime boundary
