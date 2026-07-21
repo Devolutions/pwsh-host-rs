@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $cratesRoot = Join-Path $repoRoot 'crates'
 $readmePath = Join-Path $repoRoot 'README.md'
+$sdkProjectPath = Join-Path $repoRoot 'dotnet\sdk-ffi\Devolutions.MultiPwsh.Sdk.csproj'
 $packageExamplePaths = @(
     $readmePath,
     (Join-Path $repoRoot 'docs\host-and-venv.md'),
@@ -34,6 +35,7 @@ if (-not $cargoFiles) {
 $encoding = New-Object System.Text.UTF8Encoding($false)
 $updated = @()
 $readmeUpdated = $false
+$sdkProjectUpdated = $false
 $packageExamplesUpdated = @()
 
 foreach ($cargoFile in $cargoFiles) {
@@ -113,6 +115,28 @@ if (Test-Path -Path $readmePath -PathType Leaf) {
     }
 }
 
+if (Test-Path -Path $sdkProjectPath -PathType Leaf) {
+    $sdkProjectContent = [System.IO.File]::ReadAllText($sdkProjectPath)
+    $newSdkProjectContent = [System.Text.RegularExpressions.Regex]::Replace(
+        $sdkProjectContent,
+        '(?<prefix><PackageVersion\b[^>]*>)(?<current>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?<suffix></PackageVersion>)',
+        [System.Text.RegularExpressions.MatchEvaluator] {
+            param($sdkProjectMatch)
+            $sdkProjectMatch.Groups['prefix'].Value + $Version + $sdkProjectMatch.Groups['suffix'].Value
+        },
+        [System.Text.RegularExpressions.RegexOptions]::None,
+        [System.TimeSpan]::FromSeconds(5)
+    )
+
+    if ($newSdkProjectContent -ne $sdkProjectContent) {
+        if (-not $DryRun) {
+            [System.IO.File]::WriteAllText($sdkProjectPath, $newSdkProjectContent, $encoding)
+        }
+
+        $sdkProjectUpdated = $true
+    }
+}
+
 foreach ($packageExamplePath in $packageExamplePaths) {
     if (-not (Test-Path -Path $packageExamplePath -PathType Leaf)) {
         continue
@@ -139,7 +163,7 @@ foreach ($packageExamplePath in $packageExamplePaths) {
     }
 }
 
-if ($updated.Count -eq 0 -and -not $readmeUpdated -and $packageExamplesUpdated.Count -eq 0) {
+if ($updated.Count -eq 0 -and -not $readmeUpdated -and -not $sdkProjectUpdated -and $packageExamplesUpdated.Count -eq 0) {
     Write-Host "All crate package versions are already $Version"
     if (Test-Path -Path $readmePath -PathType Leaf) {
         Write-Host "No README release example tag needed updating"
@@ -157,6 +181,10 @@ if ($updated.Count -gt 0) {
 
 if ($readmeUpdated) {
     Write-Host "Updated README release example tag in: $readmePath"
+}
+
+if ($sdkProjectUpdated) {
+    Write-Host "Updated SDK package version in: $sdkProjectPath"
 }
 
 if ($packageExamplesUpdated.Count -gt 0) {
