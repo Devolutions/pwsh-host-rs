@@ -1,9 +1,11 @@
 using System;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Collections.ObjectModel;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 using System.Management.Automation;
 
@@ -14,6 +16,52 @@ namespace NativeHost
 
     public static partial class Bindings
     {
+        public const int AbiVersion = 2;
+        private const int MaxInvocationErrors = 32;
+        private const int MaxInvocationErrorFieldLength = 4096;
+        private static readonly ConcurrentDictionary<IntPtr, InvocationResult> InvocationResults = new ConcurrentDictionary<IntPtr, InvocationResult>();
+
+        internal sealed class InvocationResult
+        {
+            public InvocationResult(string output, InvocationError[] errors, int status)
+            {
+                Output = output;
+                Errors = errors;
+                Status = status;
+            }
+
+            public string Output { get; }
+
+            public InvocationError[] Errors { get; }
+
+            public int Status { get; }
+        }
+
+        internal sealed class InvocationError
+        {
+            public InvocationError(string message, string fullyQualifiedErrorId, string category, string exceptionType)
+            {
+                Message = message;
+                FullyQualifiedErrorId = fullyQualifiedErrorId;
+                Category = category;
+                ExceptionType = exceptionType;
+            }
+
+            public string Message { get; }
+
+            public string FullyQualifiedErrorId { get; }
+
+            public string Category { get; }
+
+            public string ExceptionType { get; }
+        }
+
+        [UnmanagedCallersOnly]
+        public static int Bindings_GetAbiVersion()
+        {
+            return AbiVersion;
+        }
+
         [UnmanagedCallersOnly]
         public static IntPtr PowerShell_Create()
         {
@@ -29,6 +77,7 @@ namespace NativeHost
         {
             GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
             PowerShell ps = (PowerShell) gch.Target;
+            InvalidateInvocationOutput(ptrHandle);
             string argument = Marshal.PtrToStringUTF8(ptrArgument);
             ps.AddArgument(argument);
         }
@@ -38,6 +87,7 @@ namespace NativeHost
         {
             GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
             PowerShell ps = (PowerShell) gch.Target;
+            InvalidateInvocationOutput(ptrHandle);
             string name = Marshal.PtrToStringUTF8(ptrName);
             string value = Marshal.PtrToStringUTF8(ptrValue);
             ps.AddParameter(name, value);
@@ -48,6 +98,7 @@ namespace NativeHost
         {
             GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
             PowerShell ps = (PowerShell) gch.Target;
+            InvalidateInvocationOutput(ptrHandle);
             string name = Marshal.PtrToStringUTF8(ptrName);
             ps.AddParameter(name, value);
         }
@@ -57,6 +108,7 @@ namespace NativeHost
         {
             GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
             PowerShell ps = (PowerShell) gch.Target;
+            InvalidateInvocationOutput(ptrHandle);
             string name = Marshal.PtrToStringUTF8(ptrName);
             ps.AddParameter(name, value);
         }
@@ -66,6 +118,7 @@ namespace NativeHost
         {
             GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
             PowerShell ps = (PowerShell) gch.Target;
+            InvalidateInvocationOutput(ptrHandle);
             string command = Marshal.PtrToStringUTF8(ptrCommand);
             ps.AddCommand(command);
         }
@@ -75,6 +128,7 @@ namespace NativeHost
         {
             GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
             PowerShell ps = (PowerShell) gch.Target;
+            InvalidateInvocationOutput(ptrHandle);
             string script = Marshal.PtrToStringUTF8(ptrScript);
             ps.AddScript(script);
         }
@@ -84,6 +138,7 @@ namespace NativeHost
         {
             GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
             PowerShell ps = (PowerShell) gch.Target;
+            InvalidateInvocationOutput(ptrHandle);
             ps.AddStatement();
         }
 
@@ -96,10 +151,124 @@ namespace NativeHost
         }
 
         [UnmanagedCallersOnly]
+        public static unsafe int PowerShell_InvokeToUtf8(IntPtr ptrHandle, byte* buffer, int bufferLength, int* requiredLength)
+        {
+            if (requiredLength == null || bufferLength < 0)
+            {
+                return -1;
+            }
+
+            try
+            {
+                GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
+                PowerShell ps = (PowerShell) gch.Target;
+                InvocationResult result = InvocationResults.GetOrAdd(ptrHandle, _ => InvokeAndCapture(ps));
+                if (result.Status != 0)
+                {
+                    return result.Status;
+                }
+
+                int required = Encoding.UTF8.GetByteCount(result.Output);
+                *requiredLength = required;
+                if (bufferLength < required)
+                {
+                    return 1;
+                }
+
+                if (required > 0)
+                {
+                    Encoding.UTF8.GetBytes(result.Output, new Span<byte>(buffer, required));
+                }
+
+                return 0;
+            }
+            catch
+            {
+                *requiredLength = 0;
+                return -2;
+            }
+        }
+
+        [UnmanagedCallersOnly]
+        public static int PowerShell_GetInvocationErrorCount(IntPtr ptrHandle)
+        {
+            return InvocationResults.TryGetValue(ptrHandle, out InvocationResult result)
+                ? result.Errors.Length
+                : -1;
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int PowerShell_CopyInvocationErrorFieldToUtf8(
+            IntPtr ptrHandle,
+            int errorIndex,
+            int field,
+            byte* buffer,
+            int bufferLength,
+            int* requiredLength)
+        {
+            if (requiredLength == null || bufferLength < 0)
+            {
+                return -1;
+            }
+
+            try
+            {
+                if (!InvocationResults.TryGetValue(ptrHandle, out InvocationResult result) ||
+                    errorIndex < 0 ||
+                    errorIndex >= result.Errors.Length)
+                {
+                    *requiredLength = 0;
+                    return -1;
+                }
+
+                InvocationError error = result.Errors[errorIndex];
+                string value;
+                switch (field)
+                {
+                    case 0:
+                        value = error.Message;
+                        break;
+                    case 1:
+                        value = error.FullyQualifiedErrorId;
+                        break;
+                    case 2:
+                        value = error.Category;
+                        break;
+                    case 3:
+                        value = error.ExceptionType;
+                        break;
+                    default:
+                        *requiredLength = 0;
+                        return -1;
+                }
+
+                int required = Encoding.UTF8.GetByteCount(value);
+                *requiredLength = required;
+                if (bufferLength < required)
+                {
+                    return 1;
+                }
+
+                if (required > 0)
+                {
+                    Encoding.UTF8.GetBytes(value, new Span<byte>(buffer, required));
+                }
+
+                return 0;
+            }
+            catch
+            {
+                *requiredLength = 0;
+                return -2;
+            }
+        }
+
+        [UnmanagedCallersOnly]
         public static void PowerShell_Clear(IntPtr ptrHandle)
         {
             GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
             PowerShell ps = (PowerShell) gch.Target;
+            InvalidateInvocationOutput(ptrHandle);
             ps.Commands.Clear();
         }
 
@@ -220,11 +389,78 @@ namespace NativeHost
         [UnmanagedCallersOnly]
         public static void GCHandle_Free(IntPtr ptrHandle)
         {
+            InvalidateInvocationOutput(ptrHandle);
             GCHandle gch = GCHandle.FromIntPtr(ptrHandle);
             if (gch.IsAllocated)
             {
                 gch.Free();
             }
+        }
+
+        internal static void InvalidateInvocationOutput(IntPtr ptrHandle)
+        {
+            InvocationResults.TryRemove(ptrHandle, out _);
+        }
+
+        internal static InvocationResult InvokeAndCapture(PowerShell ps)
+        {
+            try
+            {
+                ps.Streams.Error.Clear();
+                Collection<PSObject> results = ps.Invoke();
+                StringBuilder builder = new StringBuilder();
+                foreach (PSObject result in results)
+                {
+                    builder.AppendLine(result?.ToString());
+                }
+
+                List<InvocationError> errors = new List<InvocationError>();
+                foreach (ErrorRecord error in ps.Streams.Error)
+                {
+                    if (errors.Count == MaxInvocationErrors)
+                    {
+                        break;
+                    }
+
+                    errors.Add(CreateInvocationError(error));
+                }
+
+                return new InvocationResult(builder.ToString(), errors.ToArray(), 0);
+            }
+            catch (RuntimeException exception)
+            {
+                return new InvocationResult(
+                    string.Empty,
+                    new[] { CreateInvocationError(exception.ErrorRecord, exception) },
+                    -2);
+            }
+            catch (Exception exception)
+            {
+                return new InvocationResult(
+                    string.Empty,
+                    new[] { CreateInvocationError(null, exception) },
+                    -2);
+            }
+        }
+
+        private static InvocationError CreateInvocationError(ErrorRecord error, Exception fallbackException = null)
+        {
+            Exception exception = error?.Exception ?? fallbackException;
+            return new InvocationError(
+                BoundInvocationErrorField(error?.ToString() ?? fallbackException?.Message ?? string.Empty),
+                BoundInvocationErrorField(error?.FullyQualifiedErrorId ?? string.Empty),
+                BoundInvocationErrorField(error?.CategoryInfo.Category.ToString() ?? string.Empty),
+                BoundInvocationErrorField(exception?.GetType().FullName ?? string.Empty));
+        }
+
+        private static string BoundInvocationErrorField(string value)
+        {
+            if (value == null || value.Length <= MaxInvocationErrorFieldLength)
+            {
+                return value ?? string.Empty;
+            }
+
+            return value.Substring(0, MaxInvocationErrorFieldLength);
         }
 
         private static object[] ParseJsonArray(string json)

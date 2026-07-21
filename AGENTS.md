@@ -10,8 +10,9 @@ This file is guidance for AI/code agents working in this repository.
 
 ## Baseline
 
-- .NET SDK pinned in `global.json` (currently `8.0.400` with `latestPatch` roll-forward).
-- .NET target framework is `net8.0` in `dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj`.
+- .NET SDK pinned in `global.json` (currently `10.0.300` with `latestPatch` roll-forward).
+- `Devolutions.MultiPwsh.Sdk` and its NativeAOT sample target `net10.0`; the
+  payload-local bindings remain `net8.0` for PowerShell 7.4 compatibility.
 - Rust crate uses edition 2018.
 
 ## PR preparation policy (mandatory)

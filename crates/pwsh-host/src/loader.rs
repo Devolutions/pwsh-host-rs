@@ -1,16 +1,80 @@
+use std::path::{Path, PathBuf};
+
+use crate::bindings::{Bindings, FfiBindings};
 use crate::context::HostfxrContext;
 use crate::delegate_loader::AssemblyDelegateLoader;
 use crate::error::Error;
 use crate::host_detect::pwsh_host_detect;
 use crate::host_exit_code::HostExitCode;
 use crate::host_exit_code::KnownHostExitCode;
-use crate::hostfxr::load_hostfxr_from_pwsh_dir;
+use crate::hostfxr::{load_hostfxr_from_pwsh_dir, Hostfxr};
 use crate::pdcstr;
 use crate::pdcstring::PdCString;
 use crate::pwsh_cli::configure_startup_hooks_for_context;
 
 pub const BINDINGS_DLL: &[u8] =
     include_bytes!("../../../dotnet/bindings/bin/Release/net8.0/Devolutions.PowerShell.SDK.Bindings.dll");
+
+pub struct HostedRuntime {
+    bindings: Bindings,
+    ffi_bindings: FfiBindings,
+    host_context: crate::context::HostfxrHandle,
+    hostfxr: crate::hostfxr::Hostfxr,
+    pwsh_dir: PathBuf,
+}
+
+impl HostedRuntime {
+    pub fn new_for_pwsh_dir(pwsh_dir: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
+        let pwsh_dir = validate_pwsh_payload(pwsh_dir.as_ref())?;
+        let hostfxr = load_hostfxr_from_pwsh_dir(&pwsh_dir)?;
+        let (host_context, bindings, ffi_bindings) =
+            match hostfxr.initialize_for_dotnet_command_line(pwsh_dir.join("pwsh.dll")) {
+                Ok(context) => load_bindings_from_context(&hostfxr, context, &pwsh_dir)?,
+                Err(error) => {
+                    let should_fallback = matches!(
+                        error.downcast_ref::<Error>(),
+                        Some(Error::Hostfxr(crate::host_exit_code::HostExitCode::Known(
+                            KnownHostExitCode::InvalidArgFailure
+                        )))
+                    );
+
+                    if !should_fallback {
+                        return Err(error);
+                    }
+
+                    let runtime_config = PdCString::from_os_str(pwsh_dir.join("pwsh.runtimeconfig.json"))?;
+                    let context = hostfxr.initialize_for_runtime_config_path(&runtime_config)?;
+                    load_bindings_from_context(&hostfxr, context, &pwsh_dir)?
+                }
+            };
+
+        Ok(Self {
+            bindings,
+            ffi_bindings,
+            host_context,
+            hostfxr,
+            pwsh_dir,
+        })
+    }
+
+    pub fn bindings(&self) -> Bindings {
+        self.bindings
+    }
+
+    pub(crate) fn ffi_bindings(&self) -> FfiBindings {
+        self.ffi_bindings
+    }
+
+    pub fn pwsh_dir(&self) -> &Path {
+        &self.pwsh_dir
+    }
+}
+
+impl Drop for HostedRuntime {
+    fn drop(&mut self) {
+        let _ = self.hostfxr.close(self.host_context.as_raw());
+    }
+}
 
 pub fn get_assembly_delegate_loader_for_pwsh_dir(
     pwsh_path: impl AsRef<std::path::Path>,
@@ -38,6 +102,12 @@ pub fn get_assembly_delegate_loader_for_pwsh_dir(
         }
     };
 
+    load_bindings(&fn_loader)?;
+
+    Ok(fn_loader)
+}
+
+fn load_bindings(fn_loader: &AssemblyDelegateLoader<PdCString>) -> Result<(), Box<dyn std::error::Error>> {
     let load_assembly_from_native_memory = fn_loader.get_function_pointer_for_unmanaged_callers_only_method(
         pdcstr!("System.Management.Automation.PowerShellUnsafeAssemblyLoad, System.Management.Automation"),
         pdcstr!("LoadAssemblyFromNativeMemory"),
@@ -47,8 +117,28 @@ pub fn get_assembly_delegate_loader_for_pwsh_dir(
         unsafe { std::mem::transmute(load_assembly_from_native_memory) };
     let result = (load_assembly_from_native_memory)(BINDINGS_DLL.as_ptr(), BINDINGS_DLL.len() as u32);
     HostExitCode::from(result).into_result()?;
+    Ok(())
+}
 
-    Ok(fn_loader)
+fn load_bindings_from_context<I>(
+    hostfxr: &Hostfxr,
+    context: HostfxrContext<'_, I>,
+    pwsh_dir: &Path,
+) -> Result<(crate::context::HostfxrHandle, Bindings, FfiBindings), Box<dyn std::error::Error>> {
+    let host_context = context.handle();
+    let result = (|| {
+        let fn_loader = get_assembly_delegate_loader_from_context(&context, pwsh_dir)?;
+        load_bindings(&fn_loader)?;
+        let bindings =
+            Bindings::new_with_loader(&fn_loader).map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
+        let ffi_bindings =
+            FfiBindings::new_with_loader(&fn_loader).map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
+        Ok::<_, Box<dyn std::error::Error>>((bindings, ffi_bindings))
+    })();
+    if result.is_err() {
+        let _ = hostfxr.close(host_context.as_raw());
+    }
+    result.map(|(bindings, ffi_bindings)| (host_context, bindings, ffi_bindings))
 }
 
 fn get_assembly_delegate_loader_from_context<I>(
@@ -59,6 +149,30 @@ fn get_assembly_delegate_loader_from_context<I>(
     let assembly_path = PdCString::from_os_str(pwsh_path.join("System.Management.Automation.dll").into_os_string())?;
     let fn_loader = ctx.get_delegate_loader_for_assembly(assembly_path)?;
     Ok(fn_loader)
+}
+
+fn validate_pwsh_payload(pwsh_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let pwsh_dir = std::fs::canonicalize(pwsh_dir)?;
+    if !pwsh_dir.is_dir() {
+        return Err(format!(
+            "PowerShell payload directory is not a directory: {}",
+            pwsh_dir.display()
+        )
+        .into());
+    }
+
+    for required_file in &[
+        "pwsh.dll",
+        "pwsh.runtimeconfig.json",
+        "System.Management.Automation.dll",
+    ] {
+        let path = pwsh_dir.join(required_file);
+        if !path.is_file() {
+            return Err(format!("PowerShell payload is missing required file: {}", path.display()).into());
+        }
+    }
+
+    Ok(pwsh_dir)
 }
 
 pub fn get_assembly_delegate_loader() -> AssemblyDelegateLoader<PdCString> {

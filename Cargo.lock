@@ -951,6 +951,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pwsh-sdk-ffi"
+version = "0.14.2"
+dependencies = [
+ "pwsh-host",
+ "winresource",
+]
+
+[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

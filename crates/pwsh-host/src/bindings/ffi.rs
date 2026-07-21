@@ -1,0 +1,1564 @@
+use std::convert::TryFrom;
+use std::fmt;
+use std::mem;
+use std::sync::Arc;
+
+use crate::delegate_loader::{AssemblyDelegateLoader, MethodWithUnknownSignature};
+use crate::error::Error;
+use crate::loader::HostedRuntime;
+use crate::pdcstr;
+use crate::pdcstring::{PdCStr, PdCString};
+
+use super::bindings_generated::PowerShellHandle;
+
+const FFI_BINDINGS_ABI_VERSION: u32 = 2;
+const FFI_CALL_DIAGNOSTIC_CAPACITY: usize = 4096;
+const FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES: u64 = 1 << 8;
+const FFI_FEATURE_SESSION_PRIMITIVES: u64 = 1 << 10;
+const FFI_FEATURE_SESSION_POLLING: u64 = 1 << 11;
+const FFI_FEATURE_SNAPSHOT_PROJECTIONS: u64 = 1 << 13;
+const FFI_FEATURE_SESSION_CONFIGURATION: u64 = 1 << 14;
+const FFI_FEATURE_SESSION_VARIABLES: u64 = 1 << 15;
+const FFI_FEATURE_CAPABILITY_RPC: u64 = 1 << 16;
+const STATUS_SUCCESS: i32 = 0;
+const STATUS_BUFFER_TOO_SMALL: i32 = 1;
+
+#[repr(C)]
+struct FfiCallResult {
+    size: u32,
+    status: i32,
+    flags: u32,
+    diagnostic: *mut u8,
+    diagnostic_capacity: i32,
+    diagnostic_required_length: i32,
+    diagnostic_written_length: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FfiApiV2 {
+    size: usize,
+    abi_version: u32,
+    feature_flags: u64,
+    create_fn: *const libc::c_void,
+    release_fn: *const libc::c_void,
+    add_argument_utf8_fn: *const libc::c_void,
+    add_parameter_string_utf8_fn: *const libc::c_void,
+    add_parameter_int64_fn: *const libc::c_void,
+    add_command_utf8_fn: *const libc::c_void,
+    add_script_utf8_fn: *const libc::c_void,
+    add_statement_fn: *const libc::c_void,
+    invoke_to_utf8_fn: *const libc::c_void,
+    get_invocation_error_count_fn: *const libc::c_void,
+    copy_invocation_error_field_to_utf8_fn: *const libc::c_void,
+    clear_fn: *const libc::c_void,
+    stop_fn: *const libc::c_void,
+    invoke_to_result_fn: *const libc::c_void,
+    invocation_result_release_fn: *const libc::c_void,
+    invocation_result_get_info_fn: *const libc::c_void,
+    invocation_result_get_stream_info_fn: *const libc::c_void,
+    invocation_result_get_stream_record_info_fn: *const libc::c_void,
+    invocation_result_copy_stream_record_field_to_utf8_fn: *const libc::c_void,
+    invocation_result_get_sequence_record_fn: *const libc::c_void,
+    add_command_utf8_local_fn: *const libc::c_void,
+    add_script_utf8_local_fn: *const libc::c_void,
+    add_argument_value_fn: *const libc::c_void,
+    add_parameter_value_fn: *const libc::c_void,
+    add_parameter_switch_fn: *const libc::c_void,
+    add_input_value_fn: *const libc::c_void,
+    complete_input_fn: *const libc::c_void,
+    reset_input_fn: *const libc::c_void,
+    invocation_result_get_metadata_fn: *const libc::c_void,
+    session_create_fn: *const libc::c_void,
+    session_release_fn: *const libc::c_void,
+    session_create_builder_fn: *const libc::c_void,
+    session_get_snapshot_fn: *const libc::c_void,
+    session_get_event_info_fn: *const libc::c_void,
+    invocation_result_get_stream_totals_fn: *const libc::c_void,
+    invocation_result_get_stream_record_projection_info_fn: *const libc::c_void,
+    invocation_result_copy_stream_record_value_fn: *const libc::c_void,
+    session_create_configured_fn: *const libc::c_void,
+    session_set_variable_fn: *const libc::c_void,
+    session_remove_variable_fn: *const libc::c_void,
+    session_get_variable_snapshot_fn: *const libc::c_void,
+    power_shell_set_capability_context_fn: *const libc::c_void,
+}
+
+type FnBindingsGetFfiApiV2 = unsafe extern "system" fn() -> *const FfiApiV2;
+type FnFfiPowerShellCreate = unsafe extern "system" fn(*mut PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellRelease = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellAddUtf8 = unsafe extern "system" fn(PowerShellHandle, *const u8, i32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellAddParameterStringUtf8 =
+    unsafe extern "system" fn(PowerShellHandle, *const u8, i32, *const u8, i32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellAddParameterInt64 =
+    unsafe extern "system" fn(PowerShellHandle, *const u8, i32, i64, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellAddStatement = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellInvokeToUtf8 =
+    unsafe extern "system" fn(PowerShellHandle, *mut u8, i32, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellGetInvocationErrorCount =
+    unsafe extern "system" fn(PowerShellHandle, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellCopyInvocationErrorFieldToUtf8 =
+    unsafe extern "system" fn(PowerShellHandle, i32, i32, *mut u8, i32, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellClear = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellStop = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellInvokeToResult =
+    unsafe extern "system" fn(PowerShellHandle, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiInvocationResultRelease = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiInvocationResultGetInfo =
+    unsafe extern "system" fn(PowerShellHandle, *mut u32, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiInvocationResultGetStreamInfo =
+    unsafe extern "system" fn(PowerShellHandle, i32, *mut i32, *mut u32, *mut FfiCallResult) -> i32;
+type FnFfiInvocationResultGetStreamRecordInfo =
+    unsafe extern "system" fn(PowerShellHandle, i32, i32, *mut i64, *mut u32, *mut FfiCallResult) -> i32;
+type FnFfiInvocationResultCopyStreamRecordFieldToUtf8 =
+    unsafe extern "system" fn(PowerShellHandle, i32, i32, i32, *mut u8, i32, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiInvocationResultGetSequenceRecord =
+    unsafe extern "system" fn(PowerShellHandle, i32, *mut i32, *mut i32, *mut i64, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellAddScopedUtf8 =
+    unsafe extern "system" fn(PowerShellHandle, *const u8, i32, i32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellAddValue =
+    unsafe extern "system" fn(PowerShellHandle, u32, *const u8, i32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellAddParameterValue =
+    unsafe extern "system" fn(PowerShellHandle, *const u8, i32, u32, *const u8, i32, *mut FfiCallResult) -> i32;
+type FnFfiInvocationResultGetMetadata =
+    unsafe extern "system" fn(PowerShellHandle, *mut u32, *mut i64, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellSessionCreate = unsafe extern "system" fn(
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    *const u8,
+    i32,
+    *mut PowerShellHandle,
+    *mut FfiCallResult,
+) -> i32;
+type FnFfiPowerShellSessionCreateConfigured = unsafe extern "system" fn(
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    *const u8,
+    i32,
+    *const u8,
+    i32,
+    *const u8,
+    i32,
+    *const u8,
+    i32,
+    *const u8,
+    i32,
+    *mut PowerShellHandle,
+    *mut FfiCallResult,
+) -> i32;
+type FnFfiPowerShellSessionRelease = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellSessionCreateBuilder =
+    unsafe extern "system" fn(PowerShellHandle, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellSessionGetSnapshot = unsafe extern "system" fn(
+    PowerShellHandle,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut i64,
+    *mut i64,
+    *mut FfiCallResult,
+) -> i32;
+type FnFfiPowerShellSessionGetEventInfo =
+    unsafe extern "system" fn(PowerShellHandle, i32, *mut i64, *mut u32, *mut u32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellSessionSetVariable =
+    unsafe extern "system" fn(PowerShellHandle, *const u8, i32, u32, *const u8, i32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellSessionRemoveVariable =
+    unsafe extern "system" fn(PowerShellHandle, *const u8, i32, *mut u32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellSessionGetVariableSnapshot = unsafe extern "system" fn(
+    PowerShellHandle,
+    *const u8,
+    i32,
+    *mut u32,
+    *mut u32,
+    *mut u8,
+    i32,
+    *mut i32,
+    *mut FfiCallResult,
+) -> i32;
+type FnFfiPowerShellSetCapabilityContext =
+    unsafe extern "system" fn(PowerShellHandle, u64, u64, *const libc::c_void, *mut FfiCallResult) -> i32;
+type FnFfiInvocationResultGetStreamTotals =
+    unsafe extern "system" fn(PowerShellHandle, i32, *mut i64, *mut i64, *mut FfiCallResult) -> i32;
+type FnFfiInvocationResultGetStreamRecordProjectionInfo = unsafe extern "system" fn(
+    PowerShellHandle,
+    i32,
+    i32,
+    *mut i32,
+    *mut i32,
+    *mut i32,
+    *mut i32,
+    *mut i32,
+    *mut FfiCallResult,
+) -> i32;
+type FnFfiInvocationResultCopyStreamRecordValue = unsafe extern "system" fn(
+    PowerShellHandle,
+    i32,
+    i32,
+    i32,
+    *mut u32,
+    *mut u8,
+    i32,
+    *mut i32,
+    *mut FfiCallResult,
+) -> i32;
+
+#[derive(Clone, Copy)]
+pub(crate) struct FfiBindings {
+    create_fn: FnFfiPowerShellCreate,
+    release_fn: FnFfiPowerShellRelease,
+    add_argument_utf8_fn: FnFfiPowerShellAddUtf8,
+    add_parameter_string_utf8_fn: FnFfiPowerShellAddParameterStringUtf8,
+    add_parameter_int64_fn: FnFfiPowerShellAddParameterInt64,
+    add_command_utf8_fn: FnFfiPowerShellAddUtf8,
+    add_script_utf8_fn: FnFfiPowerShellAddUtf8,
+    add_statement_fn: FnFfiPowerShellAddStatement,
+    invoke_to_utf8_fn: FnFfiPowerShellInvokeToUtf8,
+    get_invocation_error_count_fn: FnFfiPowerShellGetInvocationErrorCount,
+    copy_invocation_error_field_to_utf8_fn: FnFfiPowerShellCopyInvocationErrorFieldToUtf8,
+    clear_fn: FnFfiPowerShellClear,
+    stop_fn: FnFfiPowerShellStop,
+    invoke_to_result_fn: FnFfiPowerShellInvokeToResult,
+    invocation_result_release_fn: FnFfiInvocationResultRelease,
+    invocation_result_get_info_fn: FnFfiInvocationResultGetInfo,
+    invocation_result_get_stream_info_fn: FnFfiInvocationResultGetStreamInfo,
+    invocation_result_get_stream_record_info_fn: FnFfiInvocationResultGetStreamRecordInfo,
+    invocation_result_copy_stream_record_field_to_utf8_fn: FnFfiInvocationResultCopyStreamRecordFieldToUtf8,
+    invocation_result_get_sequence_record_fn: FnFfiInvocationResultGetSequenceRecord,
+    add_command_utf8_local_fn: FnFfiPowerShellAddScopedUtf8,
+    add_script_utf8_local_fn: FnFfiPowerShellAddScopedUtf8,
+    add_argument_value_fn: FnFfiPowerShellAddValue,
+    add_parameter_value_fn: FnFfiPowerShellAddParameterValue,
+    add_parameter_switch_fn: FnFfiPowerShellAddUtf8,
+    add_input_value_fn: FnFfiPowerShellAddValue,
+    complete_input_fn: FnFfiPowerShellAddStatement,
+    reset_input_fn: FnFfiPowerShellAddStatement,
+    invocation_result_get_metadata_fn: FnFfiInvocationResultGetMetadata,
+    session_create_fn: FnFfiPowerShellSessionCreate,
+    session_release_fn: FnFfiPowerShellSessionRelease,
+    session_create_builder_fn: FnFfiPowerShellSessionCreateBuilder,
+    session_get_snapshot_fn: FnFfiPowerShellSessionGetSnapshot,
+    session_get_event_info_fn: FnFfiPowerShellSessionGetEventInfo,
+    invocation_result_get_stream_totals_fn: FnFfiInvocationResultGetStreamTotals,
+    invocation_result_get_stream_record_projection_info_fn: FnFfiInvocationResultGetStreamRecordProjectionInfo,
+    invocation_result_copy_stream_record_value_fn: FnFfiInvocationResultCopyStreamRecordValue,
+    session_create_configured_fn: FnFfiPowerShellSessionCreateConfigured,
+    session_set_variable_fn: FnFfiPowerShellSessionSetVariable,
+    session_remove_variable_fn: FnFfiPowerShellSessionRemoveVariable,
+    session_get_variable_snapshot_fn: FnFfiPowerShellSessionGetVariableSnapshot,
+    power_shell_set_capability_context_fn: FnFfiPowerShellSetCapabilityContext,
+}
+
+#[derive(Debug)]
+pub struct FfiBindingError {
+    status: i32,
+    diagnostic: String,
+}
+
+impl FfiBindingError {
+    fn from_status(status: i32, diagnostic: String) -> Self {
+        Self { status, diagnostic }
+    }
+
+    pub fn status(&self) -> i32 {
+        self.status
+    }
+}
+
+impl fmt::Display for FfiBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "managed PowerShell binding failed with status {}: {}",
+            self.status, self.diagnostic
+        )
+    }
+}
+
+impl std::error::Error for FfiBindingError {}
+
+impl FfiBindings {
+    pub(crate) fn new_with_loader(fn_loader: &AssemblyDelegateLoader<PdCString>) -> Result<Self, Error> {
+        fn get_function_pointer(
+            fn_loader: &AssemblyDelegateLoader<PdCString>,
+            type_name: impl AsRef<PdCStr>,
+            method_name: impl AsRef<PdCStr>,
+        ) -> Result<MethodWithUnknownSignature, Error> {
+            fn_loader.get_function_pointer_for_unmanaged_callers_only_method(type_name, method_name)
+        }
+
+        let get_api_fn: FnBindingsGetFfiApiV2 = {
+            let fn_ptr = get_function_pointer(
+                fn_loader,
+                pdcstr!("NativeHost.Bindings, Devolutions.PowerShell.SDK.Bindings"),
+                pdcstr!("Bindings_GetFfiApiV2"),
+            )?;
+            unsafe { mem::transmute(fn_ptr) }
+        };
+
+        let api = unsafe {
+            let api_ptr = get_api_fn();
+            if api_ptr.is_null() {
+                return Err(Error::IO(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "managed FFI binding table is null",
+                )));
+            }
+
+            *api_ptr
+        };
+
+        if api.abi_version != FFI_BINDINGS_ABI_VERSION
+            || api.size < mem::size_of::<FfiApiV2>()
+            || api.feature_flags
+                & (FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
+                    | FFI_FEATURE_SESSION_PRIMITIVES
+                    | FFI_FEATURE_SESSION_POLLING
+                    | FFI_FEATURE_SNAPSHOT_PROJECTIONS
+                    | FFI_FEATURE_SESSION_CONFIGURATION
+                    | FFI_FEATURE_SESSION_VARIABLES
+                    | FFI_FEATURE_CAPABILITY_RPC)
+                != (FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
+                    | FFI_FEATURE_SESSION_PRIMITIVES
+                    | FFI_FEATURE_SESSION_POLLING
+                    | FFI_FEATURE_SNAPSHOT_PROJECTIONS
+                    | FFI_FEATURE_SESSION_CONFIGURATION
+                    | FFI_FEATURE_SESSION_VARIABLES
+                    | FFI_FEATURE_CAPABILITY_RPC)
+        {
+            return Err(Error::IO(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "managed FFI bindings do not support async operation and session primitives",
+            )));
+        }
+
+        let fields = [
+            api.create_fn,
+            api.release_fn,
+            api.add_argument_utf8_fn,
+            api.add_parameter_string_utf8_fn,
+            api.add_parameter_int64_fn,
+            api.add_command_utf8_fn,
+            api.add_script_utf8_fn,
+            api.add_statement_fn,
+            api.invoke_to_utf8_fn,
+            api.get_invocation_error_count_fn,
+            api.copy_invocation_error_field_to_utf8_fn,
+            api.clear_fn,
+            api.stop_fn,
+            api.invoke_to_result_fn,
+            api.invocation_result_release_fn,
+            api.invocation_result_get_info_fn,
+            api.invocation_result_get_stream_info_fn,
+            api.invocation_result_get_stream_record_info_fn,
+            api.invocation_result_copy_stream_record_field_to_utf8_fn,
+            api.invocation_result_get_sequence_record_fn,
+            api.add_command_utf8_local_fn,
+            api.add_script_utf8_local_fn,
+            api.add_argument_value_fn,
+            api.add_parameter_value_fn,
+            api.add_parameter_switch_fn,
+            api.add_input_value_fn,
+            api.complete_input_fn,
+            api.reset_input_fn,
+            api.invocation_result_get_metadata_fn,
+            api.session_create_fn,
+            api.session_release_fn,
+            api.session_create_builder_fn,
+            api.session_get_snapshot_fn,
+            api.session_get_event_info_fn,
+            api.invocation_result_get_stream_totals_fn,
+            api.invocation_result_get_stream_record_projection_info_fn,
+            api.invocation_result_copy_stream_record_value_fn,
+            api.session_create_configured_fn,
+            api.session_set_variable_fn,
+            api.session_remove_variable_fn,
+            api.session_get_variable_snapshot_fn,
+            api.power_shell_set_capability_context_fn,
+        ];
+        if fields.iter().any(|field| field.is_null()) {
+            return Err(Error::IO(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "managed FFI binding table contains a null function pointer",
+            )));
+        }
+
+        Ok(Self {
+            create_fn: unsafe { mem::transmute::<*const libc::c_void, FnFfiPowerShellCreate>(api.create_fn) },
+            release_fn: unsafe { mem::transmute::<*const libc::c_void, FnFfiPowerShellRelease>(api.release_fn) },
+            add_argument_utf8_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddUtf8>(api.add_argument_utf8_fn)
+            },
+            add_parameter_string_utf8_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddParameterStringUtf8>(
+                    api.add_parameter_string_utf8_fn,
+                )
+            },
+            add_parameter_int64_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddParameterInt64>(api.add_parameter_int64_fn)
+            },
+            add_command_utf8_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddUtf8>(api.add_command_utf8_fn)
+            },
+            add_script_utf8_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddUtf8>(api.add_script_utf8_fn)
+            },
+            add_statement_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddStatement>(api.add_statement_fn)
+            },
+            invoke_to_utf8_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellInvokeToUtf8>(api.invoke_to_utf8_fn)
+            },
+            get_invocation_error_count_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellGetInvocationErrorCount>(
+                    api.get_invocation_error_count_fn,
+                )
+            },
+            copy_invocation_error_field_to_utf8_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellCopyInvocationErrorFieldToUtf8>(
+                    api.copy_invocation_error_field_to_utf8_fn,
+                )
+            },
+            clear_fn: unsafe { mem::transmute::<*const libc::c_void, FnFfiPowerShellClear>(api.clear_fn) },
+            stop_fn: unsafe { mem::transmute::<*const libc::c_void, FnFfiPowerShellStop>(api.stop_fn) },
+            invoke_to_result_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellInvokeToResult>(api.invoke_to_result_fn)
+            },
+            invocation_result_release_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiInvocationResultRelease>(api.invocation_result_release_fn)
+            },
+            invocation_result_get_info_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiInvocationResultGetInfo>(api.invocation_result_get_info_fn)
+            },
+            invocation_result_get_stream_info_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiInvocationResultGetStreamInfo>(
+                    api.invocation_result_get_stream_info_fn,
+                )
+            },
+            invocation_result_get_stream_record_info_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiInvocationResultGetStreamRecordInfo>(
+                    api.invocation_result_get_stream_record_info_fn,
+                )
+            },
+            invocation_result_copy_stream_record_field_to_utf8_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiInvocationResultCopyStreamRecordFieldToUtf8>(
+                    api.invocation_result_copy_stream_record_field_to_utf8_fn,
+                )
+            },
+            invocation_result_get_sequence_record_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiInvocationResultGetSequenceRecord>(
+                    api.invocation_result_get_sequence_record_fn,
+                )
+            },
+            add_command_utf8_local_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddScopedUtf8>(api.add_command_utf8_local_fn)
+            },
+            add_script_utf8_local_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddScopedUtf8>(api.add_script_utf8_local_fn)
+            },
+            add_argument_value_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddValue>(api.add_argument_value_fn)
+            },
+            add_parameter_value_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddParameterValue>(api.add_parameter_value_fn)
+            },
+            add_parameter_switch_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddUtf8>(api.add_parameter_switch_fn)
+            },
+            add_input_value_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddValue>(api.add_input_value_fn)
+            },
+            complete_input_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddStatement>(api.complete_input_fn)
+            },
+            reset_input_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddStatement>(api.reset_input_fn)
+            },
+            invocation_result_get_metadata_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiInvocationResultGetMetadata>(
+                    api.invocation_result_get_metadata_fn,
+                )
+            },
+            session_create_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionCreate>(api.session_create_fn)
+            },
+            session_release_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionRelease>(api.session_release_fn)
+            },
+            session_create_builder_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionCreateBuilder>(
+                    api.session_create_builder_fn,
+                )
+            },
+            session_get_snapshot_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionGetSnapshot>(api.session_get_snapshot_fn)
+            },
+            session_get_event_info_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionGetEventInfo>(api.session_get_event_info_fn)
+            },
+            invocation_result_get_stream_totals_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiInvocationResultGetStreamTotals>(
+                    api.invocation_result_get_stream_totals_fn,
+                )
+            },
+            invocation_result_get_stream_record_projection_info_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiInvocationResultGetStreamRecordProjectionInfo>(
+                    api.invocation_result_get_stream_record_projection_info_fn,
+                )
+            },
+            invocation_result_copy_stream_record_value_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiInvocationResultCopyStreamRecordValue>(
+                    api.invocation_result_copy_stream_record_value_fn,
+                )
+            },
+            session_create_configured_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionCreateConfigured>(
+                    api.session_create_configured_fn,
+                )
+            },
+            session_set_variable_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionSetVariable>(api.session_set_variable_fn)
+            },
+            session_remove_variable_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionRemoveVariable>(
+                    api.session_remove_variable_fn,
+                )
+            },
+            session_get_variable_snapshot_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionGetVariableSnapshot>(
+                    api.session_get_variable_snapshot_fn,
+                )
+            },
+            power_shell_set_capability_context_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSetCapabilityContext>(
+                    api.power_shell_set_capability_context_fn,
+                )
+            },
+        })
+    }
+}
+
+pub struct FfiPowerShell {
+    _runtime: Arc<HostedRuntime>,
+    bindings: FfiBindings,
+    handle: Option<PowerShellHandle>,
+}
+
+impl FfiPowerShell {
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn new_for_runtime(runtime: Arc<HostedRuntime>) -> Result<Self, Box<dyn std::error::Error>> {
+        let bindings = runtime.ffi_bindings();
+        let mut handle = std::ptr::null_mut();
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe { (bindings.create_fn)(&mut handle, &mut call_result) };
+        check_status(status, &call_result, &diagnostic)?;
+        if handle.is_null() {
+            return Err(Box::new(FfiBindingError::from_status(
+                -6,
+                "managed PowerShell creation returned a null handle".to_owned(),
+            )));
+        }
+
+        Ok(Self {
+            _runtime: runtime,
+            bindings,
+            handle: Some(handle),
+        })
+    }
+
+    pub fn add_argument_string(&self, argument: &str) -> Result<(), FfiBindingError> {
+        self.with_utf8(argument, |handle, bytes, length, result| unsafe {
+            (self.bindings.add_argument_utf8_fn)(handle, bytes, length, result)
+        })
+    }
+
+    pub fn add_parameter_string(&self, name: &str, value: &str) -> Result<(), FfiBindingError> {
+        let name_length = checked_utf8_length(name)?;
+        let value_length = checked_utf8_length(value)?;
+        self.call(|handle, result| unsafe {
+            (self.bindings.add_parameter_string_utf8_fn)(
+                handle,
+                name.as_ptr(),
+                name_length,
+                value.as_ptr(),
+                value_length,
+                result,
+            )
+        })
+    }
+
+    pub fn add_parameter_long(&self, name: &str, value: i64) -> Result<(), FfiBindingError> {
+        self.with_utf8(name, |handle, bytes, length, result| unsafe {
+            (self.bindings.add_parameter_int64_fn)(handle, bytes, length, value, result)
+        })
+    }
+
+    pub fn add_command(&self, command: &str) -> Result<(), FfiBindingError> {
+        self.with_utf8(command, |handle, bytes, length, result| unsafe {
+            (self.bindings.add_command_utf8_fn)(handle, bytes, length, result)
+        })
+    }
+
+    pub fn add_command_scoped(&self, command: &str, use_local_scope: bool) -> Result<(), FfiBindingError> {
+        self.with_utf8(command, |handle, bytes, length, result| unsafe {
+            (self.bindings.add_command_utf8_local_fn)(handle, bytes, length, i32::from(use_local_scope), result)
+        })
+    }
+
+    pub fn add_script(&self, script: &str) -> Result<(), FfiBindingError> {
+        self.with_utf8(script, |handle, bytes, length, result| unsafe {
+            (self.bindings.add_script_utf8_fn)(handle, bytes, length, result)
+        })
+    }
+
+    pub fn add_script_scoped(&self, script: &str, use_local_scope: bool) -> Result<(), FfiBindingError> {
+        self.with_utf8(script, |handle, bytes, length, result| unsafe {
+            (self.bindings.add_script_utf8_local_fn)(handle, bytes, length, i32::from(use_local_scope), result)
+        })
+    }
+
+    pub fn add_argument_value(&self, kind: u32, payload: &[u8]) -> Result<(), FfiBindingError> {
+        self.with_value(kind, payload, |handle, kind, bytes, length, result| unsafe {
+            (self.bindings.add_argument_value_fn)(handle, kind, bytes, length, result)
+        })
+    }
+
+    pub fn add_parameter_value(&self, name: &str, kind: u32, payload: &[u8]) -> Result<(), FfiBindingError> {
+        let name_length = checked_utf8_length(name)?;
+        let payload_length = checked_value_length(payload)?;
+        self.call(|handle, result| unsafe {
+            (self.bindings.add_parameter_value_fn)(
+                handle,
+                name.as_ptr(),
+                name_length,
+                kind,
+                payload.as_ptr(),
+                payload_length,
+                result,
+            )
+        })
+    }
+
+    pub fn add_parameter_switch(&self, name: &str) -> Result<(), FfiBindingError> {
+        self.with_utf8(name, |handle, bytes, length, result| unsafe {
+            (self.bindings.add_parameter_switch_fn)(handle, bytes, length, result)
+        })
+    }
+
+    pub fn add_input_value(&self, kind: u32, payload: &[u8]) -> Result<(), FfiBindingError> {
+        self.with_value(kind, payload, |handle, kind, bytes, length, result| unsafe {
+            (self.bindings.add_input_value_fn)(handle, kind, bytes, length, result)
+        })
+    }
+
+    pub fn complete_input(&self) -> Result<(), FfiBindingError> {
+        self.call(|handle, result| unsafe { (self.bindings.complete_input_fn)(handle, result) })
+    }
+
+    pub fn reset_input(&self) -> Result<(), FfiBindingError> {
+        self.call(|handle, result| unsafe { (self.bindings.reset_input_fn)(handle, result) })
+    }
+
+    pub fn add_statement(&self) -> Result<(), FfiBindingError> {
+        self.call(|handle, result| unsafe { (self.bindings.add_statement_fn)(handle, result) })
+    }
+
+    pub fn clear(&self) -> Result<(), FfiBindingError> {
+        self.call(|handle, result| unsafe { (self.bindings.clear_fn)(handle, result) })
+    }
+
+    pub fn stop(&self) -> Result<(), FfiBindingError> {
+        self.call(|handle, result| unsafe { (self.bindings.stop_fn)(handle, result) })
+    }
+
+    pub fn invoke_to_string(&self) -> Result<String, FfiBindingError> {
+        let mut required_length = 0;
+        let status = self.call_status(|handle, result| unsafe {
+            (self.bindings.invoke_to_utf8_fn)(handle, std::ptr::null_mut(), 0, &mut required_length, result)
+        })?;
+        if status != STATUS_SUCCESS && status != STATUS_BUFFER_TOO_SMALL {
+            return Err(FfiBindingError::from_status(
+                status,
+                "managed PowerShell invocation failed".to_owned(),
+            ));
+        }
+
+        let mut output = vec![
+            0_u8;
+            usize::try_from(required_length).map_err(|_| {
+                FfiBindingError::from_status(-1, "managed output length is invalid".to_owned())
+            })?
+        ];
+        let status = self.call_status(|handle, result| unsafe {
+            (self.bindings.invoke_to_utf8_fn)(
+                handle,
+                output.as_mut_ptr(),
+                required_length,
+                &mut required_length,
+                result,
+            )
+        })?;
+        if status != STATUS_SUCCESS {
+            return Err(FfiBindingError::from_status(
+                status,
+                "managed PowerShell output copy failed".to_owned(),
+            ));
+        }
+
+        String::from_utf8(output)
+            .map_err(|_| FfiBindingError::from_status(-6, "managed PowerShell output is not UTF-8".to_owned()))
+    }
+
+    pub fn invoke_to_result(&self) -> Result<FfiInvocationResult, FfiBindingError> {
+        let mut result_handle = std::ptr::null_mut();
+        self.call(|handle, result| unsafe { (self.bindings.invoke_to_result_fn)(handle, &mut result_handle, result) })?;
+        if result_handle.is_null() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed PowerShell invocation returned a null result handle".to_owned(),
+            ));
+        }
+
+        Ok(FfiInvocationResult {
+            _runtime: Arc::clone(&self._runtime),
+            bindings: self.bindings,
+            handle: Some(result_handle),
+        })
+    }
+
+    /// # Safety
+    ///
+    /// `dispatcher` must remain valid for the lifetime of the configured invocation.
+    pub unsafe fn set_capability_context(
+        &self,
+        registration_handle: u64,
+        invocation_id: u64,
+        dispatcher: *const libc::c_void,
+    ) -> Result<(), FfiBindingError> {
+        self.call(|handle, result| unsafe {
+            (self.bindings.power_shell_set_capability_context_fn)(
+                handle,
+                registration_handle,
+                invocation_id,
+                dispatcher,
+                result,
+            )
+        })
+    }
+
+    pub fn invocation_error_count(&self) -> Result<usize, FfiBindingError> {
+        let mut count = 0;
+        self.call(|handle, result| unsafe {
+            (self.bindings.get_invocation_error_count_fn)(handle, &mut count, result)
+        })?;
+        usize::try_from(count)
+            .map_err(|_| FfiBindingError::from_status(-6, "managed error count is invalid".to_owned()))
+    }
+
+    pub fn invocation_error_field(&self, error_index: i32, field: i32) -> Result<String, FfiBindingError> {
+        let mut required_length = 0;
+        let status = self.call_status(|handle, result| unsafe {
+            (self.bindings.copy_invocation_error_field_to_utf8_fn)(
+                handle,
+                error_index,
+                field,
+                std::ptr::null_mut(),
+                0,
+                &mut required_length,
+                result,
+            )
+        })?;
+        if status != STATUS_SUCCESS && status != STATUS_BUFFER_TOO_SMALL {
+            return Err(FfiBindingError::from_status(
+                status,
+                "managed invocation error field is unavailable".to_owned(),
+            ));
+        }
+
+        let mut value = vec![
+            0_u8;
+            usize::try_from(required_length).map_err(|_| {
+                FfiBindingError::from_status(-1, "managed error field length is invalid".to_owned())
+            })?
+        ];
+        self.call(|handle, result| unsafe {
+            (self.bindings.copy_invocation_error_field_to_utf8_fn)(
+                handle,
+                error_index,
+                field,
+                value.as_mut_ptr(),
+                required_length,
+                &mut required_length,
+                result,
+            )
+        })?;
+        String::from_utf8(value)
+            .map_err(|_| FfiBindingError::from_status(-6, "managed invocation error field is not UTF-8".to_owned()))
+    }
+
+    fn with_utf8<F>(&self, value: &str, operation: F) -> Result<(), FfiBindingError>
+    where
+        F: FnOnce(PowerShellHandle, *const u8, i32, *mut FfiCallResult) -> i32,
+    {
+        let length = checked_utf8_length(value)?;
+        self.call(|handle, result| operation(handle, value.as_ptr(), length, result))
+    }
+
+    fn with_value<F>(&self, kind: u32, payload: &[u8], operation: F) -> Result<(), FfiBindingError>
+    where
+        F: FnOnce(PowerShellHandle, u32, *const u8, i32, *mut FfiCallResult) -> i32,
+    {
+        let length = checked_value_length(payload)?;
+        self.call(|handle, result| operation(handle, kind, payload.as_ptr(), length, result))
+    }
+
+    fn call<F>(&self, operation: F) -> Result<(), FfiBindingError>
+    where
+        F: FnOnce(PowerShellHandle, *mut FfiCallResult) -> i32,
+    {
+        let status = self.call_status(operation)?;
+        if status == STATUS_SUCCESS {
+            Ok(())
+        } else {
+            Err(FfiBindingError::from_status(
+                status,
+                "managed PowerShell binding failed".to_owned(),
+            ))
+        }
+    }
+
+    fn call_status<F>(&self, operation: F) -> Result<i32, FfiBindingError>
+    where
+        F: FnOnce(PowerShellHandle, *mut FfiCallResult) -> i32,
+    {
+        let handle = self
+            .handle
+            .ok_or_else(|| FfiBindingError::from_status(-4, "PowerShell handle has been released".to_owned()))?;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = operation(handle, &mut call_result);
+        check_status_allow_buffer_too_small(status, &call_result, &diagnostic)?;
+        Ok(status)
+    }
+}
+
+impl Drop for FfiPowerShell {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        unsafe {
+            (self.bindings.release_fn)(handle, &mut call_result);
+        }
+    }
+}
+
+pub struct FfiPowerShellSession {
+    _runtime: Arc<HostedRuntime>,
+    bindings: FfiBindings,
+    handle: Option<PowerShellHandle>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FfiSessionSnapshot {
+    pub state: u32,
+    pub runspace_state: u32,
+    pub flags: u32,
+    pub active_pipeline_count: u32,
+    pub event_count: u32,
+    pub invocation_count: u64,
+    pub history_count: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FfiSessionEvent {
+    pub sequence: u64,
+    pub state: u32,
+    pub flags: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FfiStreamRecordProjectionInfo {
+    pub property_entry_count: u32,
+    pub dropped_property_entry_count: u32,
+    pub type_name_count: u32,
+    pub dropped_type_name_count: u32,
+    pub flags: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct FfiSnapshotValue {
+    pub kind: u32,
+    pub payload: Vec<u8>,
+}
+
+impl FfiPowerShellSession {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_runtime(
+        runtime: Arc<HostedRuntime>,
+        runspace_mode: u32,
+        initial_configuration: u32,
+        history_mode: u32,
+        error_preference: u32,
+        warning_preference: u32,
+        verbose_preference: u32,
+        debug_preference: u32,
+        information_preference: u32,
+        execution_policy: u32,
+        initial_variables: &[u8],
+        module_imports: &[u8],
+        allowed_module_paths: &[u8],
+        working_directory: &str,
+        environment: &[u8],
+    ) -> Result<Self, FfiBindingError> {
+        let bindings = runtime.ffi_bindings();
+        let mut handle = std::ptr::null_mut();
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let initial_variables_length = checked_value_length(initial_variables)?;
+        let module_imports_length = checked_value_length(module_imports)?;
+        let module_paths_length = checked_value_length(allowed_module_paths)?;
+        let working_directory_length = checked_utf8_length(working_directory)?;
+        let environment_length = checked_value_length(environment)?;
+        let status = unsafe {
+            (bindings.session_create_configured_fn)(
+                runspace_mode,
+                initial_configuration,
+                history_mode,
+                error_preference,
+                warning_preference,
+                verbose_preference,
+                debug_preference,
+                information_preference,
+                execution_policy,
+                initial_variables.as_ptr(),
+                initial_variables_length,
+                module_imports.as_ptr(),
+                module_imports_length,
+                allowed_module_paths.as_ptr(),
+                module_paths_length,
+                working_directory.as_ptr(),
+                working_directory_length,
+                environment.as_ptr(),
+                environment_length,
+                &mut handle,
+                &mut call_result,
+            )
+        };
+        check_status_allow_buffer_too_small(status, &call_result, &diagnostic)?;
+        if handle.is_null() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed PowerShell session creation returned a null handle".to_owned(),
+            ));
+        }
+
+        Ok(Self {
+            _runtime: runtime,
+            bindings,
+            handle: Some(handle),
+        })
+    }
+
+    pub fn create_builder(&self) -> Result<FfiPowerShell, FfiBindingError> {
+        let session_handle = self
+            .handle
+            .ok_or_else(|| FfiBindingError::from_status(-4, "PowerShell session has been released".to_owned()))?;
+        let mut builder_handle = std::ptr::null_mut();
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status =
+            unsafe { (self.bindings.session_create_builder_fn)(session_handle, &mut builder_handle, &mut call_result) };
+        check_status_allow_buffer_too_small(status, &call_result, &diagnostic)?;
+        if builder_handle.is_null() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed PowerShell session builder creation returned a null handle".to_owned(),
+            ));
+        }
+
+        Ok(FfiPowerShell {
+            _runtime: Arc::clone(&self._runtime),
+            bindings: self.bindings,
+            handle: Some(builder_handle),
+        })
+    }
+
+    pub fn snapshot(&self) -> Result<FfiSessionSnapshot, FfiBindingError> {
+        let handle = self
+            .handle
+            .ok_or_else(|| FfiBindingError::from_status(-4, "PowerShell session has been released".to_owned()))?;
+        let mut state = 0;
+        let mut runspace_state = 0;
+        let mut flags = 0;
+        let mut active_pipeline_count = 0;
+        let mut event_count = 0;
+        let mut invocation_count = 0_i64;
+        let mut history_count = 0_i64;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe {
+            (self.bindings.session_get_snapshot_fn)(
+                handle,
+                &mut state,
+                &mut runspace_state,
+                &mut flags,
+                &mut active_pipeline_count,
+                &mut event_count,
+                &mut invocation_count,
+                &mut history_count,
+                &mut call_result,
+            )
+        };
+        check_status_allow_buffer_too_small(status, &call_result, &diagnostic)?;
+        Ok(FfiSessionSnapshot {
+            state,
+            runspace_state,
+            flags,
+            active_pipeline_count,
+            event_count,
+            invocation_count: u64::try_from(invocation_count).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed session invocation count is invalid".to_owned())
+            })?,
+            history_count: u64::try_from(history_count)
+                .map_err(|_| FfiBindingError::from_status(-6, "managed session history count is invalid".to_owned()))?,
+        })
+    }
+
+    pub fn event(&self, event_index: u32) -> Result<FfiSessionEvent, FfiBindingError> {
+        let handle = self
+            .handle
+            .ok_or_else(|| FfiBindingError::from_status(-4, "PowerShell session has been released".to_owned()))?;
+        let event_index = i32::try_from(event_index)
+            .map_err(|_| FfiBindingError::from_status(-1, "PowerShell session event index is invalid".to_owned()))?;
+        let mut sequence = 0_i64;
+        let mut state = 0;
+        let mut flags = 0;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe {
+            (self.bindings.session_get_event_info_fn)(
+                handle,
+                event_index,
+                &mut sequence,
+                &mut state,
+                &mut flags,
+                &mut call_result,
+            )
+        };
+        check_status_allow_buffer_too_small(status, &call_result, &diagnostic)?;
+        Ok(FfiSessionEvent {
+            sequence: u64::try_from(sequence).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed session event sequence is invalid".to_owned())
+            })?,
+            state,
+            flags,
+        })
+    }
+
+    pub fn set_variable(&self, name: &str, kind: u32, payload: &[u8]) -> Result<(), FfiBindingError> {
+        let handle = self
+            .handle
+            .ok_or_else(|| FfiBindingError::from_status(-4, "PowerShell session has been released".to_owned()))?;
+        let name_length = checked_utf8_length(name)?;
+        let payload_length = checked_value_length(payload)?;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe {
+            (self.bindings.session_set_variable_fn)(
+                handle,
+                name.as_ptr(),
+                name_length,
+                kind,
+                payload.as_ptr(),
+                payload_length,
+                &mut call_result,
+            )
+        };
+        check_status(status, &call_result, &diagnostic)
+    }
+
+    pub fn remove_variable(&self, name: &str) -> Result<bool, FfiBindingError> {
+        let handle = self
+            .handle
+            .ok_or_else(|| FfiBindingError::from_status(-4, "PowerShell session has been released".to_owned()))?;
+        let name_length = checked_utf8_length(name)?;
+        let mut removed = 0_u32;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe {
+            (self.bindings.session_remove_variable_fn)(
+                handle,
+                name.as_ptr(),
+                name_length,
+                &mut removed,
+                &mut call_result,
+            )
+        };
+        check_status(status, &call_result, &diagnostic)?;
+        if removed > 1 {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed session variable removal returned an invalid flag".to_owned(),
+            ));
+        }
+        Ok(removed != 0)
+    }
+
+    pub fn variable_snapshot(&self, name: &str) -> Result<Option<FfiSnapshotValue>, FfiBindingError> {
+        let handle = self
+            .handle
+            .ok_or_else(|| FfiBindingError::from_status(-4, "PowerShell session has been released".to_owned()))?;
+        let name_length = checked_utf8_length(name)?;
+        let mut found = 0_u32;
+        let mut kind = 0_u32;
+        let mut required_length = 0_i32;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe {
+            (self.bindings.session_get_variable_snapshot_fn)(
+                handle,
+                name.as_ptr(),
+                name_length,
+                &mut found,
+                &mut kind,
+                std::ptr::null_mut(),
+                0,
+                &mut required_length,
+                &mut call_result,
+            )
+        };
+        check_status_allow_buffer_too_small(status, &call_result, &diagnostic)?;
+        if found == 0 {
+            if required_length != 0 {
+                return Err(FfiBindingError::from_status(
+                    -6,
+                    "managed session variable snapshot reported bytes for an absent variable".to_owned(),
+                ));
+            }
+            return Ok(None);
+        }
+        if found != 1 || required_length < 0 || required_length as usize > 64 * 1024 {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed session variable snapshot metadata is invalid".to_owned(),
+            ));
+        }
+
+        let mut payload = vec![0_u8; required_length as usize];
+        call_result = new_call_result(&mut diagnostic);
+        let status = unsafe {
+            (self.bindings.session_get_variable_snapshot_fn)(
+                handle,
+                name.as_ptr(),
+                name_length,
+                &mut found,
+                &mut kind,
+                payload.as_mut_ptr(),
+                required_length,
+                &mut required_length,
+                &mut call_result,
+            )
+        };
+        check_status(status, &call_result, &diagnostic)?;
+        if found != 1 || required_length as usize != payload.len() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed session variable snapshot changed while it was copied".to_owned(),
+            ));
+        }
+        Ok(Some(FfiSnapshotValue { kind, payload }))
+    }
+}
+
+impl Drop for FfiPowerShellSession {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        unsafe {
+            (self.bindings.session_release_fn)(handle, &mut call_result);
+        }
+    }
+}
+
+pub struct FfiInvocationResult {
+    _runtime: Arc<HostedRuntime>,
+    bindings: FfiBindings,
+    handle: Option<PowerShellHandle>,
+}
+
+impl FfiInvocationResult {
+    pub fn info(&self) -> Result<(u32, usize), FfiBindingError> {
+        let mut flags = 0;
+        let mut sequence_count = 0;
+        self.call(|handle, result| unsafe {
+            (self.bindings.invocation_result_get_info_fn)(handle, &mut flags, &mut sequence_count, result)
+        })?;
+        let sequence_count = usize::try_from(sequence_count)
+            .map_err(|_| FfiBindingError::from_status(-6, "managed sequence count is invalid".to_owned()))?;
+        Ok((flags, sequence_count))
+    }
+
+    pub fn metadata(&self) -> Result<(u32, u64, bool), FfiBindingError> {
+        let mut state = 0;
+        let mut invocation_id = 0;
+        let mut had_errors = 0;
+        self.call(|handle, result| unsafe {
+            (self.bindings.invocation_result_get_metadata_fn)(
+                handle,
+                &mut state,
+                &mut invocation_id,
+                &mut had_errors,
+                result,
+            )
+        })?;
+        let invocation_id = u64::try_from(invocation_id)
+            .map_err(|_| FfiBindingError::from_status(-6, "managed invocation ID is invalid".to_owned()))?;
+        match had_errors {
+            0 => Ok((state, invocation_id, false)),
+            1 => Ok((state, invocation_id, true)),
+            _ => Err(FfiBindingError::from_status(
+                -6,
+                "managed invocation error metadata is invalid".to_owned(),
+            )),
+        }
+    }
+
+    pub fn stream_info(&self, stream: i32) -> Result<(usize, u32), FfiBindingError> {
+        let mut record_count = 0;
+        let mut flags = 0;
+        self.call(|handle, result| unsafe {
+            (self.bindings.invocation_result_get_stream_info_fn)(handle, stream, &mut record_count, &mut flags, result)
+        })?;
+        let record_count = usize::try_from(record_count)
+            .map_err(|_| FfiBindingError::from_status(-6, "managed stream record count is invalid".to_owned()))?;
+        Ok((record_count, flags))
+    }
+
+    pub fn stream_totals(&self, stream: i32) -> Result<(u64, u64), FfiBindingError> {
+        let mut total_record_count = 0_i64;
+        let mut dropped_record_count = 0_i64;
+        self.call(|handle, result| unsafe {
+            (self.bindings.invocation_result_get_stream_totals_fn)(
+                handle,
+                stream,
+                &mut total_record_count,
+                &mut dropped_record_count,
+                result,
+            )
+        })?;
+        let total_record_count = u64::try_from(total_record_count)
+            .map_err(|_| FfiBindingError::from_status(-6, "managed stream total is invalid".to_owned()))?;
+        let dropped_record_count = u64::try_from(dropped_record_count)
+            .map_err(|_| FfiBindingError::from_status(-6, "managed stream dropped total is invalid".to_owned()))?;
+        if dropped_record_count > total_record_count {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed stream dropped total exceeds its total".to_owned(),
+            ));
+        }
+        Ok((total_record_count, dropped_record_count))
+    }
+
+    pub fn stream_record_info(&self, stream: i32, record_index: i32) -> Result<(i64, u32), FfiBindingError> {
+        let mut sequence = 0;
+        let mut flags = 0;
+        self.call(|handle, result| unsafe {
+            (self.bindings.invocation_result_get_stream_record_info_fn)(
+                handle,
+                stream,
+                record_index,
+                &mut sequence,
+                &mut flags,
+                result,
+            )
+        })?;
+        Ok((sequence, flags))
+    }
+
+    pub fn stream_record_projection_info(
+        &self,
+        stream: i32,
+        record_index: i32,
+    ) -> Result<FfiStreamRecordProjectionInfo, FfiBindingError> {
+        let mut property_entry_count = 0;
+        let mut dropped_property_entry_count = 0;
+        let mut type_name_count = 0;
+        let mut dropped_type_name_count = 0;
+        let mut flags = 0;
+        self.call(|handle, result| unsafe {
+            (self.bindings.invocation_result_get_stream_record_projection_info_fn)(
+                handle,
+                stream,
+                record_index,
+                &mut property_entry_count,
+                &mut dropped_property_entry_count,
+                &mut type_name_count,
+                &mut dropped_type_name_count,
+                &mut flags,
+                result,
+            )
+        })?;
+        Ok(FfiStreamRecordProjectionInfo {
+            property_entry_count: u32::try_from(property_entry_count)
+                .map_err(|_| FfiBindingError::from_status(-6, "managed property count is invalid".to_owned()))?,
+            dropped_property_entry_count: u32::try_from(dropped_property_entry_count).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed dropped property count is invalid".to_owned())
+            })?,
+            type_name_count: u32::try_from(type_name_count)
+                .map_err(|_| FfiBindingError::from_status(-6, "managed type-name count is invalid".to_owned()))?,
+            dropped_type_name_count: u32::try_from(dropped_type_name_count).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed dropped type-name count is invalid".to_owned())
+            })?,
+            flags: u32::try_from(flags)
+                .map_err(|_| FfiBindingError::from_status(-6, "managed projection flags are invalid".to_owned()))?,
+        })
+    }
+
+    pub fn stream_record_value(
+        &self,
+        stream: i32,
+        record_index: i32,
+        value_slot: i32,
+    ) -> Result<FfiSnapshotValue, FfiBindingError> {
+        let mut kind = 0;
+        let mut required_length = 0;
+        let status = self.call_status(|handle, result| unsafe {
+            (self.bindings.invocation_result_copy_stream_record_value_fn)(
+                handle,
+                stream,
+                record_index,
+                value_slot,
+                &mut kind,
+                std::ptr::null_mut(),
+                0,
+                &mut required_length,
+                result,
+            )
+        })?;
+        if status != STATUS_SUCCESS && status != STATUS_BUFFER_TOO_SMALL {
+            return Err(FfiBindingError::from_status(
+                status,
+                "managed invocation stream value is unavailable".to_owned(),
+            ));
+        }
+        let required_length = usize::try_from(required_length).map_err(|_| {
+            FfiBindingError::from_status(-1, "managed invocation stream value length is invalid".to_owned())
+        })?;
+        if required_length > 16 * 1024 {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed invocation stream value exceeds its bound".to_owned(),
+            ));
+        }
+        let mut payload = vec![0_u8; required_length];
+        let payload_length = i32::try_from(payload.len()).map_err(|_| {
+            FfiBindingError::from_status(-1, "managed invocation stream value length is invalid".to_owned())
+        })?;
+        let mut copied_length = payload_length;
+        self.call(|handle, result| unsafe {
+            (self.bindings.invocation_result_copy_stream_record_value_fn)(
+                handle,
+                stream,
+                record_index,
+                value_slot,
+                &mut kind,
+                payload.as_mut_ptr(),
+                payload_length,
+                &mut copied_length,
+                result,
+            )
+        })?;
+        if usize::try_from(copied_length).ok() != Some(payload.len()) {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed invocation stream value length changed during copy".to_owned(),
+            ));
+        }
+        Ok(FfiSnapshotValue { kind, payload })
+    }
+
+    pub fn stream_record_field(&self, stream: i32, record_index: i32, field: i32) -> Result<String, FfiBindingError> {
+        let mut required_length = 0;
+        let status = self.call_status(|handle, result| unsafe {
+            (self.bindings.invocation_result_copy_stream_record_field_to_utf8_fn)(
+                handle,
+                stream,
+                record_index,
+                field,
+                std::ptr::null_mut(),
+                0,
+                &mut required_length,
+                result,
+            )
+        })?;
+        if status != STATUS_SUCCESS && status != STATUS_BUFFER_TOO_SMALL {
+            return Err(FfiBindingError::from_status(
+                status,
+                "managed invocation stream field is unavailable".to_owned(),
+            ));
+        }
+
+        let mut value = vec![
+            0_u8;
+            usize::try_from(required_length).map_err(|_| {
+                FfiBindingError::from_status(-1, "managed invocation stream field length is invalid".to_owned())
+            })?
+        ];
+        self.call(|handle, result| unsafe {
+            (self.bindings.invocation_result_copy_stream_record_field_to_utf8_fn)(
+                handle,
+                stream,
+                record_index,
+                field,
+                value.as_mut_ptr(),
+                required_length,
+                &mut required_length,
+                result,
+            )
+        })?;
+        String::from_utf8(value)
+            .map_err(|_| FfiBindingError::from_status(-6, "managed invocation stream field is not UTF-8".to_owned()))
+    }
+
+    pub fn sequence_record(&self, sequence_index: i32) -> Result<(i32, i32, i64), FfiBindingError> {
+        let mut stream = 0;
+        let mut record_index = 0;
+        let mut sequence = 0;
+        self.call(|handle, result| unsafe {
+            (self.bindings.invocation_result_get_sequence_record_fn)(
+                handle,
+                sequence_index,
+                &mut stream,
+                &mut record_index,
+                &mut sequence,
+                result,
+            )
+        })?;
+        Ok((stream, record_index, sequence))
+    }
+
+    fn call<F>(&self, operation: F) -> Result<(), FfiBindingError>
+    where
+        F: FnOnce(PowerShellHandle, *mut FfiCallResult) -> i32,
+    {
+        let status = self.call_status(operation)?;
+        if status == STATUS_SUCCESS {
+            Ok(())
+        } else {
+            Err(FfiBindingError::from_status(
+                status,
+                "managed invocation result binding failed".to_owned(),
+            ))
+        }
+    }
+
+    fn call_status<F>(&self, operation: F) -> Result<i32, FfiBindingError>
+    where
+        F: FnOnce(PowerShellHandle, *mut FfiCallResult) -> i32,
+    {
+        let handle = self
+            .handle
+            .ok_or_else(|| FfiBindingError::from_status(-4, "Invocation result handle has been released".to_owned()))?;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = operation(handle, &mut call_result);
+        check_status_allow_buffer_too_small(status, &call_result, &diagnostic)?;
+        Ok(status)
+    }
+}
+
+impl Drop for FfiInvocationResult {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        unsafe {
+            (self.bindings.invocation_result_release_fn)(handle, &mut call_result);
+        }
+    }
+}
+
+fn checked_utf8_length(value: &str) -> Result<i32, FfiBindingError> {
+    i32::try_from(value.len())
+        .map_err(|_| FfiBindingError::from_status(-1, "UTF-8 input exceeds managed binding limits".to_owned()))
+}
+
+fn checked_value_length(value: &[u8]) -> Result<i32, FfiBindingError> {
+    i32::try_from(value.len())
+        .map_err(|_| FfiBindingError::from_status(-1, "Tagged value payload exceeds managed binding limits".to_owned()))
+}
+
+fn new_call_result(diagnostic: &mut [u8; FFI_CALL_DIAGNOSTIC_CAPACITY]) -> FfiCallResult {
+    FfiCallResult {
+        size: mem::size_of::<FfiCallResult>() as u32,
+        status: STATUS_SUCCESS,
+        flags: 0,
+        diagnostic: diagnostic.as_mut_ptr(),
+        diagnostic_capacity: diagnostic.len() as i32,
+        diagnostic_required_length: 0,
+        diagnostic_written_length: 0,
+    }
+}
+
+fn check_status(status: i32, result: &FfiCallResult, diagnostic: &[u8]) -> Result<(), FfiBindingError> {
+    if status == STATUS_SUCCESS {
+        return Ok(());
+    }
+
+    Err(FfiBindingError::from_status(
+        status,
+        call_diagnostic(result, diagnostic),
+    ))
+}
+
+fn check_status_allow_buffer_too_small(
+    status: i32,
+    result: &FfiCallResult,
+    diagnostic: &[u8],
+) -> Result<(), FfiBindingError> {
+    if status == STATUS_SUCCESS || status == STATUS_BUFFER_TOO_SMALL {
+        return Ok(());
+    }
+
+    Err(FfiBindingError::from_status(
+        status,
+        call_diagnostic(result, diagnostic),
+    ))
+}
+
+fn call_diagnostic(result: &FfiCallResult, diagnostic: &[u8]) -> String {
+    let written = usize::try_from(result.diagnostic_written_length.max(0)).unwrap_or(0);
+    let written = written.min(diagnostic.len());
+    let message = String::from_utf8_lossy(&diagnostic[..written]).into_owned();
+    if message.is_empty() {
+        format!("managed binding returned status {}", result.status)
+    } else {
+        message
+    }
+}

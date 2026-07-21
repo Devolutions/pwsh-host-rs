@@ -1,0 +1,17 @@
+[package]
+name = "pwsh-sdk-ffi"
+version = "0.14.2"
+edition = "2018"
+license = "MIT/Apache-2.0"
+publish = false
+build = "build.rs"
+
+[lib]
+name = "multi_pwsh_sdk"
+crate-type = ["cdylib"]
+
+[dependencies]
+pwsh-host = { path = "../pwsh-host" }
+
+[build-dependencies]
+winresource = "0.1"
