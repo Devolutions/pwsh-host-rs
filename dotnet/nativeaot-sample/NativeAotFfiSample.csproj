@@ -23,7 +23,7 @@
   <Target Name="BuildAndStagePwshFfiNativeLibrary" BeforeTargets="Publish">
     <Exec Command="cargo build --release -p pwsh-sdk-ffi" WorkingDirectory="$(RepositoryRoot)" />
     <MSBuild Projects="$(LiveObjectTestPackProject)"
-             Targets="Build"
+             Targets="Restore;Build"
              Properties="Configuration=$(Configuration)" />
   </Target>
 
