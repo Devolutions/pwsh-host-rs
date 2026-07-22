@@ -296,7 +296,7 @@ jobs:
         run: |
           dotnet build dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj -c Release -p:PwshExePath="$env:PwshExePath"
           $env:PWSH_FFI_PAYLOAD = Split-Path -Parent $env:PwshExePath
-          cargo test -p pwsh-sdk-ffi -- --ignored
+          cargo test -p pwsh-sdk-ffi -- --ignored --test-threads=1
 
       - name: Run PATH-resolved NativeAOT SDK sample
         shell: pwsh

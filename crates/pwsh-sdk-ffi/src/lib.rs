@@ -561,6 +561,10 @@ thread_local! {
     static CAPABILITY_CALLBACK_DEPTH: Cell<u32> = const { Cell::new(0) };
     static PIPELINE_EXECUTION_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
+#[cfg(test)]
+thread_local! {
+    static TEST_FFI_CALL_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
 
 fn state() -> &'static Mutex<State> {
     STATE.get_or_init(|| Mutex::new(State::default()))
@@ -571,10 +575,34 @@ struct InvocationExecutionScope {
     _test_scope_lock: Option<MutexGuard<'static, ()>>,
 }
 
+#[cfg(test)]
+struct TestFfiCallScope {
+    _lock: MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl TestFfiCallScope {
+    fn enter() -> Self {
+        TEST_FFI_CALL_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self {
+            _lock: TEST_PIPELINE_SCOPE_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestFfiCallScope {
+    fn drop(&mut self) {
+        TEST_FFI_CALL_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
 impl InvocationExecutionScope {
     fn enter() -> Self {
         #[cfg(test)]
-        let test_scope_lock = if pipeline_execution_depth() == 0 {
+        let test_scope_lock = if pipeline_execution_depth() == 0 && TEST_FFI_CALL_DEPTH.with(Cell::get) == 0 {
             Some(
                 TEST_PIPELINE_SCOPE_LOCK
                     .lock()
@@ -1623,16 +1651,6 @@ unsafe fn v2_call_with_active_pipeline_policy<F>(
 where
     F: FnOnce() -> Result<Status, (Status, String)>,
 {
-    #[cfg(test)]
-    let _test_call_lock = if pipeline_execution_depth() == 0 {
-        Some(
-            TEST_PIPELINE_SCOPE_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        )
-    } else {
-        None
-    };
     let result = match prepare_call_result(result) {
         Ok(result) => result,
         Err(status) => return status.value(),
@@ -1655,6 +1673,12 @@ where
             "PowerShell FFI calls are not permitted from code invoked by an active PowerShell pipeline.",
         );
     }
+    #[cfg(test)]
+    let _test_call_lock = if !allow_active_pipeline && pipeline_execution_depth() == 0 {
+        Some(TestFfiCallScope::enter())
+    } else {
+        None
+    };
 
     match catch_unwind(AssertUnwindSafe(operation)) {
         Ok(Ok(status)) => complete_call_result(result, status, ""),
