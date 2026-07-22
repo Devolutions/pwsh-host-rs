@@ -12,16 +12,6 @@ on:
         required: false
         default: false
         type: boolean
-      publish_nuget:
-        description: Publish the package to NuGet.org
-        required: false
-        default: false
-        type: boolean
-      dry_run_nuget:
-        description: Dry-run NuGet publish (simulate push commands)
-        required: false
-        default: true
-        type: boolean
       github-env:
         description: GitHub environment for code signing secrets (auto, test, or prod).
         required: false
@@ -45,8 +35,6 @@ jobs:
       release_target: ${{ steps.validate.outputs.release_target }}
       release_version: ${{ steps.validate.outputs.release_version }}
       dry_run: ${{ steps.validate.outputs.dry_run }}
-      publish_nuget: ${{ steps.validate.outputs.publish_nuget }}
-      dry_run_nuget: ${{ steps.validate.outputs.dry_run_nuget }}
       publish_env: ${{ steps.validate.outputs.publish_env }}
 
     steps:
@@ -65,23 +53,11 @@ jobs:
           CHECKOUT_REF: ${{ github.ref }}
           SOURCE_BRANCH: ${{ github.ref_name }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
-          PUBLISH_NUGET: ${{ github.event.inputs.publish_nuget }}
-          DRY_RUN_NUGET: ${{ github.event.inputs.dry_run_nuget }}
           REQUESTED_ENVIRONMENT: ${{ inputs['github-env'] }}
         run: |
           dry_run="$(echo "${DRY_RUN}" | tr '[:upper:]' '[:lower:]')"
           if [[ "${dry_run}" != "true" && "${dry_run}" != "false" ]]; then
             dry_run="false"
-          fi
-
-          publish_nuget="$(echo "${PUBLISH_NUGET}" | tr '[:upper:]' '[:lower:]')"
-          if [[ "${publish_nuget}" != "true" && "${publish_nuget}" != "false" ]]; then
-            publish_nuget="false"
-          fi
-
-          dry_run_nuget="$(echo "${DRY_RUN_NUGET}" | tr '[:upper:]' '[:lower:]')"
-          if [[ "${dry_run_nuget}" != "true" && "${dry_run_nuget}" != "false" ]]; then
-            dry_run_nuget="true"
           fi
 
           requested_environment="$(echo "${REQUESTED_ENVIRONMENT:-auto}" | tr '[:upper:]' '[:lower:]')"
@@ -123,10 +99,6 @@ jobs:
 
           release_version="${multi_version}"
 
-          if [[ "${dry_run}" == "true" || "${SOURCE_BRANCH}" != "master" || "${publish_nuget}" != "true" ]]; then
-            dry_run_nuget="true"
-          fi
-
           if [[ "${dry_run}" != "true" ]]; then
             if [[ -z "${tag}" ]]; then
               echo "Release tag is required when dry_run is false." >&2
@@ -153,12 +125,9 @@ jobs:
           echo "release_target=${release_target}" >> "$GITHUB_OUTPUT"
           echo "release_version=${release_version}" >> "$GITHUB_OUTPUT"
           echo "dry_run=${dry_run}" >> "$GITHUB_OUTPUT"
-          echo "publish_nuget=${publish_nuget}" >> "$GITHUB_OUTPUT"
-          echo "dry_run_nuget=${dry_run_nuget}" >> "$GITHUB_OUTPUT"
           echo "publish_env=${publish_env}" >> "$GITHUB_OUTPUT"
 
-          echo "::notice::Publish NuGet: ${publish_nuget}"
-          echo "::notice::NuGet dry-run: ${dry_run_nuget}"
+          echo "::notice::NuGet dry-run: ${dry_run}"
 
   build:
     name: Build ${{ matrix.name }}
@@ -907,7 +876,6 @@ jobs:
     needs:
       - validate
       - publish
-    if: needs.validate.outputs.publish_nuget == 'true'
     environment: ${{ needs.validate.outputs.publish_env }}
     permissions:
       id-token: write
@@ -925,14 +893,14 @@ jobs:
         env:
           NUGET_BOT_USERNAME: ${{ secrets.NUGET_BOT_USERNAME }}
         run: |
-          $dryRun = [System.Boolean]::Parse('${{ needs.validate.outputs.dry_run_nuget }}')
+          $dryRun = [System.Boolean]::Parse('${{ needs.validate.outputs.dry_run }}')
           $hasLoginUser = -not [string]::IsNullOrWhiteSpace($env:NUGET_BOT_USERNAME)
 
           "dry_run=$($dryRun.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "has_login_user=$($hasLoginUser.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
           if (-not $dryRun -and -not $hasLoginUser) {
-            throw 'NUGET_BOT_USERNAME is required when dry_run_nuget is false.'
+            throw 'NUGET_BOT_USERNAME is required when dry_run is false.'
           }
 
           Write-Host "NuGet dry-run mode: $dryRun"
