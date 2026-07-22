@@ -162,7 +162,7 @@ jobs:
 
       - name: Run multi-pwsh venv integration tests
         shell: pwsh
-        run: cargo test -p multi-pwsh --test cli_args venv
+        run: cargo test -p multi-pwsh --test cli_args venv -- --test-threads=1
 
       - name: Build .NET project
         shell: pwsh
