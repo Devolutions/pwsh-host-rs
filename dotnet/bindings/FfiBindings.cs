@@ -2,16 +2,19 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.Marshalling;
 using System.Threading;
 using System.Text;
 using System.Management.Automation;
 using System.Management.Automation.Host;
 using System.Management.Automation.Runspaces;
+using Devolutions.PowerShell.Ffi.LiveObjects;
 
 namespace NativeHost
 {
@@ -54,6 +57,9 @@ namespace NativeHost
         private const ulong FfiFeatureSessionConfiguration = 1UL << 14;
         private const ulong FfiFeatureSessionVariables = 1UL << 15;
         private const ulong FfiFeatureCapabilityRpc = 1UL << 16;
+        private const ulong FfiFeatureLiveObjectProbe = 1UL << 17;
+        private const ulong FfiFeatureLiveSessionObjectProbe = 1UL << 18;
+        private const ulong FfiFeatureLiveObjectContracts = 1UL << 19;
         private const int FfiMaxSessionEvents = 32;
 
         [StructLayout(LayoutKind.Sequential)]
@@ -143,6 +149,14 @@ namespace NativeHost
             public IntPtr PowerShellSession_RemoveVariable;
             public IntPtr PowerShellSession_GetVariableSnapshot;
             public IntPtr PowerShell_SetCapabilityContext;
+            public IntPtr LiveObjectProbe_Create;
+            public IntPtr LiveObjectProbe_Release;
+            public IntPtr LiveObjectProbe_Unregister;
+            public IntPtr PowerShell_AddArgumentLiveObject;
+            public IntPtr PowerShellSession_SetLiveObjectVariable;
+            public IntPtr LiveObjectContractPack_Register;
+            public IntPtr PowerShellSession_SetLiveObjectContractVariable;
+            public IntPtr LiveObjectContractPack_RegisterMany;
         }
 
         private static string[] NormalizeDirectories(string[] directories, string description)
@@ -217,6 +231,17 @@ namespace NativeHost
             new ConcurrentDictionary<IntPtr, InvocationResult>();
         private static readonly ConcurrentDictionary<IntPtr, FfiInputBuffer> FfiInputBuffers =
             new ConcurrentDictionary<IntPtr, FfiInputBuffer>();
+        private static readonly ConcurrentDictionary<IntPtr, FfiLiveObjectProbeEntry> FfiLiveObjectProbes =
+            new ConcurrentDictionary<IntPtr, FfiLiveObjectProbeEntry>();
+        private static readonly StrategyBasedComWrappers FfiLiveObjectComWrappers = new();
+        private static readonly PowerShellLiveObjectContract FfiLiveObjectProbeContract = new(
+            typeof(IPowerShellLiveObjectProbe).GUID,
+            majorVersion: 1,
+            minorVersion: 0,
+            PowerShellLiveObjectDirection.ConsumerToSession);
+        private static readonly FfiLiveObjectContractPackRegistry FfiLiveObjectContracts = new(
+            FfiLiveObjectProbeContract,
+            static pointer => new FfiManagedLiveObjectLease(FfiLiveSessionObjectProbeProxy.Create(pointer)));
         private static long FfiNextInvocationId;
         private static IntPtr FfiApiV2Ptr = IntPtr.Zero;
 
@@ -251,7 +276,8 @@ namespace NativeHost
                 AbiVersion = FfiBindingsAbiVersion,
                 FeatureFlags = (1UL << 4) | (1UL << 5) | (1UL << 6) | FfiFeatureAsyncOperationPrimitives |
                     FfiFeatureSessionPrimitives | FfiFeatureSessionPolling | FfiFeatureSnapshotProjections |
-                    FfiFeatureSessionConfiguration | FfiFeatureSessionVariables | FfiFeatureCapabilityRpc,
+                    FfiFeatureSessionConfiguration | FfiFeatureSessionVariables | FfiFeatureCapabilityRpc |
+                    FfiFeatureLiveObjectProbe | FfiFeatureLiveSessionObjectProbe | FfiFeatureLiveObjectContracts,
                 PowerShell_Create = (IntPtr)(delegate* unmanaged<IntPtr*, FfiCallResult*, int>)&FfiPowerShell_Create,
                 PowerShell_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiPowerShell_Release,
                 PowerShell_AddArgumentUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, FfiCallResult*, int>)&FfiPowerShell_AddArgumentUtf8,
@@ -294,6 +320,14 @@ namespace NativeHost
                 PowerShellSession_RemoveVariable = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, uint*, FfiCallResult*, int>)&FfiPowerShellSession_RemoveVariable,
                 PowerShellSession_GetVariableSnapshot = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, uint*, uint*, byte*, int, int*, FfiCallResult*, int>)&FfiPowerShellSession_GetVariableSnapshot,
                 PowerShell_SetCapabilityContext = (IntPtr)(delegate* unmanaged<IntPtr, ulong, ulong, IntPtr, FfiCallResult*, int>)&FfiPowerShell_SetCapabilityContext,
+                LiveObjectProbe_Create = (IntPtr)(delegate* unmanaged<long, IntPtr*, FfiCallResult*, int>)&FfiLiveObjectProbe_Create,
+                LiveObjectProbe_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiLiveObjectProbe_Release,
+                LiveObjectProbe_Unregister = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiLiveObjectProbe_Unregister,
+                PowerShell_AddArgumentLiveObject = (IntPtr)(delegate* unmanaged<IntPtr, IntPtr, FfiCallResult*, int>)&FfiPowerShell_AddArgumentLiveObject,
+                PowerShellSession_SetLiveObjectVariable = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, IntPtr, FfiCallResult*, int>)&FfiPowerShellSession_SetLiveObjectVariable,
+                LiveObjectContractPack_Register = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiLiveObjectContractPack_Register,
+                PowerShellSession_SetLiveObjectContractVariable = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, NativeLiveObjectContractDescriptor*, IntPtr, FfiCallResult*, int>)&FfiPowerShellSession_SetLiveObjectContractVariable,
+                LiveObjectContractPack_RegisterMany = (IntPtr)(delegate* unmanaged<IntPtr*, uint, FfiCallResult*, int>)&FfiLiveObjectContractPack_RegisterMany,
             };
         }
 
@@ -608,6 +642,76 @@ namespace NativeHost
         }
 
         [UnmanagedCallersOnly]
+        public static unsafe int FfiPowerShellSession_SetLiveObjectVariable(
+            IntPtr ptrSessionHandle,
+            byte* name,
+            int nameLength,
+            IntPtr ptrComObject,
+            FfiCallResult* result)
+        {
+            if (ptrComObject == IntPtr.Zero)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Live session object probe pointer is null.");
+            }
+
+            int status = ReadUtf8(name, nameLength, result, out string nameText);
+            if (status != FfiStatusSuccess)
+            {
+                return status;
+            }
+
+            return Execute(result, () => GetPowerShellSession(ptrSessionHandle).SetLiveObjectVariable(nameText, ptrComObject));
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveObjectContractPack_Register(
+            IntPtr ptrPackApi,
+            FfiCallResult* result)
+        {
+            return Execute(result, () => FfiLiveObjectContracts.Register(ptrPackApi));
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveObjectContractPack_RegisterMany(
+            IntPtr* ptrPackApis,
+            uint packCount,
+            FfiCallResult* result)
+        {
+            return Execute(result, () => FfiLiveObjectContracts.RegisterMany(ptrPackApis, packCount));
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiPowerShellSession_SetLiveObjectContractVariable(
+            IntPtr ptrSessionHandle,
+            byte* name,
+            int nameLength,
+            NativeLiveObjectContractDescriptor* contract,
+            IntPtr ptrComObject,
+            FfiCallResult* result)
+        {
+            if (contract == null || ptrComObject == IntPtr.Zero)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Live object contract transfer is invalid.");
+            }
+
+            int status = ReadUtf8(name, nameLength, result, out string nameText);
+            if (status != FfiStatusSuccess)
+            {
+                return status;
+            }
+
+            return Execute(result, () =>
+            {
+                PowerShellLiveObjectContract descriptor =
+                    PowerShellLiveObjectContract.FromNative(*contract);
+                GetPowerShellSession(ptrSessionHandle).SetLiveObjectVariable(
+                    nameText,
+                    descriptor,
+                    ptrComObject);
+            });
+        }
+
+        [UnmanagedCallersOnly]
         public static unsafe int FfiPowerShellSession_RemoveVariable(
             IntPtr ptrSessionHandle,
             byte* name,
@@ -870,6 +974,75 @@ namespace NativeHost
                 PowerShell ps = GetPowerShell(ptrHandle);
                 FfiInvocationResults.TryRemove(ptrHandle, out _);
                 ps.AddArgument(value);
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiPowerShell_AddArgumentLiveObject(
+            IntPtr ptrHandle,
+            IntPtr ptrComObject,
+            FfiCallResult* result)
+        {
+            return Execute(result, () =>
+            {
+                PowerShell ps = GetPowerShell(ptrHandle);
+                FfiInvocationResults.TryRemove(ptrHandle, out _);
+                ps.AddArgument(GetLiveObjectProbe(ptrComObject).Value);
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveObjectProbe_Create(
+            long initialCount,
+            IntPtr* ptrComObject,
+            FfiCallResult* result)
+        {
+            if (ptrComObject == null)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Live object probe output pointer is null.");
+            }
+
+            return Execute(result, () =>
+            {
+                using var powerShell = PowerShell.Create();
+                powerShell
+                    .AddScript("param([long]$initialCount) [pscustomobject]@{ Count = $initialCount }", useLocalScope: true)
+                    .AddArgument(initialCount);
+                Collection<PSObject> output = powerShell.Invoke();
+                if (output.Count != 1)
+                {
+                    throw new InvalidOperationException("Live object probe did not produce exactly one PowerShell object.");
+                }
+
+                *ptrComObject = ExportLiveObjectProbe(output[0]);
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveObjectProbe_Release(IntPtr ptrComObject, FfiCallResult* result)
+        {
+            return Execute(result, () =>
+            {
+                if (!FfiLiveObjectProbes.TryGetValue(ptrComObject, out FfiLiveObjectProbeEntry entry) ||
+                    !entry.TryReleaseTransitReference())
+                {
+                    throw new InvalidOperationException("Live object probe transit reference is invalid.");
+                }
+
+                ReleaseComInterface(ptrComObject);
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveObjectProbe_Unregister(IntPtr ptrComObject, FfiCallResult* result)
+        {
+            return Execute(result, () =>
+            {
+                if (!FfiLiveObjectProbes.TryRemove(ptrComObject, out FfiLiveObjectProbeEntry entry) ||
+                    !entry.IsTransitReferenceReleased)
+                {
+                    throw new InvalidOperationException("Live object probe pointer is invalid.");
+                }
             });
         }
 
@@ -1453,6 +1626,135 @@ namespace NativeHost
             public bool IsCompleted { get; set; }
         }
 
+        [GeneratedComClass]
+        internal sealed partial class FfiLiveObjectProbeBroker : IPowerShellLiveObjectProbe
+        {
+            private const int EFail = unchecked((int)0x80004005);
+            private readonly object gate = new object();
+
+            public FfiLiveObjectProbeBroker(PSObject value)
+            {
+                Value = value ?? throw new ArgumentNullException(nameof(value));
+            }
+
+            public PSObject Value { get; }
+
+            public int GetCount(out long count)
+            {
+                lock (gate)
+                {
+                    return TryGetCount(out count) ? FfiStatusSuccess : EFail;
+                }
+            }
+
+            public int Increment(out long count)
+            {
+                lock (gate)
+                {
+                    if (!TryGetCount(out count) || count == long.MaxValue)
+                    {
+                        return EFail;
+                    }
+
+                    count++;
+                    Value.Properties["Count"].Value = count;
+                    return FfiStatusSuccess;
+                }
+            }
+
+            private bool TryGetCount(out long count)
+            {
+                if (Value.Properties["Count"]?.Value is long value)
+                {
+                    count = value;
+                    return true;
+                }
+
+                count = default;
+                return false;
+            }
+        }
+
+        private sealed class FfiLiveObjectProbeEntry
+        {
+            private readonly WeakReference<FfiLiveObjectProbeBroker> broker;
+            private int transitReferenceActive = 1;
+
+            public FfiLiveObjectProbeEntry(FfiLiveObjectProbeBroker broker)
+            {
+                this.broker = new WeakReference<FfiLiveObjectProbeBroker>(broker);
+            }
+
+            public bool TryGetBroker(out FfiLiveObjectProbeBroker value)
+            {
+                return broker.TryGetTarget(out value);
+            }
+
+            public bool TryReleaseTransitReference()
+            {
+                return Interlocked.Exchange(ref transitReferenceActive, 0) == 1;
+            }
+
+            public bool IsTransitReferenceReleased => Volatile.Read(ref transitReferenceActive) == 0;
+        }
+
+        private static IntPtr ExportLiveObjectProbe(PSObject value)
+        {
+            var broker = new FfiLiveObjectProbeBroker(value);
+            IntPtr ptrComObject = FfiLiveObjectComWrappers.GetOrCreateComInterfaceForObject(
+                broker,
+                CreateComInterfaceFlags.None);
+            if (ptrComObject == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Live object probe did not create an IUnknown pointer.");
+            }
+
+            var entry = new FfiLiveObjectProbeEntry(broker);
+            while (!FfiLiveObjectProbes.TryAdd(ptrComObject, entry))
+            {
+                if (FfiLiveObjectProbes.TryGetValue(ptrComObject, out FfiLiveObjectProbeEntry existing) &&
+                    existing.TryGetBroker(out _))
+                {
+                    ReleaseComInterface(ptrComObject);
+                    throw new InvalidOperationException("Live object probe pointer collision.");
+                }
+
+                FfiLiveObjectProbes.TryRemove(ptrComObject, out _);
+            }
+
+            return ptrComObject;
+        }
+
+        private static FfiLiveObjectProbeBroker GetLiveObjectProbe(IntPtr ptrComObject)
+        {
+            if (ptrComObject == IntPtr.Zero ||
+                !FfiLiveObjectProbes.TryGetValue(ptrComObject, out FfiLiveObjectProbeEntry entry) ||
+                !entry.TryGetBroker(out FfiLiveObjectProbeBroker broker))
+            {
+                FfiLiveObjectProbes.TryRemove(ptrComObject, out _);
+                throw new InvalidOperationException("Live object probe pointer is invalid or no longer alive.");
+            }
+
+            return broker;
+        }
+
+        private static unsafe void ReleaseComInterface(IntPtr ptrComObject)
+        {
+            if (ptrComObject == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Live object probe pointer is null.");
+            }
+
+            IntPtr* vtable = *(IntPtr**)ptrComObject;
+            if (vtable == null || vtable[2] == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Live object probe pointer has an invalid IUnknown vtable.");
+            }
+
+            var release = (delegate* unmanaged[MemberFunction]<IntPtr, uint>)vtable[2];
+            _ = release(ptrComObject);
+        }
+
         private sealed class FfiPowerShellPipeline : IDisposable
         {
             private int disposed;
@@ -1532,6 +1834,8 @@ namespace NativeHost
             private readonly bool addToHistory;
             private readonly uint errorPreference;
             private readonly List<FfiSessionEvent> events = new List<FfiSessionEvent>(FfiMaxSessionEvents);
+            private readonly Dictionary<string, FfiLiveObjectLease> liveObjectVariables =
+                new Dictionary<string, FfiLiveObjectLease>(StringComparer.OrdinalIgnoreCase);
             private int leaseCount = 1;
             private int activePipelineCount;
             private long eventSequence;
@@ -1801,6 +2105,7 @@ namespace NativeHost
                 lock (gate)
                 {
                     activePipelineCount = Math.Max(0, activePipelineCount - 1);
+                    ReconcileLiveObjectVariablesLocked();
                     invocationCount++;
                     if (addToHistory)
                     {
@@ -1870,6 +2175,43 @@ namespace NativeHost
                     EnsureVariableMutationAllowed();
                     ValidateVariableName(name);
                     runspace.SessionStateProxy.SetVariable(name, value);
+                    ReconcileLiveObjectVariablesLocked();
+                }
+            }
+
+            public void SetLiveObjectVariable(string name, IntPtr ptrComObject)
+            {
+                SetLiveObjectVariable(name, FfiLiveObjectProbeContract, ptrComObject);
+            }
+
+            public void SetLiveObjectVariable(
+                string name,
+                PowerShellLiveObjectContract contract,
+                IntPtr ptrComObject)
+            {
+                if (ptrComObject == IntPtr.Zero)
+                {
+                    throw new InvalidOperationException("Live session object pointer is null.");
+                }
+
+                FfiLiveObjectLease value = FfiLiveObjectContracts.CreateLease(contract, ptrComObject);
+
+                lock (gate)
+                {
+                    try
+                    {
+                        EnsureVariableMutationAllowed();
+                        ValidateVariableName(name);
+                        runspace.SessionStateProxy.SetVariable(name, value.Value);
+                    }
+                    catch
+                    {
+                        value.Dispose();
+                        throw;
+                    }
+
+                    ReconcileLiveObjectVariablesLocked();
+                    liveObjectVariables.Add(name, value);
                 }
             }
 
@@ -1886,6 +2228,7 @@ namespace NativeHost
                     }
 
                     runspace.SessionStateProxy.PSVariable.Remove(name);
+                    ReconcileLiveObjectVariablesLocked();
                     return true;
                 }
             }
@@ -2037,11 +2380,131 @@ namespace NativeHost
 
                 disposed = true;
                 AddEventLocked(StateClosed);
+                ReleaseAllLiveObjectVariablesLocked();
                 if (ownsRunspace)
                 {
                     runspace.Dispose();
                 }
             }
+
+            private void ReleaseLiveObjectVariableLocked(string name)
+            {
+                if (liveObjectVariables.Remove(name, out FfiLiveObjectLease value))
+                {
+                    value.Dispose();
+                }
+            }
+
+            private void ReconcileLiveObjectVariablesLocked()
+            {
+                PSVariable[] variables = runspace.SessionStateProxy.InvokeProvider.Item
+                    .Get("Variable:\\*")
+                    .Select(static variable => variable.BaseObject as PSVariable)
+                    .Where(static variable => variable is not null)
+                    .Select(static variable => variable!)
+                    .ToArray();
+                var reconciled = new Dictionary<string, FfiLiveObjectLease>(StringComparer.OrdinalIgnoreCase);
+                foreach (KeyValuePair<string, FfiLiveObjectLease> entry in liveObjectVariables)
+                {
+                    object value = entry.Value.Value;
+                    PSVariable variable = variables.FirstOrDefault(variable => ReferenceEquals(variable.Value, value));
+                    if (variable is not null && !reconciled.ContainsKey(variable.Name))
+                    {
+                        reconciled.Add(variable.Name, entry.Value);
+                    }
+                    else
+                    {
+                        entry.Value.Dispose();
+                    }
+                }
+
+                liveObjectVariables.Clear();
+                foreach (KeyValuePair<string, FfiLiveObjectLease> entry in reconciled)
+                {
+                    liveObjectVariables.Add(entry.Key, entry.Value);
+                }
+            }
+
+            private void ReleaseAllLiveObjectVariablesLocked()
+            {
+                FfiLiveObjectLease[] values = liveObjectVariables.Values.ToArray();
+                liveObjectVariables.Clear();
+                foreach (FfiLiveObjectLease value in values)
+                {
+                    value.Dispose();
+                }
+            }
+        }
+
+        public sealed class FfiLiveSessionObjectProbeProxy : IDisposable
+        {
+            private readonly object gate = new object();
+            private IPowerShellLiveObjectProbe probe;
+            private ComObject comObject;
+
+            private FfiLiveSessionObjectProbeProxy(
+                IPowerShellLiveObjectProbe probe,
+                ComObject comObject)
+            {
+                this.probe = probe;
+                this.comObject = comObject;
+            }
+
+            public long Count => Invoke(static (IPowerShellLiveObjectProbe value, out long count) => value.GetCount(out count));
+
+            public long Increment()
+            {
+                return Invoke(static (IPowerShellLiveObjectProbe value, out long count) => value.Increment(out count));
+            }
+
+            public static FfiLiveSessionObjectProbeProxy Create(IntPtr ptrComObject)
+            {
+                object projected = FfiLiveObjectComWrappers.GetOrCreateObjectForComInstance(
+                    ptrComObject,
+                    CreateObjectFlags.UniqueInstance);
+                ComObject comObject = projected as ComObject
+                    ?? throw new InvalidOperationException("Live session object probe did not create a source-generated COM wrapper.");
+                IPowerShellLiveObjectProbe probe = projected as IPowerShellLiveObjectProbe;
+                if (probe is null)
+                {
+                    comObject.FinalRelease();
+                    throw new InvalidOperationException("Live session object probe has an unexpected COM contract.");
+                }
+
+                return new FfiLiveSessionObjectProbeProxy(probe, comObject);
+            }
+
+            public void Dispose()
+            {
+                lock (gate)
+                {
+                    ComObject value = comObject;
+                    probe = null;
+                    comObject = null;
+                    value?.FinalRelease();
+                }
+            }
+
+            private long Invoke(ProbeOperation operation)
+            {
+                lock (gate)
+                {
+                    if (probe is null)
+                    {
+                        throw new ObjectDisposedException(nameof(FfiLiveSessionObjectProbeProxy));
+                    }
+
+                    int hresult = operation(probe, out long count);
+                    if (hresult != FfiStatusSuccess)
+                    {
+                        throw new COMException("The .NET session object probe call failed.", hresult);
+                    }
+
+                    return count;
+                }
+            }
+
+            private delegate int ProbeOperation(IPowerShellLiveObjectProbe value, out long count);
         }
 
         private readonly struct FfiSessionSnapshot

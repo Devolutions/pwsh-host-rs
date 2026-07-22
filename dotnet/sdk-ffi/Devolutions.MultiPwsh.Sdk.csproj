@@ -28,6 +28,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="..\interop\PowerShellLiveObjectProbeContract.cs"
+             Link="PowerShellLiveObjectProbeContract.cs" />
+    <Compile Include="..\interop\PowerShellLiveObjectContract.cs"
+             Link="PowerShellLiveObjectContract.cs" />
+    <Compile Include="..\interop\PowerShellLiveObjectTestContract.cs"
+             Link="PowerShellLiveObjectTestContract.cs" />
     <None Include="README.md" Pack="true" PackagePath="\" />
     <None Include="buildTransitive\Devolutions.MultiPwsh.Sdk.targets"
           Pack="true"

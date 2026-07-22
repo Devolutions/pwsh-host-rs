@@ -158,11 +158,11 @@ jobs:
         run: cargo build --all-targets
 
       - name: Run Rust tests
-        run: cargo test --all-targets
+        run: cargo test --all-targets -- --test-threads=1
 
       - name: Run multi-pwsh venv integration tests
         shell: pwsh
-        run: cargo test -p multi-pwsh --test cli_args venv
+        run: cargo test -p multi-pwsh --test cli_args venv -- --test-threads=1
 
       - name: Build .NET project
         shell: pwsh
@@ -296,7 +296,7 @@ jobs:
         run: |
           dotnet build dotnet/bindings/Devolutions.PowerShell.SDK.Bindings.csproj -c Release -p:PwshExePath="$env:PwshExePath"
           $env:PWSH_FFI_PAYLOAD = Split-Path -Parent $env:PwshExePath
-          cargo test -p pwsh-sdk-ffi -- --ignored
+          cargo test -p pwsh-sdk-ffi -- --ignored --test-threads=1
 
       - name: Run PATH-resolved NativeAOT SDK sample
         shell: pwsh

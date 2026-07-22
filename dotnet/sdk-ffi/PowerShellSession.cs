@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Devolutions.PowerShell.Ffi.LiveObjects;
 
 namespace Devolutions.PowerShell.Ffi;
 
@@ -147,6 +148,71 @@ public sealed unsafe class PowerShellSession : IDisposable
                 &result);
             NativeCall.ThrowIfFailed(status, result, diagnostic);
         }
+    }
+
+    /// <summary>
+    /// Replaces a named session variable with an experimental .NET-owned live
+    /// object probe. The probe must outlive its session-variable binding.
+    /// </summary>
+    public void SetLiveObjectVariable(string name, PowerShellSessionObjectProbe value)
+    {
+        ValidateVariableName(name);
+        ArgumentNullException.ThrowIfNull(value);
+        PowerShell.EnsureLiveSessionObjectProbeSupported();
+
+        value.AssignToSession(pointer =>
+        {
+            byte[] nameBytes = PowerShell.EncodeUtf8(name);
+            using PowerShellSessionHandle.HandleLease lease = handle.Borrow();
+            fixed (byte* namePointer = nameBytes)
+            {
+                byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+                NativeCallResult result = NativeCall.CreateResult(diagnostic);
+                int status = NativeMethods.SetSessionLiveObjectVariable(
+                    lease.Value,
+                    new NativeUtf8Span { Data = namePointer, Length = (nuint)nameBytes.Length },
+                    pointer,
+                    &result);
+                NativeCall.ThrowIfFailed(status, result, diagnostic);
+            }
+        });
+    }
+
+    /// <summary>
+    /// Replaces a named session variable with a registered consumer-owned live
+    /// object. The selected payload must have loaded a matching contract pack.
+    /// </summary>
+    public void SetLiveObjectVariable<TContract>(string name, PowerShellLiveObject<TContract> value)
+        where TContract : class
+    {
+        ValidateVariableName(name);
+        ArgumentNullException.ThrowIfNull(value);
+        if ((value.Contract.Directions & PowerShellLiveObjectDirection.ConsumerToSession) == 0)
+        {
+            throw new ArgumentException(
+                "The live object contract does not support consumer-to-session projection.",
+                nameof(value));
+        }
+
+        PowerShell.EnsureLiveObjectContractsSupported();
+        value.AssignToSession(pointer =>
+        {
+            byte[] nameBytes = PowerShell.EncodeUtf8(name);
+            NativeLiveObjectContractDescriptor contract = value.Contract.ToNative();
+            using PowerShellSessionHandle.HandleLease lease = handle.Borrow();
+            fixed (byte* namePointer = nameBytes)
+            {
+                byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+                NativeCallResult result = NativeCall.CreateResult(diagnostic);
+                int status = NativeMethods.SetSessionLiveObjectContractVariable(
+                    lease.Value,
+                    new NativeUtf8Span { Data = namePointer, Length = (nuint)nameBytes.Length },
+                    &contract,
+                    pointer,
+                    &result);
+                NativeCall.ThrowIfFailed(status, result, diagnostic);
+            }
+        });
     }
 
     /// <summary>

@@ -36,7 +36,10 @@ foreach (Type type in facadeAssembly.GetExportedTypes().OrderBy(type => type.Ful
 }
 
 NativeStructInspection[] nativeStructs = facadeAssembly.GetTypes()
-    .Where(type => type.Namespace == "Devolutions.PowerShell.Ffi" && type.IsValueType && type.Name.StartsWith("Native", StringComparison.Ordinal))
+    .Where(type =>
+        type.Namespace is "Devolutions.PowerShell.Ffi" or "Devolutions.PowerShell.Ffi.LiveObjects" &&
+        type.IsValueType &&
+        type.Name.StartsWith("Native", StringComparison.Ordinal))
     .OrderBy(type => type.Name, StringComparer.Ordinal)
     .Select(type => new NativeStructInspection(
         type.Name,
@@ -108,9 +111,9 @@ static void ValidateAbiCompatibility(Assembly facadeAssembly, BindingFlags stati
         throw new InvalidOperationException("The facade must retain an ABI validation overload that accepts NativeAbiInfo.");
     }
 
-    const ulong allRequiredFeatures = 0x1FDFF;
+    const ulong allRequiredFeatures = 0xFFDFF;
     ensureSupportedAbi.Invoke(null, [CreateAbiInfo(abiInfoType, allRequiredFeatures, abiVersion: 2, minimumCompatibleAbiVersion: 2)]);
-    for (int bit = 0; bit <= 16; bit++)
+    for (int bit = 0; bit <= 19; bit++)
     {
         if ((allRequiredFeatures & (1UL << bit)) == 0)
         {

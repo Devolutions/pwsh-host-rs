@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -26,12 +27,16 @@ public sealed unsafe class PowerShell : IDisposable
     private const ulong SessionConfigurationFeature = 1UL << 14;
     private const ulong SessionVariablesFeature = 1UL << 15;
     private const ulong CapabilityRpcFeature = 1UL << 16;
+    private const ulong LiveObjectProbeFeature = 1UL << 17;
+    private const ulong LiveSessionObjectProbeFeature = 1UL << 18;
+    private const ulong LiveObjectContractsFeature = 1UL << 19;
     private const ulong RequiredFeatures =
         StructuredInvocationErrorsFeature | PerCallDiagnosticsFeature | Utf8SpansFeature |
         ImmutableResultsFeature | TaggedValuesFeature | CommandOptionsFeature | BoundedInputFeature |
         InvocationMetadataFeature | AsyncOperationsFeature | SessionsFeature |
         SessionPollingFeature | SessionPoolRejectionFeature | SnapshotProjectionsFeature |
-        SessionConfigurationFeature | SessionVariablesFeature | CapabilityRpcFeature;
+        SessionConfigurationFeature | SessionVariablesFeature | CapabilityRpcFeature |
+        LiveObjectProbeFeature | LiveSessionObjectProbeFeature | LiveObjectContractsFeature;
     private const uint ResultTerminatingFailure = 1;
     private const uint ResultSequenceTruncated = 1 << 1;
     private const uint StreamTruncated = 1;
@@ -86,6 +91,170 @@ public sealed unsafe class PowerShell : IDisposable
                 },
                 &result);
             NativeCall.ThrowIfFailed(status, result, diagnostic);
+        }
+    }
+
+    public static void Initialize(IReadOnlyList<PowerShellLiveObjectContractPack> contractPacks)
+    {
+        ArgumentNullException.ThrowIfNull(contractPacks);
+        if (contractPacks.Count == 0)
+        {
+            Initialize();
+            return;
+        }
+
+        EnsureLiveObjectContractsSupported();
+        var assemblyPathHandles = new GCHandle[contractPacks.Count];
+        var typeNameHandles = new GCHandle[contractPacks.Count];
+        var nativePacks = new NativeLiveObjectContractPack[contractPacks.Count];
+        try
+        {
+            for (int index = 0; index < contractPacks.Count; index++)
+            {
+                PowerShellLiveObjectContractPack pack = contractPacks[index]
+                    ?? throw new ArgumentException("Live object contract packs cannot contain null.", nameof(contractPacks));
+                if (!File.Exists(pack.PayloadAdapterAssemblyPath))
+                {
+                    throw new FileNotFoundException(
+                        "The live object contract pack payload adapter assembly does not exist.",
+                        pack.PayloadAdapterAssemblyPath);
+                }
+
+                byte[] assemblyPath = EncodeUtf8(pack.PayloadAdapterAssemblyPath);
+                byte[] typeName = EncodeUtf8(pack.PayloadAdapterTypeName);
+                assemblyPathHandles[index] = GCHandle.Alloc(assemblyPath, GCHandleType.Pinned);
+                typeNameHandles[index] = GCHandle.Alloc(typeName, GCHandleType.Pinned);
+                nativePacks[index] = new NativeLiveObjectContractPack
+                {
+                    Size = checked((uint)sizeof(NativeLiveObjectContractPack)),
+                    PayloadAdapterAssemblyPath = new NativeUtf8Span
+                    {
+                        Data = (byte*)assemblyPathHandles[index].AddrOfPinnedObject(),
+                        Length = checked((nuint)assemblyPath.Length),
+                    },
+                    PayloadAdapterTypeName = new NativeUtf8Span
+                    {
+                        Data = (byte*)typeNameHandles[index].AddrOfPinnedObject(),
+                        Length = checked((nuint)typeName.Length),
+                    },
+                };
+            }
+
+            fixed (NativeLiveObjectContractPack* nativePacksPointer = nativePacks)
+            {
+                byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+                NativeCallResult result = NativeCall.CreateResult(diagnostic);
+                int status = NativeMethods.InitializeFromPathWithContractPacks(
+                    nativePacksPointer,
+                    checked((nuint)nativePacks.Length),
+                    &result);
+                NativeCall.ThrowIfFailed(status, result, diagnostic);
+            }
+        }
+        finally
+        {
+            foreach (GCHandle handle in assemblyPathHandles)
+            {
+                if (handle.IsAllocated)
+                {
+                    handle.Free();
+                }
+            }
+
+            foreach (GCHandle handle in typeNameHandles)
+            {
+                if (handle.IsAllocated)
+                {
+                    handle.Free();
+                }
+            }
+        }
+    }
+
+    public static void Initialize(
+        string payloadDirectory,
+        IReadOnlyList<PowerShellLiveObjectContractPack> contractPacks)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(payloadDirectory);
+        ArgumentNullException.ThrowIfNull(contractPacks);
+        if (contractPacks.Count == 0)
+        {
+            Initialize(payloadDirectory);
+            return;
+        }
+
+        EnsureLiveObjectContractsSupported();
+        byte[] payloadBytes = EncodeUtf8(payloadDirectory);
+        var assemblyPathHandles = new GCHandle[contractPacks.Count];
+        var typeNameHandles = new GCHandle[contractPacks.Count];
+        var nativePacks = new NativeLiveObjectContractPack[contractPacks.Count];
+        try
+        {
+            for (int index = 0; index < contractPacks.Count; index++)
+            {
+                PowerShellLiveObjectContractPack pack = contractPacks[index]
+                    ?? throw new ArgumentException("Live object contract packs cannot contain null.", nameof(contractPacks));
+                if (!File.Exists(pack.PayloadAdapterAssemblyPath))
+                {
+                    throw new FileNotFoundException(
+                        "The live object contract pack payload adapter assembly does not exist.",
+                        pack.PayloadAdapterAssemblyPath);
+                }
+
+                byte[] assemblyPath = EncodeUtf8(pack.PayloadAdapterAssemblyPath);
+                byte[] typeName = EncodeUtf8(pack.PayloadAdapterTypeName);
+                assemblyPathHandles[index] = GCHandle.Alloc(assemblyPath, GCHandleType.Pinned);
+                typeNameHandles[index] = GCHandle.Alloc(typeName, GCHandleType.Pinned);
+                nativePacks[index] = new NativeLiveObjectContractPack
+                {
+                    Size = checked((uint)sizeof(NativeLiveObjectContractPack)),
+                    PayloadAdapterAssemblyPath = new NativeUtf8Span
+                    {
+                        Data = (byte*)assemblyPathHandles[index].AddrOfPinnedObject(),
+                        Length = checked((nuint)assemblyPath.Length),
+                    },
+                    PayloadAdapterTypeName = new NativeUtf8Span
+                    {
+                        Data = (byte*)typeNameHandles[index].AddrOfPinnedObject(),
+                        Length = checked((nuint)typeName.Length),
+                    },
+                };
+            }
+
+            fixed (byte* payloadPointer = payloadBytes)
+            fixed (NativeLiveObjectContractPack* nativePacksPointer = nativePacks)
+            {
+                byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+                NativeCallResult result = NativeCall.CreateResult(diagnostic);
+                int status = NativeMethods.InitializeWithContractPacks(
+                    new NativeUtf8Span
+                    {
+                        Data = payloadPointer,
+                        Length = checked((nuint)payloadBytes.Length),
+                    },
+                    nativePacksPointer,
+                    checked((nuint)nativePacks.Length),
+                    &result);
+                NativeCall.ThrowIfFailed(status, result, diagnostic);
+            }
+        }
+        finally
+        {
+            foreach (GCHandle handle in assemblyPathHandles)
+            {
+                if (handle.IsAllocated)
+                {
+                    handle.Free();
+                }
+            }
+
+            foreach (GCHandle handle in typeNameHandles)
+            {
+                if (handle.IsAllocated)
+                {
+                    handle.Free();
+                }
+            }
         }
     }
 
@@ -188,6 +357,13 @@ public sealed unsafe class PowerShell : IDisposable
     {
         ArgumentNullException.ThrowIfNull(value);
         InvokeValueForHandle(value, static (nativeHandle, nativeValue, result) => NativeMethods.AddArgumentValue(nativeHandle, nativeValue, result));
+        return this;
+    }
+
+    public PowerShell AddArgument(PowerShellLiveObjectProbe value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        value.AddTo(this);
         return this;
     }
 
@@ -419,6 +595,39 @@ public sealed unsafe class PowerShell : IDisposable
             throw new PowerShellFfiException(
                 PowerShellFfiStatus.UnsupportedCapability,
                 "The selected PowerShell payload does not support bounded capability RPC.");
+        }
+    }
+
+    internal static void EnsureLiveObjectProbeSupported()
+    {
+        EnsureSupportedAbi();
+        if ((FeatureFlags & LiveObjectProbeFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell payload does not support the live object probe.");
+        }
+    }
+
+    internal static void EnsureLiveSessionObjectProbeSupported()
+    {
+        EnsureSupportedAbi();
+        if ((FeatureFlags & LiveSessionObjectProbeFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell payload does not support live session object probes.");
+        }
+    }
+
+    internal static void EnsureLiveObjectContractsSupported()
+    {
+        EnsureSupportedAbi();
+        if ((FeatureFlags & LiveObjectContractsFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell payload does not support registered live object contracts.");
         }
     }
 
@@ -899,6 +1108,16 @@ public sealed unsafe class PowerShell : IDisposable
             int status = operation(lease.Value, &nativeValue, &result);
             NativeCall.ThrowIfFailed(status, result, diagnostic);
         }
+    }
+
+    internal void AddLiveObjectProbe(nint comObject)
+    {
+        if (comObject == 0)
+        {
+            throw new ArgumentException("Live object probe pointer is null.", nameof(comObject));
+        }
+
+        InvokeForHandle((nativeHandle, result) => NativeMethods.AddArgumentLiveObject(nativeHandle, comObject, result));
     }
 
     internal static NativeDataValue CreateNativeValue(PowerShellValue value, byte* payload)
