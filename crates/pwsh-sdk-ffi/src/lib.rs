@@ -8,13 +8,15 @@ use std::mem;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::slice;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::MutexGuard;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use pwsh_host::{
-    find_pwsh_dir, FfiBindingError, FfiInvocationResult, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent,
-    FfiSessionSnapshot, FfiSnapshotValue, HostedRuntime,
+    find_pwsh_dir, FfiBindingError, FfiInvocationResult, FfiLiveObjectContractDescriptor, FfiPowerShell,
+    FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue, HostedRuntime, LiveObjectContractPack,
 };
 
 const ABI_VERSION: u32 = 2;
@@ -34,6 +36,9 @@ const FEATURE_SNAPSHOT_PROJECTIONS: u64 = 1 << 13;
 const FEATURE_SESSION_CONFIGURATION: u64 = 1 << 14;
 const FEATURE_SESSION_VARIABLES: u64 = 1 << 15;
 const FEATURE_CAPABILITY_RPC: u64 = 1 << 16;
+const FEATURE_LIVE_OBJECT_PROBE: u64 = 1 << 17;
+const FEATURE_LIVE_SESSION_OBJECT_PROBE: u64 = 1 << 18;
+const FEATURE_LIVE_OBJECT_CONTRACTS: u64 = 1 << 19;
 const CALL_RESULT_DIAGNOSTIC_TRUNCATED: u32 = 1;
 #[cfg(test)]
 const RESULT_RECORD_SCALAR_VALUE_PRESENT: u32 = 1 << 1;
@@ -58,6 +63,8 @@ const MAX_CAPABILITIES: usize = 16;
 const MAX_CAPABILITY_NAME_BYTES: usize = 64;
 const MAX_CAPABILITY_DEADLINE_MILLISECONDS: u32 = 30_000;
 const MAX_CAPABILITY_PERMISSIONS: u32 = 0x0f;
+const MAX_LIVE_OBJECT_CONTRACT_PACKS: usize = 16;
+const MAX_LIVE_OBJECT_CONTRACT_PACK_TYPE_NAME_BYTES: usize = 512;
 
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -211,9 +218,19 @@ pub struct SessionPoolOptions {
     _reserved: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LiveObjectContractPackInput {
+    size: u32,
+    flags: u32,
+    payload_adapter_assembly_path: Utf8Span,
+    payload_adapter_type_name: Utf8Span,
+}
+
 struct State {
     runtime: Option<Arc<HostedRuntime>>,
     activation_source_root: Option<PathBuf>,
+    live_object_contract_packs: Vec<LiveObjectContractPack>,
     sessions: HashMap<u64, Arc<Session>>,
     runspace_sessions: HashMap<u64, Arc<RunspaceSession>>,
     results: HashMap<u64, Arc<InvocationResult>>,
@@ -515,6 +532,7 @@ impl Default for State {
         Self {
             runtime: None,
             activation_source_root: None,
+            live_object_contract_packs: Vec::new(),
             sessions: HashMap::new(),
             runspace_sessions: HashMap::new(),
             results: HashMap::new(),
@@ -535,13 +553,85 @@ unsafe impl Send for State {}
 
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 static SESSION_OPERATION_LOCK: Mutex<()> = Mutex::new(());
+static ACTIVE_PIPELINE_COUNT: AtomicU32 = AtomicU32::new(0);
+#[cfg(test)]
+static TEST_PIPELINE_SCOPE_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_CAPABILITY_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
 thread_local! {
     static CAPABILITY_CALLBACK_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static PIPELINE_EXECUTION_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 fn state() -> &'static Mutex<State> {
     STATE.get_or_init(|| Mutex::new(State::default()))
+}
+
+struct InvocationExecutionScope {
+    #[cfg(test)]
+    _test_scope_lock: Option<MutexGuard<'static, ()>>,
+}
+
+impl InvocationExecutionScope {
+    fn enter() -> Self {
+        #[cfg(test)]
+        let test_scope_lock = if pipeline_execution_depth() == 0 {
+            Some(
+                TEST_PIPELINE_SCOPE_LOCK
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            )
+        } else {
+            None
+        };
+        PIPELINE_EXECUTION_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        ACTIVE_PIPELINE_COUNT.fetch_add(1, Ordering::AcqRel);
+        Self {
+            #[cfg(test)]
+            _test_scope_lock: test_scope_lock,
+        }
+    }
+}
+
+impl Drop for InvocationExecutionScope {
+    fn drop(&mut self) {
+        ACTIVE_PIPELINE_COUNT.fetch_sub(1, Ordering::AcqRel);
+        PIPELINE_EXECUTION_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+fn pipeline_execution_depth() -> u32 {
+    PIPELINE_EXECUTION_DEPTH.with(Cell::get)
+}
+
+fn active_pipeline_count() -> u32 {
+    ACTIVE_PIPELINE_COUNT.load(Ordering::Acquire)
+}
+
+fn reject_active_pipeline_ffi_call() -> Result<(), (Status, String)> {
+    if pipeline_execution_depth() != 0 {
+        return Err((
+            Status::Backpressure,
+            "PowerShell FFI calls are not permitted from code invoked by an active PowerShell pipeline.".to_owned(),
+        ));
+    }
+    if active_pipeline_count() != 0 {
+        return Err((
+            Status::Backpressure,
+            "PowerShell FFI calls are not permitted while any PowerShell pipeline is running.".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_active_pipeline_session_mutation() -> Result<(), (Status, String)> {
+    if active_pipeline_count() != 0 {
+        return Err((
+            Status::Backpressure,
+            "PowerShell session variables cannot be read or changed while any PowerShell pipeline is running."
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 unsafe fn utf8_input<'a>(ptr: *const u8, len: usize) -> Result<&'a str, Status> {
@@ -589,6 +679,102 @@ unsafe fn data_value_input<'a>(value: *const DataValue) -> Result<(u32, &'a [u8]
     };
     validate_value_payload(value.kind, payload, 0)?;
     Ok((value.kind, payload))
+}
+
+unsafe fn live_object_contract_input<'a>(
+    value: *const FfiLiveObjectContractDescriptor,
+) -> Result<&'a FfiLiveObjectContractDescriptor, (Status, String)> {
+    if value.is_null() {
+        return Err((
+            Status::InvalidArgument,
+            "live object contract descriptor is null".to_owned(),
+        ));
+    }
+
+    let value = &*value;
+    if value.size < mem::size_of::<FfiLiveObjectContractDescriptor>() as u32
+        || value.directions == 0
+        || value.directions & !0x03 != 0
+        || value.interface_id_low == 0 && value.interface_id_high == 0
+        || value.major_version == 0
+        || value.reserved != 0
+    {
+        return Err((
+            Status::InvalidArgument,
+            "live object contract descriptor is invalid".to_owned(),
+        ));
+    }
+
+    Ok(value)
+}
+
+unsafe fn live_object_contract_pack_inputs(
+    values: *const LiveObjectContractPackInput,
+    count: usize,
+) -> Result<Vec<LiveObjectContractPack>, (Status, String)> {
+    if count == 0 || count > MAX_LIVE_OBJECT_CONTRACT_PACKS || values.is_null() {
+        return Err((
+            Status::InvalidArgument,
+            "live object contract pack input is invalid".to_owned(),
+        ));
+    }
+
+    let values = slice::from_raw_parts(values, count);
+    let mut packs = Vec::with_capacity(count);
+    for value in values {
+        if value.size < mem::size_of::<LiveObjectContractPackInput>() as u32 || value.flags != 0 {
+            return Err((
+                Status::InvalidArgument,
+                "live object contract pack header is invalid".to_owned(),
+            ));
+        }
+
+        let assembly_path = utf8_span(value.payload_adapter_assembly_path).map_err(|_| {
+            (
+                Status::InvalidArgument,
+                "live object contract pack assembly path must be UTF-8 without NUL".to_owned(),
+            )
+        })?;
+        let adapter_type_name = utf8_span(value.payload_adapter_type_name).map_err(|_| {
+            (
+                Status::InvalidArgument,
+                "live object contract pack adapter type must be UTF-8 without NUL".to_owned(),
+            )
+        })?;
+        if adapter_type_name.is_empty() || adapter_type_name.len() > MAX_LIVE_OBJECT_CONTRACT_PACK_TYPE_NAME_BYTES {
+            return Err((
+                Status::InvalidArgument,
+                "live object contract pack adapter type is invalid".to_owned(),
+            ));
+        }
+
+        let assembly_path = PathBuf::from(assembly_path);
+        if !assembly_path.is_absolute() {
+            return Err((
+                Status::InvalidArgument,
+                "live object contract pack assembly path must be absolute".to_owned(),
+            ));
+        }
+        let assembly_path = fs::canonicalize(&assembly_path).map_err(|error| {
+            (
+                Status::InvalidArgument,
+                format!("live object contract pack assembly cannot be resolved: {}", error),
+            )
+        })?;
+        if !assembly_path.is_file() {
+            return Err((
+                Status::InvalidArgument,
+                "live object contract pack assembly path must name a file".to_owned(),
+            ));
+        }
+
+        packs.push(LiveObjectContractPack {
+            payload_adapter_assembly_path: assembly_path,
+            payload_adapter_type_name: adapter_type_name.to_owned(),
+        });
+    }
+
+    Ok(packs)
 }
 
 fn validate_value_payload(kind: u32, payload: &[u8], depth: u8) -> Result<(), (Status, String)> {
@@ -1160,12 +1346,16 @@ fn invoke_with_capability(
             return Err(error);
         }
 
-        let result = session.power_shell.invoke_to_result();
+        let result = {
+            let _execution_scope = InvocationExecutionScope::enter();
+            session.power_shell.invoke_to_result()
+        };
         let clear = unsafe { session.power_shell.set_capability_context(0, 0, std::ptr::null()) };
         set_active_capability(session, None);
         capability.registration.end_invocation(capability.invocation_id);
         result.and_then(|result| clear.map(|_| result))
     } else {
+        let _execution_scope = InvocationExecutionScope::enter();
         session.power_shell.invoke_to_result()
     }
 }
@@ -1415,6 +1605,34 @@ unsafe fn v2_call<F>(result: *mut CallResult, operation: F) -> i32
 where
     F: FnOnce() -> Result<Status, (Status, String)>,
 {
+    v2_call_with_active_pipeline_policy(result, false, operation)
+}
+
+unsafe fn v2_call_allow_active_pipeline<F>(result: *mut CallResult, operation: F) -> i32
+where
+    F: FnOnce() -> Result<Status, (Status, String)>,
+{
+    v2_call_with_active_pipeline_policy(result, true, operation)
+}
+
+unsafe fn v2_call_with_active_pipeline_policy<F>(
+    result: *mut CallResult,
+    allow_active_pipeline: bool,
+    operation: F,
+) -> i32
+where
+    F: FnOnce() -> Result<Status, (Status, String)>,
+{
+    #[cfg(test)]
+    let _test_call_lock = if pipeline_execution_depth() == 0 {
+        Some(
+            TEST_PIPELINE_SCOPE_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    } else {
+        None
+    };
     let result = match prepare_call_result(result) {
         Ok(result) => result,
         Err(status) => return status.value(),
@@ -1424,6 +1642,17 @@ where
             result,
             Status::Backpressure,
             "PowerShell FFI calls are not permitted from a capability callback.",
+        );
+    }
+    if !allow_active_pipeline {
+        if let Err((status, diagnostic)) = reject_active_pipeline_ffi_call() {
+            return complete_call_result(result, status, &diagnostic);
+        }
+    } else if pipeline_execution_depth() != 0 {
+        return complete_call_result(
+            result,
+            Status::Backpressure,
+            "PowerShell FFI calls are not permitted from code invoked by an active PowerShell pipeline.",
         );
     }
 
@@ -2036,6 +2265,13 @@ where
 
 #[allow(clippy::arc_with_non_send_sync)]
 fn initialize_direct_payload(payload_path: &str) -> Result<Status, (Status, String)> {
+    initialize_direct_payload_with_contract_packs(payload_path, Vec::new())
+}
+
+fn initialize_direct_payload_with_contract_packs(
+    payload_path: &str,
+    contract_packs: Vec<LiveObjectContractPack>,
+) -> Result<Status, (Status, String)> {
     let payload_path = fs::canonicalize(payload_path).map_err(|error| {
         (
             Status::InvalidArgument,
@@ -2048,10 +2284,16 @@ fn initialize_direct_payload(payload_path: &str) -> Result<Status, (Status, Stri
             "PowerShell payload path must be an existing directory".to_owned(),
         ));
     }
-    initialize_runtime(payload_path)
+    initialize_runtime(payload_path, contract_packs)
 }
 
 fn initialize_from_path() -> Result<Status, (Status, String)> {
+    initialize_from_path_with_contract_packs(Vec::new())
+}
+
+fn initialize_from_path_with_contract_packs(
+    contract_packs: Vec<LiveObjectContractPack>,
+) -> Result<Status, (Status, String)> {
     let payload_path = find_pwsh_dir().ok_or_else(|| {
         (
             Status::HostFailure,
@@ -2064,18 +2306,23 @@ fn initialize_from_path() -> Result<Status, (Status, String)> {
             "the PowerShell payload selected from PATH is not valid UTF-8".to_owned(),
         )
     })?;
-    initialize_direct_payload(payload_path)
+    initialize_direct_payload_with_contract_packs(payload_path, contract_packs)
 }
 
 #[allow(clippy::arc_with_non_send_sync)]
-fn initialize_runtime(payload_path: PathBuf) -> Result<Status, (Status, String)> {
+fn initialize_runtime(
+    payload_path: PathBuf,
+    contract_packs: Vec<LiveObjectContractPack>,
+) -> Result<Status, (Status, String)> {
     let mut state = match state().lock() {
         Ok(state) => state,
         Err(poisoned) => poisoned.into_inner(),
     };
 
     if let Some(runtime) = &state.runtime {
-        return if state.activation_source_root.as_ref() == Some(&payload_path) {
+        return if state.activation_source_root.as_ref() == Some(&payload_path)
+            && state.live_object_contract_packs == contract_packs
+        {
             Ok(Status::Success)
         } else {
             let selected_path = state
@@ -2085,18 +2332,18 @@ fn initialize_runtime(payload_path: PathBuf) -> Result<Status, (Status, String)>
             Err((
                 Status::IncompatiblePayload,
                 format!(
-                    "PowerShell runtime is already initialized for {}; cannot select {}",
+                    "PowerShell runtime is already initialized for {}; cannot select a different payload or contract-pack set",
                     selected_path.display(),
-                    payload_path.display()
                 ),
             ))
         };
     }
 
-    let runtime =
-        HostedRuntime::new_for_pwsh_dir(&payload_path).map_err(|error| (Status::HostFailure, error.to_string()))?;
+    let runtime = HostedRuntime::new_for_pwsh_dir_with_contract_packs(&payload_path, &contract_packs)
+        .map_err(|error| (Status::HostFailure, error.to_string()))?;
     state.runtime = Some(Arc::new(runtime));
     state.activation_source_root = Some(payload_path);
+    state.live_object_contract_packs = contract_packs;
     Ok(Status::Success)
 }
 
@@ -2738,6 +2985,7 @@ fn with_runspace_session_mutation<F>(handle: u64, operation: F) -> Result<Status
 where
     F: FnOnce(&FfiPowerShellSession) -> Result<Status, (Status, String)>,
 {
+    reject_active_pipeline_session_mutation()?;
     let session = {
         let state = match state().lock() {
             Ok(state) => state,
@@ -2749,6 +2997,7 @@ where
             .cloned()
             .ok_or_else(|| (Status::InvalidHandle, "PowerShell session handle is invalid".to_owned()))?
     };
+    reject_active_pipeline_session_mutation()?;
     if runspace_session_has_active_operation(&session) {
         return Err((
             Status::Backpressure,
@@ -2759,6 +3008,7 @@ where
     let _operation_lock = SESSION_OPERATION_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    reject_active_pipeline_session_mutation()?;
     if runspace_session_has_active_operation(&session) {
         return Err((
             Status::Backpressure,
@@ -2866,6 +3116,71 @@ fn feature_flags() -> u64 {
         | FEATURE_SESSION_CONFIGURATION
         | FEATURE_SESSION_VARIABLES
         | FEATURE_CAPABILITY_RPC
+        | FEATURE_LIVE_OBJECT_PROBE
+        | FEATURE_LIVE_SESSION_OBJECT_PROBE
+        | FEATURE_LIVE_OBJECT_CONTRACTS
+}
+
+fn create_live_object_probe(initial_count: i64) -> Result<*mut std::ffi::c_void, (Status, String)> {
+    let _operation_lock = SESSION_OPERATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.runtime.as_ref().cloned().ok_or_else(|| {
+            (
+                Status::NotInitialized,
+                "PowerShell runtime has not been initialized".to_owned(),
+            )
+        })?
+    };
+    runtime.create_live_object_probe(initial_count).map_err(managed_failure)
+}
+
+fn release_live_object_probe(com_object: *mut std::ffi::c_void) -> Result<Status, (Status, String)> {
+    if com_object.is_null() {
+        return Err((Status::InvalidArgument, "live object probe pointer is null".to_owned()));
+    }
+
+    let _operation_lock = SESSION_OPERATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.runtime.as_ref().cloned().ok_or_else(|| {
+            (
+                Status::NotInitialized,
+                "PowerShell runtime has not been initialized".to_owned(),
+            )
+        })?
+    };
+    runtime
+        .release_live_object_probe(com_object)
+        .map(|_| Status::Success)
+        .map_err(managed_failure)
+}
+
+fn unregister_live_object_probe(com_object: *mut std::ffi::c_void) -> Result<Status, (Status, String)> {
+    if com_object.is_null() {
+        return Err((Status::InvalidArgument, "live object probe pointer is null".to_owned()));
+    }
+
+    let _operation_lock = SESSION_OPERATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.runtime.as_ref().cloned().ok_or_else(|| {
+            (
+                Status::NotInitialized,
+                "PowerShell runtime has not been initialized".to_owned(),
+            )
+        })?
+    };
+    runtime
+        .unregister_live_object_probe(com_object)
+        .map(|_| Status::Success)
+        .map_err(managed_failure)
 }
 
 #[no_mangle]
@@ -2895,8 +3210,39 @@ pub unsafe extern "C" fn multi_pwsh_initialize_utf8(payload_path: Utf8Span, resu
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_initialize_with_contract_packs_utf8(
+    payload_path: Utf8Span,
+    contract_packs: *const LiveObjectContractPackInput,
+    contract_pack_count: usize,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        let payload_path = utf8_span(payload_path).map_err(|_| {
+            (
+                Status::InvalidArgument,
+                "payload path must be UTF-8 without NUL".to_owned(),
+            )
+        })?;
+        let contract_packs = live_object_contract_pack_inputs(contract_packs, contract_pack_count)?;
+        initialize_direct_payload_with_contract_packs(payload_path, contract_packs)
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_initialize_from_path(result: *mut CallResult) -> i32 {
     v2_call(result, initialize_from_path)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_initialize_from_path_with_contract_packs(
+    contract_packs: *const LiveObjectContractPackInput,
+    contract_pack_count: usize,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        let contract_packs = live_object_contract_pack_inputs(contract_packs, contract_pack_count)?;
+        initialize_from_path_with_contract_packs(contract_packs)
+    })
 }
 
 #[no_mangle]
@@ -2934,8 +3280,43 @@ pub unsafe extern "C" fn multi_pwsh_create(handle: *mut u64, result: *mut CallRe
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_live_object_probe_create(
+    initial_count: i64,
+    com_object: *mut *mut std::ffi::c_void,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        if com_object.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "live object probe output pointer is null".to_owned(),
+            ));
+        }
+
+        *com_object = create_live_object_probe(initial_count)?;
+        Ok(Status::Success)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_live_object_probe_release(
+    com_object: *mut std::ffi::c_void,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || release_live_object_probe(com_object))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_live_object_probe_unregister(
+    com_object: *mut std::ffi::c_void,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || unregister_live_object_probe(com_object))
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_release(handle: u64, result: *mut CallResult) -> i32 {
-    v2_call(result, || release_session_result(handle))
+    v2_call_allow_active_pipeline(result, || release_session_result(handle))
 }
 
 #[no_mangle]
@@ -3035,6 +3416,26 @@ pub unsafe extern "C" fn multi_pwsh_add_argument_value(
         with_session_result(handle, true, |session| {
             session
                 .add_argument_value(kind, payload)
+                .map(|_| Status::Success)
+                .map_err(managed_failure)
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_add_argument_live_object(
+    handle: u64,
+    com_object: *mut std::ffi::c_void,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        if com_object.is_null() {
+            return Err((Status::InvalidArgument, "live object probe pointer is null".to_owned()));
+        }
+
+        with_session_result(handle, true, |session| unsafe {
+            session
+                .add_argument_live_object(com_object)
                 .map(|_| Status::Success)
                 .map_err(managed_failure)
         })
@@ -3284,7 +3685,7 @@ pub unsafe extern "C" fn multi_pwsh_copy_invocation_error_field_utf8(
 
 #[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_stop(handle: u64, result: *mut CallResult) -> i32 {
-    v2_call(result, || stop_session_operation(handle))
+    v2_call_allow_active_pipeline(result, || stop_session_operation(handle))
 }
 
 #[no_mangle]
@@ -3336,7 +3737,7 @@ pub unsafe extern "C" fn multi_pwsh_invoke(handle: u64, result_handle: *mut u64,
 
 #[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_result_release(handle: u64, result: *mut CallResult) -> i32 {
-    v2_call(result, || release_result(handle))
+    v2_call_allow_active_pipeline(result, || release_result(handle))
 }
 
 #[no_mangle]
@@ -3346,7 +3747,7 @@ pub unsafe extern "C" fn multi_pwsh_result_get_info(
     sequence_count: *mut u32,
     result: *mut CallResult,
 ) -> i32 {
-    v2_call(result, || {
+    v2_call_allow_active_pipeline(result, || {
         if flags.is_null() || sequence_count.is_null() {
             return Err((
                 Status::InvalidArgument,
@@ -3376,7 +3777,7 @@ pub unsafe extern "C" fn multi_pwsh_result_get_metadata(
     had_errors: *mut u32,
     result: *mut CallResult,
 ) -> i32 {
-    v2_call(result, || {
+    v2_call_allow_active_pipeline(result, || {
         if state.is_null() || invocation_id.is_null() || had_errors.is_null() {
             return Err((
                 Status::InvalidArgument,
@@ -3402,7 +3803,7 @@ pub unsafe extern "C" fn multi_pwsh_result_get_stream_info(
     flags: *mut u32,
     result: *mut CallResult,
 ) -> i32 {
-    v2_call(result, || {
+    v2_call_allow_active_pipeline(result, || {
         if record_count.is_null() || flags.is_null() {
             return Err((
                 Status::InvalidArgument,
@@ -3439,7 +3840,7 @@ pub unsafe extern "C" fn multi_pwsh_result_get_stream_record_info(
     flags: *mut u32,
     result: *mut CallResult,
 ) -> i32 {
-    v2_call(result, || {
+    v2_call_allow_active_pipeline(result, || {
         if sequence.is_null() || flags.is_null() {
             return Err((
                 Status::InvalidArgument,
@@ -3486,7 +3887,7 @@ pub unsafe extern "C" fn multi_pwsh_result_copy_stream_record_field_utf8(
     required_len: *mut usize,
     result: *mut CallResult,
 ) -> i32 {
-    v2_call(result, || {
+    v2_call_allow_active_pipeline(result, || {
         let stream = i32::try_from(stream).map_err(|_| {
             (
                 Status::InvalidArgument,
@@ -3530,7 +3931,7 @@ pub unsafe extern "C" fn multi_pwsh_result_get_stream_totals(
     dropped_record_count: *mut u64,
     result: *mut CallResult,
 ) -> i32 {
-    v2_call(result, || {
+    v2_call_allow_active_pipeline(result, || {
         if total_record_count.is_null() || dropped_record_count.is_null() {
             return Err((
                 Status::InvalidArgument,
@@ -3564,7 +3965,7 @@ pub unsafe extern "C" fn multi_pwsh_result_get_stream_record_projection_info(
     projection_flags: *mut u32,
     result: *mut CallResult,
 ) -> i32 {
-    v2_call(result, || {
+    v2_call_allow_active_pipeline(result, || {
         if property_entry_count.is_null()
             || dropped_property_entry_count.is_null()
             || type_name_count.is_null()
@@ -3726,12 +4127,12 @@ pub unsafe extern "C" fn multi_pwsh_invoke_async(
 
 #[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_operation_release(handle: u64, result: *mut CallResult) -> i32 {
-    v2_call(result, || release_operation(handle))
+    v2_call_allow_active_pipeline(result, || release_operation(handle))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_operation_stop(handle: u64, result: *mut CallResult) -> i32 {
-    v2_call(result, || stop_operation(handle))
+    v2_call_allow_active_pipeline(result, || stop_operation(handle))
 }
 
 #[no_mangle]
@@ -3741,7 +4142,7 @@ pub unsafe extern "C" fn multi_pwsh_operation_poll(
     terminal_status: *mut i32,
     result: *mut CallResult,
 ) -> i32 {
-    v2_call(result, || poll_operation(handle, operation_state, terminal_status))
+    v2_call_allow_active_pipeline(result, || poll_operation(handle, operation_state, terminal_status))
 }
 
 #[no_mangle]
@@ -3752,7 +4153,7 @@ pub unsafe extern "C" fn multi_pwsh_operation_wait(
     terminal_status: *mut i32,
     result: *mut CallResult,
 ) -> i32 {
-    v2_call(result, || {
+    v2_call_allow_active_pipeline(result, || {
         wait_operation(handle, timeout_milliseconds, operation_state, terminal_status)
     })
 }
@@ -3763,7 +4164,7 @@ pub unsafe extern "C" fn multi_pwsh_operation_get_result(
     result_handle: *mut u64,
     result: *mut CallResult,
 ) -> i32 {
-    v2_call(result, || {
+    v2_call_allow_active_pipeline(result, || {
         if result_handle.is_null() {
             return Err((
                 Status::InvalidArgument,
@@ -3795,7 +4196,7 @@ pub unsafe extern "C" fn multi_pwsh_session_create(
 
 #[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_session_release(session_handle: u64, result: *mut CallResult) -> i32 {
-    v2_call(result, || release_runspace_session(session_handle))
+    v2_call_allow_active_pipeline(result, || release_runspace_session(session_handle))
 }
 
 #[no_mangle]
@@ -3822,7 +4223,7 @@ pub unsafe extern "C" fn multi_pwsh_session_get_snapshot(
     snapshot: *mut SessionSnapshot,
     result: *mut CallResult,
 ) -> i32 {
-    v2_call(result, || {
+    v2_call_allow_active_pipeline(result, || {
         with_runspace_session(session_handle, |session| {
             let snapshot_value = session.snapshot().map_err(managed_failure)?;
             write_session_snapshot(snapshot, snapshot_value)
@@ -3839,7 +4240,7 @@ pub unsafe extern "C" fn multi_pwsh_session_get_event_info(
     flags: *mut u32,
     result: *mut CallResult,
 ) -> i32 {
-    v2_call(result, || {
+    v2_call_allow_active_pipeline(result, || {
         if sequence.is_null() || event_state.is_null() || flags.is_null() {
             return Err((
                 Status::InvalidArgument,
@@ -3883,6 +4284,79 @@ pub unsafe extern "C" fn multi_pwsh_session_set_variable(
         let (kind, payload) = data_value_input(value)?;
         with_runspace_session_mutation(session_handle, |session| {
             session.set_variable(name, kind, payload).map_err(managed_failure)?;
+            Ok(Status::Success)
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_session_set_live_object_variable(
+    session_handle: u64,
+    name: Utf8Span,
+    com_object: *mut std::ffi::c_void,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        if com_object.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "live session object probe pointer is null".to_owned(),
+            ));
+        }
+        let name = utf8_span(name).map_err(|_| {
+            (
+                Status::InvalidArgument,
+                "PowerShell session variable name must be UTF-8 without NUL".to_owned(),
+            )
+        })?;
+        if !valid_session_name(name) {
+            return Err((
+                Status::InvalidArgument,
+                "PowerShell session variable name must be a bounded ASCII identifier".to_owned(),
+            ));
+        }
+        with_runspace_session_mutation(session_handle, |session| {
+            unsafe {
+                session
+                    .set_live_object_variable(name, com_object)
+                    .map_err(managed_failure)?;
+            }
+            Ok(Status::Success)
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_session_set_live_object_contract_variable(
+    session_handle: u64,
+    name: Utf8Span,
+    contract: *const FfiLiveObjectContractDescriptor,
+    com_object: *mut std::ffi::c_void,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        if com_object.is_null() {
+            return Err((Status::InvalidArgument, "live object pointer is null".to_owned()));
+        }
+        let name = utf8_span(name).map_err(|_| {
+            (
+                Status::InvalidArgument,
+                "PowerShell session variable name must be UTF-8 without NUL".to_owned(),
+            )
+        })?;
+        if !valid_session_name(name) {
+            return Err((
+                Status::InvalidArgument,
+                "PowerShell session variable name must be a bounded ASCII identifier".to_owned(),
+            ));
+        }
+        let contract = live_object_contract_input(contract)?;
+        with_runspace_session_mutation(session_handle, |session| {
+            unsafe {
+                session
+                    .set_live_object_contract_variable(name, contract, com_object)
+                    .map_err(managed_failure)?;
+            }
             Ok(Status::Success)
         })
     })
@@ -4181,6 +4655,112 @@ mod tests {
     }
 
     #[test]
+    fn invocation_execution_scope_tracks_nesting_and_unwind_cleanup() {
+        assert_eq!(pipeline_execution_depth(), 0);
+
+        {
+            let _outer = InvocationExecutionScope::enter();
+            assert_eq!(pipeline_execution_depth(), 1);
+            assert_eq!(active_pipeline_count(), 1);
+
+            {
+                let _inner = InvocationExecutionScope::enter();
+                assert_eq!(pipeline_execution_depth(), 2);
+                assert_eq!(active_pipeline_count(), 2);
+            }
+
+            assert_eq!(pipeline_execution_depth(), 1);
+            assert_eq!(active_pipeline_count(), 1);
+        }
+
+        assert_eq!(pipeline_execution_depth(), 0);
+        assert_eq!(active_pipeline_count(), 0);
+
+        let unwind = catch_unwind(AssertUnwindSafe(|| {
+            let _scope = InvocationExecutionScope::enter();
+            assert_eq!(pipeline_execution_depth(), 1);
+            panic!("test pipeline unwind");
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(pipeline_execution_depth(), 0);
+        assert_eq!(active_pipeline_count(), 0);
+    }
+
+    #[test]
+    fn execution_scope_rejects_nested_ffi_calls_before_runtime_access() {
+        let _scope = InvocationExecutionScope::enter();
+        let mut diagnostic = [0_u8; 128];
+        let mut result = CallResult {
+            size: mem::size_of::<CallResult>() as u32,
+            status: 0,
+            flags: 0,
+            _reserved: 0,
+            diagnostic: diagnostic.as_mut_ptr(),
+            diagnostic_capacity: diagnostic.len(),
+            diagnostic_required: 0,
+            diagnostic_written: 0,
+        };
+        let mut handle = 0;
+
+        assert_eq!(
+            unsafe { multi_pwsh_create(&mut handle, &mut result) },
+            Status::Backpressure.value()
+        );
+        assert_eq!(result.status, Status::Backpressure.value());
+        assert_eq!(handle, 0);
+        assert_eq!(
+            std::str::from_utf8(&diagnostic[..result.diagnostic_written]).unwrap(),
+            "PowerShell FFI calls are not permitted from code invoked by an active PowerShell pipeline."
+        );
+    }
+
+    #[test]
+    fn execution_scope_rejects_cross_thread_ffi_calls_before_runtime_access() {
+        let _scope = InvocationExecutionScope::enter();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let error = reject_active_pipeline_ffi_call().unwrap_err();
+                assert_eq!(error.0, Status::Backpressure);
+                assert_eq!(
+                    error.1,
+                    "PowerShell FFI calls are not permitted while any PowerShell pipeline is running."
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn explicitly_permitted_v2_call_remains_allowed_without_execution_scope() {
+        let mut result = CallResult {
+            size: mem::size_of::<CallResult>() as u32,
+            status: 0,
+            flags: 0,
+            _reserved: 0,
+            diagnostic: std::ptr::null_mut(),
+            diagnostic_capacity: 0,
+            diagnostic_required: 0,
+            diagnostic_written: 0,
+        };
+
+        assert_eq!(
+            unsafe { v2_call_allow_active_pipeline(&mut result, || Ok(Status::Success)) },
+            Status::Success.value()
+        );
+    }
+
+    #[test]
+    fn active_pipeline_rejects_session_mutation_before_operation_locking() {
+        let _scope = InvocationExecutionScope::enter();
+        let error = reject_active_pipeline_session_mutation().unwrap_err();
+
+        assert_eq!(error.0, Status::Backpressure);
+        assert_eq!(
+            error.1,
+            "PowerShell session variables cannot be read or changed while any PowerShell pipeline is running."
+        );
+    }
+
+    #[test]
     fn abi_helpers_and_sized_calls_enforce_the_contract_without_a_payload() {
         const REQUIRED_FEATURES: u64 = FEATURE_STRUCTURED_INVOCATION_ERRORS
             | FEATURE_PER_CALL_DIAGNOSTICS
@@ -4197,7 +4777,10 @@ mod tests {
             | FEATURE_SNAPSHOT_PROJECTIONS
             | FEATURE_SESSION_CONFIGURATION
             | FEATURE_SESSION_VARIABLES
-            | FEATURE_CAPABILITY_RPC;
+            | FEATURE_CAPABILITY_RPC
+            | FEATURE_LIVE_OBJECT_PROBE
+            | FEATURE_LIVE_SESSION_OBJECT_PROBE
+            | FEATURE_LIVE_OBJECT_CONTRACTS;
 
         assert_eq!(ABI_VERSION, 2);
         assert_eq!(feature_flags(), REQUIRED_FEATURES);
@@ -6058,7 +6641,7 @@ mod tests {
     fn calls_contain_native_panics() {
         let mut call_result = v2_call_result_without_diagnostic();
         assert_eq!(
-            unsafe { v2_call(&mut call_result, || panic!("test panic containment")) },
+            unsafe { v2_call_allow_active_pipeline(&mut call_result, || panic!("test panic containment")) },
             Status::Panic.value()
         );
         assert_eq!(call_result.status, Status::Panic.value());

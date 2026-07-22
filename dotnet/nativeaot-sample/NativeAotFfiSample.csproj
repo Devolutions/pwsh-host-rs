@@ -16,13 +16,20 @@
   <PropertyGroup>
     <RepositoryRoot>$(MSBuildThisFileDirectory)..\..</RepositoryRoot>
     <PwshFfiNativeLibrary>$(RepositoryRoot)\target\release\multi_pwsh_sdk.dll</PwshFfiNativeLibrary>
+    <LiveObjectTestPackProject>$(MSBuildThisFileDirectory)..\live-object-test-pack\LiveObjectTestPack.csproj</LiveObjectTestPackProject>
+    <LiveObjectTestPackAssembly>$(MSBuildThisFileDirectory)..\live-object-test-pack\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.LiveObject.TestPack.dll</LiveObjectTestPackAssembly>
   </PropertyGroup>
 
   <Target Name="BuildAndStagePwshFfiNativeLibrary" BeforeTargets="Publish">
     <Exec Command="cargo build --release -p pwsh-sdk-ffi" WorkingDirectory="$(RepositoryRoot)" />
+    <MSBuild Projects="$(LiveObjectTestPackProject)"
+             Targets="Build"
+             Properties="Configuration=$(Configuration)" />
   </Target>
 
   <Target Name="CopyPwshFfiNativeLibrary" AfterTargets="Publish">
     <Copy SourceFiles="$(PwshFfiNativeLibrary)" DestinationFiles="$(PublishDir)multi-pwsh-sdk.dll" />
+    <Copy SourceFiles="$(LiveObjectTestPackAssembly)"
+          DestinationFiles="$(PublishDir)Devolutions.MultiPwsh.LiveObject.TestPack.dll" />
   </Target>
 </Project>

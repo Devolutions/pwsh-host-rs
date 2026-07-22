@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Devolutions.PowerShell.Ffi.LiveObjects;
 
 namespace Devolutions.PowerShell.Ffi;
 
@@ -39,6 +40,15 @@ internal unsafe struct NativeCapabilityRegistration
     internal NativeDataValue* Definitions;
     internal nint DispatchCallback;
     internal nint CancelCallback;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct NativeLiveObjectContractPack
+{
+    internal uint Size;
+    internal uint Flags;
+    internal NativeUtf8Span PayloadAdapterAssemblyPath;
+    internal NativeUtf8Span PayloadAdapterTypeName;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -117,6 +127,21 @@ internal static unsafe partial class NativeMethods
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int InitializeFromPath(NativeCallResult* result);
 
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_initialize_from_path_with_contract_packs")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int InitializeFromPathWithContractPacks(
+        NativeLiveObjectContractPack* packs,
+        nuint packCount,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_initialize_with_contract_packs_utf8")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int InitializeWithContractPacks(
+        NativeUtf8Span payloadPath,
+        NativeLiveObjectContractPack* packs,
+        nuint packCount,
+        NativeCallResult* result);
+
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_get_payload_path_utf8")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int GetPayloadPath(
@@ -128,6 +153,18 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_create")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int Create(ulong* handle, NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_live_object_probe_create")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CreateLiveObjectProbe(long initialCount, nint* comObject, NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_live_object_probe_release")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int ReleaseLiveObjectProbe(nint comObject, NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_live_object_probe_unregister")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int UnregisterLiveObjectProbe(nint comObject, NativeCallResult* result);
 
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_release")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
@@ -182,6 +219,13 @@ internal static unsafe partial class NativeMethods
     internal static partial int AddArgumentValue(
         ulong handle,
         NativeDataValue* value,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_add_argument_live_object")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int AddArgumentLiveObject(
+        ulong handle,
+        nint comObject,
         NativeCallResult* result);
 
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_add_parameter_value")]
@@ -437,6 +481,23 @@ internal static unsafe partial class NativeMethods
         ulong sessionHandle,
         NativeUtf8Span name,
         NativeDataValue* value,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_session_set_live_object_variable")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int SetSessionLiveObjectVariable(
+        ulong sessionHandle,
+        NativeUtf8Span name,
+        nint comObject,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_session_set_live_object_contract_variable")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int SetSessionLiveObjectContractVariable(
+        ulong sessionHandle,
+        NativeUtf8Span name,
+        NativeLiveObjectContractDescriptor* contract,
+        nint comObject,
         NativeCallResult* result);
 
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_session_remove_variable")]

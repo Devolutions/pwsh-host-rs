@@ -19,6 +19,112 @@ hosted CoreCLR is a supported general .NET topology. The runtime host rejects
 incompatible initialization. Do not rely on dynamic runtime switching, multiple
 PowerShell runtime versions, or runtime unloading in the same process.
 
+### Experimental live-object probe
+
+`PowerShellRuntime.CreateLiveObjectProbe` is a deliberately narrow,
+non-production `IUnknown` experiment. It creates a payload-local
+`PSCustomObject` with one numeric `Count` property and projects only
+`GetCount` and `Increment` through a source-generated, fixed-GUID COM
+interface. It is portable userland `ComWrappers` use: it does not use Windows
+COM activation, registry metadata, BSTR/automation marshalling, or classic
+runtime COM interop.
+
+The `net10.0` facade receives an opaque interface pointer, creates a unique
+generated RCW, and immediately releases the producer's transit reference. The
+RCW owns its reference until `PowerShellLiveObjectProbe.Dispose`, which calls
+`ComObject.FinalRelease` after unregistering the payload identity entry; using
+the wrapper afterward throws
+`ObjectDisposedException`. `PowerShell.AddArgument(PowerShellLiveObjectProbe)`
+returns the original pointer to the payload binding, which accepts only
+pointers it created and restores the original payload object rather than
+accepting arbitrary foreign `IUnknown` values.
+
+This is currently validated only by the Windows x64 NativeAOT sample with an
+explicit PowerShell 7.4 payload. It must be used only after the creating
+invocation has completed and never from a capability callback or while a
+pipeline is active. The existing process-global operation lock does not make
+arbitrary direct proxy calls, reentrancy, runspace affinity, arbitrary member
+invocation, or cross-platform payload activation supported. The probe is not a
+general mechanism for exposing `PSObject`, SMA objects, delegates, hosts,
+credentials, reflection, or ordinary managed object references to the
+consumer runtime.
+
+### Experimental reverse session-object probe
+
+`PowerShellSessionObjectProbe` proves the inverse direction. A .NET 10-owned
+broker exports an `IUnknown` transfer reference to
+`PowerShellSession.SetLiveObjectVariable`; the payload creates a unique
+generated RCW, wraps it in a small PowerShell-visible payload proxy, and
+places that proxy in the session's `SessionStateProxy`. PowerShell can invoke
+only the proxy's fixed `Count` and `Increment` members, whose bodies call the
+generated interface and run in the .NET 10 broker.
+
+The payload retains each projected RCW by variable name and calls
+`ComObject.FinalRelease` when its value is replaced through either session
+setter, removed with `RemoveVariable`, or the session owner is released. The
+.NET 10 facade releases its transfer reference immediately after a successful
+or failed assignment, but the managed probe itself must outlive its
+session-variable binding. Remove the variable before disposing the probe.
+
+This is a narrow Windows x64 / PowerShell 7.4 acceptance experiment, not
+support for arbitrary .NET 10 objects in PowerShell session state. PowerShell
+scripts can remove, overwrite, or alias the variable independently. The
+payload reconciles its tracked bindings when each pipeline ends: it releases a
+proxy once no session variable references it and retains it while an alias
+still exists. The session mutation lock still rejects changes during an active
+pipeline, and the proxy must not call back into the FFI API.
+
+### Preview contract packs
+
+`PowerShellLiveObjectContract` and `PowerShellLiveObject<TContract>` provide
+the preview path for application-owned, consumer-to-session live objects.
+Applications compile one source-generated `IUnknown` interface into their
+`net10.0` consumer and their trusted `net8.0` payload adapter. The contract
+contains a non-empty interface GUID, major/minor version, and direction flags;
+methods must use preserved HRESULT returns and explicitly ABI-safe values.
+
+The consumer activates with
+`PowerShellRuntime.Activate(contractPacks)` or
+`PowerShellRuntime.Activate(payloadDirectory, contractPacks)`. Each
+`PowerShellLiveObjectContractPack` names an absolute payload-adapter assembly
+and its assembly-qualified static export type. During activation, the host
+loads the adapter into the selected payload runtime and invokes its
+`GetLiveObjectContractPackV1` unmanaged export. That export supplies a bounded
+contract descriptor list plus create/release callbacks for PowerShell-visible
+payload proxies. The payload registry rejects unknown, duplicate,
+direction-incompatible, or metadata-incompatible contracts before it projects
+an `IUnknown`.
+
+The `dotnet/live-object-test-pack` project is an acceptance fixture, not a
+shipping application contract. It proves that a separately compiled net8
+adapter can project a .NET 10 broker into a `PowerShellSession`, expose
+ordinary `Count` and `Increment` script members, retain its live state across
+invocations, and preserve a session-variable alias.
+
+Contract packs are deliberately explicit and trusted application code. They
+cannot expose raw pointers through PowerShell or turn arbitrary CLR objects
+into contracts. The current external-pack registry supports only the proven
+consumer-to-session direction. Payload-to-consumer object contracts,
+cross-session identity, compatibility relaxation, source generation, and
+application-specific schemas remain future work.
+
+### Live-object execution policy
+
+Direct calls from a PowerShell-visible payload proxy to a consumer broker are
+allowed only when the broker records bounded consumer-owned intent. Such a
+call must not invoke the native FFI, start another pipeline, access payload
+session state, call capability RPC, or mutate UI/runspace-affine state.
+
+The native bridge tracks active pipeline execution process-wide. General FFI
+calls fail with `Backpressure` while any pipeline is active, including calls
+forwarded to another thread by a broker; calls from a capability callback also
+fail before they acquire runtime or operation locks. Cancellation, operation
+polling/waiting, session snapshots/events, and immutable-result reads remain
+available while a pipeline runs. Session-variable reads and mutations fail
+with `Backpressure` before lock acquisition. These rules prevent deadlock;
+they do not make a live PowerShell object or runspace callable from a broker.
+A session-affine dispatcher is required before supporting that category.
+
 ## Lifecycle and ABI
 
 - The direct activation exports are process-global and accept one canonical

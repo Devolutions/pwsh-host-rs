@@ -4,15 +4,33 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using Devolutions.PowerShell.Ffi;
+using Devolutions.PowerShell.Ffi.LiveObjects;
+using NativeAotFfiSample;
+
+string contractPackPath = System.IO.Path.Combine(
+    AppContext.BaseDirectory,
+    "Devolutions.MultiPwsh.LiveObject.TestPack.dll");
+if (!System.IO.File.Exists(contractPackPath))
+{
+    Console.Error.WriteLine("NativeAOT facade did not publish the external live-object contract pack.");
+    return 1;
+}
+
+PowerShellLiveObjectContractPack[] contractPacks =
+[
+    new PowerShellLiveObjectContractPack(
+        contractPackPath,
+        "Devolutions.MultiPwsh.LiveObject.TestPack.LiveObjectTestPack, Devolutions.MultiPwsh.LiveObject.TestPack"),
+];
 
 PowerShellRuntime runtime;
 switch (args.Length)
 {
     case 0:
-        runtime = PowerShellRuntime.Activate();
+        runtime = PowerShellRuntime.Activate(contractPacks);
         break;
     case 1:
-        runtime = PowerShellRuntime.Activate(args[0]);
+        runtime = PowerShellRuntime.Activate(args[0], contractPacks);
         break;
     default:
         Console.Error.WriteLine("Usage: NativeAotFfiSample [payload-directory]");
@@ -48,6 +66,39 @@ if (output.Output.Records.Count != 1 ||
     return 1;
 }
 
+using (PowerShellLiveObjectProbe liveProbe = runtime.CreateLiveObjectProbe(41))
+{
+    if (liveProbe.Count != 41 || liveProbe.Increment() != 42)
+    {
+        Console.Error.WriteLine("NativeAOT facade did not project the live payload object.");
+        return 1;
+    }
+
+    using PowerShell liveObjectRoundTrip = runtime.Create();
+    PowerShellInvocationResult liveObjectOutput = liveObjectRoundTrip
+        .AddScript("param($value) $value.Count += 1; $value.Count", useLocalScope: true)
+        .AddArgument(liveProbe)
+        .Invoke();
+    if (liveObjectOutput.Output.Records.Count != 1 ||
+        liveObjectOutput.Output.Records[0].DisplayText != "43" ||
+        liveProbe.Count != 43)
+    {
+        Console.Error.WriteLine("NativeAOT facade did not preserve live payload object identity.");
+        return 1;
+    }
+
+    liveProbe.Dispose();
+    try
+    {
+        _ = liveProbe.Count;
+        Console.Error.WriteLine("NativeAOT facade allowed use of a disposed live object probe.");
+        return 1;
+    }
+    catch (ObjectDisposedException)
+    {
+    }
+}
+
 using (PowerShellSession session = runtime.CreateSession(
     new PowerShellSessionOptions(
         historyMode: PowerShellSessionHistoryMode.Enabled,
@@ -68,6 +119,87 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
     {
         Console.Error.WriteLine("NativeAOT facade did not preserve bounded session settings and state.");
         return 1;
+    }
+
+    using (var reverseProbe = new PowerShellSessionObjectProbe(64))
+    {
+        session.SetLiveObjectVariable("reverseProbe", reverseProbe);
+        using PowerShell incrementProbe = session.CreatePowerShell();
+        PowerShellInvocationResult incrementOutput = incrementProbe
+            .AddScript("$reverseProbe.Increment()")
+            .Invoke();
+        if (incrementOutput.Output.Records.Count != 1 ||
+            incrementOutput.Output.Records[0].DisplayText != "65" ||
+            reverseProbe.Count != 65)
+        {
+            Console.Error.WriteLine("NativeAOT facade did not invoke the .NET session object through PowerShell.");
+            return 1;
+        }
+
+        using PowerShell readProbe = session.CreatePowerShell();
+        PowerShellInvocationResult readOutput = readProbe
+            .AddScript("$reverseProbe.Count")
+            .Invoke();
+        if (readOutput.Output.Records.Count != 1 ||
+            readOutput.Output.Records[0].DisplayText != "65" ||
+            !session.RemoveVariable("reverseProbe"))
+        {
+            Console.Error.WriteLine("NativeAOT facade did not retain the .NET session object across PowerShell invocations.");
+            return 1;
+        }
+
+        reverseProbe.Dispose();
+        try
+        {
+            _ = reverseProbe.Count;
+            Console.Error.WriteLine("NativeAOT facade allowed use of a disposed .NET session object probe.");
+            return 1;
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
+    var genericBroker = new GenericCountBroker(96);
+    using (var genericLiveObject = new PowerShellLiveObject<IPowerShellLiveObjectTestCount>(
+        PowerShellLiveObjectTestContracts.Count,
+        genericBroker))
+    {
+        session.SetLiveObjectVariable("genericProbe", genericLiveObject);
+        using PowerShell incrementGenericProbe = session.CreatePowerShell();
+        PowerShellInvocationResult genericIncrementOutput = incrementGenericProbe
+            .AddScript("$genericProbe.Increment()")
+            .Invoke();
+        if (genericIncrementOutput.Output.Records.Count != 1 ||
+            genericIncrementOutput.Output.Records[0].DisplayText != "97" ||
+            genericBroker.GetCount(out long genericCount) != 0 ||
+            genericCount != 97)
+        {
+            Console.Error.WriteLine("NativeAOT facade did not invoke the external contract-pack live object.");
+            return 1;
+        }
+
+        using PowerShell aliasGenericProbe = session.CreatePowerShell();
+        PowerShellInvocationResult aliasOutput = aliasGenericProbe
+            .AddScript("$genericAlias = $genericProbe; Remove-Variable genericProbe")
+            .Invoke();
+        if (aliasOutput.HadErrors)
+        {
+            Console.Error.WriteLine("NativeAOT facade could not rebind the external contract-pack live object.");
+            return 1;
+        }
+
+        using PowerShell readGenericProbe = session.CreatePowerShell();
+        PowerShellInvocationResult genericReadOutput = readGenericProbe
+            .AddScript("$genericAlias.Increment()")
+            .Invoke();
+        if (genericReadOutput.Output.Records.Count != 1 ||
+            genericReadOutput.Output.Records[0].DisplayText != "98" ||
+            !session.RemoveVariable("genericAlias"))
+        {
+            Console.Error.WriteLine("NativeAOT facade did not retain the external contract-pack live object.");
+            return 1;
+        }
     }
 }
 

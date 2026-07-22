@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>Devolutions.MultiPwsh.LiveObject.TestPack</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\interop\PowerShellLiveObjectContract.cs"
+             Link="PowerShellLiveObjectContract.cs" />
+    <Compile Include="..\interop\PowerShellLiveObjectTestContract.cs"
+             Link="PowerShellLiveObjectTestContract.cs" />
+  </ItemGroup>
+</Project>

@@ -31,6 +31,24 @@ public sealed class PowerShellRuntime
         return CreateActivatedRuntime();
     }
 
+    public static PowerShellRuntime Activate(
+        IReadOnlyList<PowerShellLiveObjectContractPack> contractPacks)
+    {
+        ArgumentNullException.ThrowIfNull(contractPacks);
+        PowerShell.Initialize(contractPacks);
+        return CreateActivatedRuntime();
+    }
+
+    public static PowerShellRuntime Activate(
+        string payloadDirectory,
+        IReadOnlyList<PowerShellLiveObjectContractPack> contractPacks)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(payloadDirectory);
+        ArgumentNullException.ThrowIfNull(contractPacks);
+        PowerShell.Initialize(payloadDirectory, contractPacks);
+        return CreateActivatedRuntime();
+    }
+
     private static PowerShellRuntime CreateActivatedRuntime()
     {
         return new PowerShellRuntime(
@@ -42,6 +60,16 @@ public sealed class PowerShellRuntime
     public PowerShell Create()
     {
         return PowerShell.Create();
+    }
+
+    /// <summary>
+    /// Creates an experimental live payload-object probe for validating the
+    /// cross-runtime <c>IUnknown</c> transport.
+    /// </summary>
+    public PowerShellLiveObjectProbe CreateLiveObjectProbe(long initialCount)
+    {
+        PowerShell.EnsureLiveObjectProbeSupported();
+        return PowerShellLiveObjectProbe.Create(initialCount);
     }
 
     public PowerShellInvocationResult Invoke(

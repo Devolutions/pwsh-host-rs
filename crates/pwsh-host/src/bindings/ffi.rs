@@ -20,6 +20,9 @@ const FFI_FEATURE_SNAPSHOT_PROJECTIONS: u64 = 1 << 13;
 const FFI_FEATURE_SESSION_CONFIGURATION: u64 = 1 << 14;
 const FFI_FEATURE_SESSION_VARIABLES: u64 = 1 << 15;
 const FFI_FEATURE_CAPABILITY_RPC: u64 = 1 << 16;
+const FFI_FEATURE_LIVE_OBJECT_PROBE: u64 = 1 << 17;
+const FFI_FEATURE_LIVE_SESSION_OBJECT_PROBE: u64 = 1 << 18;
+const FFI_FEATURE_LIVE_OBJECT_CONTRACTS: u64 = 1 << 19;
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_BUFFER_TOO_SMALL: i32 = 1;
 
@@ -32,6 +35,18 @@ struct FfiCallResult {
     diagnostic_capacity: i32,
     diagnostic_required_length: i32,
     diagnostic_written_length: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FfiLiveObjectContractDescriptor {
+    pub size: u32,
+    pub directions: u32,
+    pub interface_id_low: u64,
+    pub interface_id_high: u64,
+    pub major_version: u16,
+    pub minor_version: u16,
+    pub reserved: u32,
 }
 
 #[repr(C)]
@@ -82,6 +97,14 @@ struct FfiApiV2 {
     session_remove_variable_fn: *const libc::c_void,
     session_get_variable_snapshot_fn: *const libc::c_void,
     power_shell_set_capability_context_fn: *const libc::c_void,
+    live_object_probe_create_fn: *const libc::c_void,
+    live_object_probe_release_fn: *const libc::c_void,
+    live_object_probe_unregister_fn: *const libc::c_void,
+    power_shell_add_argument_live_object_fn: *const libc::c_void,
+    power_shell_session_set_live_object_variable_fn: *const libc::c_void,
+    live_object_contract_pack_register_fn: *const libc::c_void,
+    power_shell_session_set_live_object_contract_variable_fn: *const libc::c_void,
+    live_object_contract_pack_register_many_fn: *const libc::c_void,
 }
 
 type FnBindingsGetFfiApiV2 = unsafe extern "system" fn() -> *const FfiApiV2;
@@ -177,6 +200,19 @@ type FnFfiPowerShellSessionGetEventInfo =
     unsafe extern "system" fn(PowerShellHandle, i32, *mut i64, *mut u32, *mut u32, *mut FfiCallResult) -> i32;
 type FnFfiPowerShellSessionSetVariable =
     unsafe extern "system" fn(PowerShellHandle, *const u8, i32, u32, *const u8, i32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellSessionSetLiveObjectVariable =
+    unsafe extern "system" fn(PowerShellHandle, *const u8, i32, *mut libc::c_void, *mut FfiCallResult) -> i32;
+type FnFfiLiveObjectContractPackRegister = unsafe extern "system" fn(*mut libc::c_void, *mut FfiCallResult) -> i32;
+type FnFfiLiveObjectContractPackRegisterMany =
+    unsafe extern "system" fn(*const *mut libc::c_void, u32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellSessionSetLiveObjectContractVariable = unsafe extern "system" fn(
+    PowerShellHandle,
+    *const u8,
+    i32,
+    *const FfiLiveObjectContractDescriptor,
+    *mut libc::c_void,
+    *mut FfiCallResult,
+) -> i32;
 type FnFfiPowerShellSessionRemoveVariable =
     unsafe extern "system" fn(PowerShellHandle, *const u8, i32, *mut u32, *mut FfiCallResult) -> i32;
 type FnFfiPowerShellSessionGetVariableSnapshot = unsafe extern "system" fn(
@@ -216,6 +252,11 @@ type FnFfiInvocationResultCopyStreamRecordValue = unsafe extern "system" fn(
     *mut i32,
     *mut FfiCallResult,
 ) -> i32;
+type FnFfiLiveObjectProbeCreate = unsafe extern "system" fn(i64, *mut *mut libc::c_void, *mut FfiCallResult) -> i32;
+type FnFfiLiveObjectProbeRelease = unsafe extern "system" fn(*mut libc::c_void, *mut FfiCallResult) -> i32;
+type FnFfiLiveObjectProbeUnregister = unsafe extern "system" fn(*mut libc::c_void, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellAddLiveObject =
+    unsafe extern "system" fn(PowerShellHandle, *mut libc::c_void, *mut FfiCallResult) -> i32;
 
 #[derive(Clone, Copy)]
 pub(crate) struct FfiBindings {
@@ -261,6 +302,14 @@ pub(crate) struct FfiBindings {
     session_remove_variable_fn: FnFfiPowerShellSessionRemoveVariable,
     session_get_variable_snapshot_fn: FnFfiPowerShellSessionGetVariableSnapshot,
     power_shell_set_capability_context_fn: FnFfiPowerShellSetCapabilityContext,
+    live_object_probe_create_fn: FnFfiLiveObjectProbeCreate,
+    live_object_probe_release_fn: FnFfiLiveObjectProbeRelease,
+    live_object_probe_unregister_fn: FnFfiLiveObjectProbeUnregister,
+    power_shell_add_argument_live_object_fn: FnFfiPowerShellAddLiveObject,
+    power_shell_session_set_live_object_variable_fn: FnFfiPowerShellSessionSetLiveObjectVariable,
+    live_object_contract_pack_register_fn: FnFfiLiveObjectContractPackRegister,
+    power_shell_session_set_live_object_contract_variable_fn: FnFfiPowerShellSessionSetLiveObjectContractVariable,
+    live_object_contract_pack_register_many_fn: FnFfiLiveObjectContractPackRegisterMany,
 }
 
 #[derive(Debug)]
@@ -331,14 +380,20 @@ impl FfiBindings {
                     | FFI_FEATURE_SNAPSHOT_PROJECTIONS
                     | FFI_FEATURE_SESSION_CONFIGURATION
                     | FFI_FEATURE_SESSION_VARIABLES
-                    | FFI_FEATURE_CAPABILITY_RPC)
+                    | FFI_FEATURE_CAPABILITY_RPC
+                    | FFI_FEATURE_LIVE_OBJECT_PROBE
+                    | FFI_FEATURE_LIVE_SESSION_OBJECT_PROBE
+                    | FFI_FEATURE_LIVE_OBJECT_CONTRACTS)
                 != (FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
                     | FFI_FEATURE_SESSION_PRIMITIVES
                     | FFI_FEATURE_SESSION_POLLING
                     | FFI_FEATURE_SNAPSHOT_PROJECTIONS
                     | FFI_FEATURE_SESSION_CONFIGURATION
                     | FFI_FEATURE_SESSION_VARIABLES
-                    | FFI_FEATURE_CAPABILITY_RPC)
+                    | FFI_FEATURE_CAPABILITY_RPC
+                    | FFI_FEATURE_LIVE_OBJECT_PROBE
+                    | FFI_FEATURE_LIVE_SESSION_OBJECT_PROBE
+                    | FFI_FEATURE_LIVE_OBJECT_CONTRACTS)
         {
             return Err(Error::IO(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -389,6 +444,14 @@ impl FfiBindings {
             api.session_remove_variable_fn,
             api.session_get_variable_snapshot_fn,
             api.power_shell_set_capability_context_fn,
+            api.live_object_probe_create_fn,
+            api.live_object_probe_release_fn,
+            api.live_object_probe_unregister_fn,
+            api.power_shell_add_argument_live_object_fn,
+            api.power_shell_session_set_live_object_variable_fn,
+            api.live_object_contract_pack_register_fn,
+            api.power_shell_session_set_live_object_contract_variable_fn,
+            api.live_object_contract_pack_register_many_fn,
         ];
         if fields.iter().any(|field| field.is_null()) {
             return Err(Error::IO(std::io::Error::new(
@@ -548,7 +611,135 @@ impl FfiBindings {
                     api.power_shell_set_capability_context_fn,
                 )
             },
+            live_object_probe_create_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveObjectProbeCreate>(api.live_object_probe_create_fn)
+            },
+            live_object_probe_release_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveObjectProbeRelease>(api.live_object_probe_release_fn)
+            },
+            live_object_probe_unregister_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveObjectProbeUnregister>(
+                    api.live_object_probe_unregister_fn,
+                )
+            },
+            power_shell_add_argument_live_object_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellAddLiveObject>(
+                    api.power_shell_add_argument_live_object_fn,
+                )
+            },
+            power_shell_session_set_live_object_variable_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionSetLiveObjectVariable>(
+                    api.power_shell_session_set_live_object_variable_fn,
+                )
+            },
+            live_object_contract_pack_register_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveObjectContractPackRegister>(
+                    api.live_object_contract_pack_register_fn,
+                )
+            },
+            power_shell_session_set_live_object_contract_variable_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionSetLiveObjectContractVariable>(
+                    api.power_shell_session_set_live_object_contract_variable_fn,
+                )
+            },
+            live_object_contract_pack_register_many_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveObjectContractPackRegisterMany>(
+                    api.live_object_contract_pack_register_many_fn,
+                )
+            },
         })
+    }
+
+    pub(crate) fn create_live_object_probe(&self, initial_count: i64) -> Result<*mut libc::c_void, FfiBindingError> {
+        let mut com_object = std::ptr::null_mut();
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe { (self.live_object_probe_create_fn)(initial_count, &mut com_object, &mut call_result) };
+        check_status(status, &call_result, &diagnostic)?;
+        if com_object.is_null() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed live object probe creation returned a null pointer".to_owned(),
+            ));
+        }
+
+        Ok(com_object)
+    }
+
+    pub(crate) fn release_live_object_probe(&self, com_object: *mut libc::c_void) -> Result<(), FfiBindingError> {
+        if com_object.is_null() {
+            return Err(FfiBindingError::from_status(
+                -1,
+                "live object probe pointer is null".to_owned(),
+            ));
+        }
+
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe { (self.live_object_probe_release_fn)(com_object, &mut call_result) };
+        check_status(status, &call_result, &diagnostic)
+    }
+
+    pub(crate) fn unregister_live_object_probe(&self, com_object: *mut libc::c_void) -> Result<(), FfiBindingError> {
+        if com_object.is_null() {
+            return Err(FfiBindingError::from_status(
+                -1,
+                "live object probe pointer is null".to_owned(),
+            ));
+        }
+
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe { (self.live_object_probe_unregister_fn)(com_object, &mut call_result) };
+        check_status(status, &call_result, &diagnostic)
+    }
+
+    /// # Safety
+    ///
+    /// `pack_api` must be a valid `NativeLiveObjectContractPackApi` pointer
+    /// produced by an assembly loaded into the active payload runtime.
+    pub(crate) unsafe fn register_live_object_contract_pack(
+        &self,
+        pack_api: *mut libc::c_void,
+    ) -> Result<(), FfiBindingError> {
+        if pack_api.is_null() {
+            return Err(FfiBindingError::from_status(
+                -1,
+                "live object contract pack API pointer is null".to_owned(),
+            ));
+        }
+
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe { (self.live_object_contract_pack_register_fn)(pack_api, &mut call_result) };
+        check_status(status, &call_result, &diagnostic)
+    }
+
+    /// # Safety
+    ///
+    /// Every pointer in `pack_apis` must identify a valid
+    /// `NativeLiveObjectContractPackApi` from the active payload runtime.
+    pub(crate) unsafe fn register_live_object_contract_packs(
+        &self,
+        pack_apis: &[*mut libc::c_void],
+    ) -> Result<(), FfiBindingError> {
+        if pack_apis.is_empty() || pack_apis.len() > 16 || pack_apis.iter().any(|api| api.is_null()) {
+            return Err(FfiBindingError::from_status(
+                -1,
+                "live object contract pack inputs are invalid".to_owned(),
+            ));
+        }
+
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe {
+            (self.live_object_contract_pack_register_many_fn)(
+                pack_apis.as_ptr(),
+                pack_apis.len() as u32,
+                &mut call_result,
+            )
+        };
+        check_status(status, &call_result, &diagnostic)
     }
 }
 
@@ -635,6 +826,23 @@ impl FfiPowerShell {
     pub fn add_argument_value(&self, kind: u32, payload: &[u8]) -> Result<(), FfiBindingError> {
         self.with_value(kind, payload, |handle, kind, bytes, length, result| unsafe {
             (self.bindings.add_argument_value_fn)(handle, kind, bytes, length, result)
+        })
+    }
+
+    /// # Safety
+    ///
+    /// `com_object` must be a valid IUnknown pointer for the built-in probe
+    /// contract and must remain valid for the managed projection call.
+    pub unsafe fn add_argument_live_object(&self, com_object: *mut libc::c_void) -> Result<(), FfiBindingError> {
+        if com_object.is_null() {
+            return Err(FfiBindingError::from_status(
+                -1,
+                "live object probe pointer is null".to_owned(),
+            ));
+        }
+
+        self.call(|handle, result| unsafe {
+            (self.bindings.power_shell_add_argument_live_object_fn)(handle, com_object, result)
         })
     }
 
@@ -1090,6 +1298,76 @@ impl FfiPowerShellSession {
                 kind,
                 payload.as_ptr(),
                 payload_length,
+                &mut call_result,
+            )
+        };
+        check_status(status, &call_result, &diagnostic)
+    }
+
+    /// # Safety
+    ///
+    /// `com_object` must be a valid IUnknown pointer for the built-in probe
+    /// contract and must remain valid for the managed projection call.
+    pub unsafe fn set_live_object_variable(
+        &self,
+        name: &str,
+        com_object: *mut libc::c_void,
+    ) -> Result<(), FfiBindingError> {
+        if com_object.is_null() {
+            return Err(FfiBindingError::from_status(
+                -1,
+                "live session object probe pointer is null".to_owned(),
+            ));
+        }
+
+        let handle = self
+            .handle
+            .ok_or_else(|| FfiBindingError::from_status(-4, "PowerShell session has been released".to_owned()))?;
+        let name_length = checked_utf8_length(name)?;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe {
+            (self.bindings.power_shell_session_set_live_object_variable_fn)(
+                handle,
+                name.as_ptr(),
+                name_length,
+                com_object,
+                &mut call_result,
+            )
+        };
+        check_status(status, &call_result, &diagnostic)
+    }
+
+    /// # Safety
+    ///
+    /// `com_object` must be a valid IUnknown pointer that implements
+    /// `contract` and must remain valid for the managed projection call.
+    pub unsafe fn set_live_object_contract_variable(
+        &self,
+        name: &str,
+        contract: &FfiLiveObjectContractDescriptor,
+        com_object: *mut libc::c_void,
+    ) -> Result<(), FfiBindingError> {
+        if com_object.is_null() {
+            return Err(FfiBindingError::from_status(
+                -1,
+                "live object pointer is null".to_owned(),
+            ));
+        }
+
+        let handle = self
+            .handle
+            .ok_or_else(|| FfiBindingError::from_status(-4, "PowerShell session has been released".to_owned()))?;
+        let name_length = checked_utf8_length(name)?;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe {
+            (self.bindings.power_shell_session_set_live_object_contract_variable_fn)(
+                handle,
+                name.as_ptr(),
+                name_length,
+                contract,
+                com_object,
                 &mut call_result,
             )
         };
