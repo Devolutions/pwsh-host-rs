@@ -158,7 +158,7 @@ jobs:
         run: cargo build --all-targets
 
       - name: Run Rust tests
-        run: cargo test --all-targets
+        run: cargo test --all-targets -- --test-threads=1
 
       - name: Run multi-pwsh venv integration tests
         shell: pwsh
