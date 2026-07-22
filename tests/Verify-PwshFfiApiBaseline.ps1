@@ -149,9 +149,12 @@ $expectedManagedStructs = [ordered]@{
     'NativeDataValue' = @{ Size = 32; Fields = @('Size|0|System.UInt32', 'Kind|4|System.UInt32', 'Flags|8|System.UInt32', 'Reserved|12|System.UInt32', 'Data|16|System.Byte*', 'DataLength|24|System.UIntPtr') }
     'NativeCallResult' = @{ Size = 48; Fields = @('Size|0|System.UInt32', 'Status|4|System.Int32', 'Flags|8|System.UInt32', 'Reserved|12|System.UInt32', 'Diagnostic|16|System.Byte*', 'DiagnosticCapacity|24|System.UIntPtr', 'DiagnosticRequired|32|System.UIntPtr', 'DiagnosticWritten|40|System.UIntPtr') }
     'NativeCapabilityRegistration' = @{ Size = 32; Fields = @('Size|0|System.UInt32', 'Flags|4|System.UInt32', 'Definitions|8|Devolutions.PowerShell.Ffi.NativeDataValue*', 'DispatchCallback|16|System.IntPtr', 'CancelCallback|24|System.IntPtr') }
+    'NativeLiveObjectContractPack' = @{ Size = 40; Fields = @('Size|0|System.UInt32', 'Flags|4|System.UInt32', 'PayloadAdapterAssemblyPath|8|Devolutions.PowerShell.Ffi.NativeUtf8Span', 'PayloadAdapterTypeName|24|Devolutions.PowerShell.Ffi.NativeUtf8Span') }
     'NativeSessionOptions' = @{ Size = 216; Fields = @('Size|0|System.UInt32', 'RunspaceMode|4|System.UInt32', 'InitialConfiguration|8|System.UInt32', 'HistoryMode|12|System.UInt32', 'ErrorPreference|16|System.UInt32', 'WarningPreference|20|System.UInt32', 'VerbosePreference|24|System.UInt32', 'DebugPreference|28|System.UInt32', 'InformationPreference|32|System.UInt32', 'Flags|36|System.UInt32', 'Reserved|40|System.UInt32', 'AllowedModulePath|48|Devolutions.PowerShell.Ffi.NativeUtf8Span', 'ExecutionPolicy|64|System.UInt32', 'ConfigurationFlags|68|System.UInt32', 'InitialVariables|72|Devolutions.PowerShell.Ffi.NativeDataValue', 'ModuleImports|104|Devolutions.PowerShell.Ffi.NativeDataValue', 'AllowedModulePaths|136|Devolutions.PowerShell.Ffi.NativeDataValue', 'WorkingDirectory|168|Devolutions.PowerShell.Ffi.NativeUtf8Span', 'Environment|184|Devolutions.PowerShell.Ffi.NativeDataValue') }
     'NativeSessionSnapshot' = @{ Size = 40; Fields = @('Size|0|System.UInt32', 'State|4|System.UInt32', 'RunspaceState|8|System.UInt32', 'Flags|12|System.UInt32', 'ActivePipelineCount|16|System.UInt32', 'EventCount|20|System.UInt32', 'InvocationCount|24|System.UInt64', 'HistoryCount|32|System.UInt64') }
     'NativeSessionPoolOptions' = @{ Size = 20; Fields = @('Size|0|System.UInt32', 'MinimumSessions|4|System.UInt32', 'MaximumSessions|8|System.UInt32', 'Flags|12|System.UInt32', 'Reserved|16|System.UInt32') }
+    'NativeLiveObjectContractDescriptor' = @{ Size = 32; Fields = @('Size|0|System.UInt32', 'Directions|4|System.UInt32', 'InterfaceIdLow|8|System.UInt64', 'InterfaceIdHigh|16|System.UInt64', 'MajorVersion|24|System.UInt16', 'MinorVersion|26|System.UInt16', 'Reserved|28|System.UInt32') }
+    'NativeLiveObjectContractPackApi' = @{ Size = 40; Fields = @('Size|0|System.UIntPtr', 'AbiVersion|8|System.UInt32', 'ContractCount|12|System.UInt32', 'Contracts|16|Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor*', 'CreatePayloadProxy|24|System.IntPtr', 'ReleasePayloadProxy|32|System.IntPtr') }
 }
 
 Assert-Sequence -Actual @(
@@ -281,10 +284,18 @@ $expectedTableSlots = @(
     @{ Field = 'PowerShellSession_RemoveVariable'; Rust = 'session_remove_variable_fn'; Alias = 'FnFfiPowerShellSessionRemoveVariable'; Method = 'FfiPowerShellSession_RemoveVariable'; Signature = 'IntPtr,byte*,int,uint*,FfiCallResult*,int' }
     @{ Field = 'PowerShellSession_GetVariableSnapshot'; Rust = 'session_get_variable_snapshot_fn'; Alias = 'FnFfiPowerShellSessionGetVariableSnapshot'; Method = 'FfiPowerShellSession_GetVariableSnapshot'; Signature = 'IntPtr,byte*,int,uint*,uint*,byte*,int,int*,FfiCallResult*,int' }
     @{ Field = 'PowerShell_SetCapabilityContext'; Rust = 'power_shell_set_capability_context_fn'; Alias = 'FnFfiPowerShellSetCapabilityContext'; Method = 'FfiPowerShell_SetCapabilityContext'; Signature = 'IntPtr,ulong,ulong,IntPtr,FfiCallResult*,int' }
+    @{ Field = 'LiveObjectProbe_Create'; Rust = 'live_object_probe_create_fn'; Alias = 'FnFfiLiveObjectProbeCreate'; Method = 'FfiLiveObjectProbe_Create'; Signature = 'long,IntPtr*,FfiCallResult*,int' }
+    @{ Field = 'LiveObjectProbe_Release'; Rust = 'live_object_probe_release_fn'; Alias = 'FnFfiLiveObjectProbeRelease'; Method = 'FfiLiveObjectProbe_Release'; Signature = 'IntPtr,FfiCallResult*,int' }
+    @{ Field = 'LiveObjectProbe_Unregister'; Rust = 'live_object_probe_unregister_fn'; Alias = 'FnFfiLiveObjectProbeUnregister'; Method = 'FfiLiveObjectProbe_Unregister'; Signature = 'IntPtr,FfiCallResult*,int' }
+    @{ Field = 'PowerShell_AddArgumentLiveObject'; Rust = 'power_shell_add_argument_live_object_fn'; Alias = 'FnFfiPowerShellAddLiveObject'; Method = 'FfiPowerShell_AddArgumentLiveObject'; Signature = 'IntPtr,IntPtr,FfiCallResult*,int' }
+    @{ Field = 'PowerShellSession_SetLiveObjectVariable'; Rust = 'power_shell_session_set_live_object_variable_fn'; Alias = 'FnFfiPowerShellSessionSetLiveObjectVariable'; Method = 'FfiPowerShellSession_SetLiveObjectVariable'; Signature = 'IntPtr,byte*,int,IntPtr,FfiCallResult*,int' }
+    @{ Field = 'LiveObjectContractPack_Register'; Rust = 'live_object_contract_pack_register_fn'; Alias = 'FnFfiLiveObjectContractPackRegister'; Method = 'FfiLiveObjectContractPack_Register'; Signature = 'IntPtr,FfiCallResult*,int' }
+    @{ Field = 'PowerShellSession_SetLiveObjectContractVariable'; Rust = 'power_shell_session_set_live_object_contract_variable_fn'; Alias = 'FnFfiPowerShellSessionSetLiveObjectContractVariable'; Method = 'FfiPowerShellSession_SetLiveObjectContractVariable'; Signature = 'IntPtr,byte*,int,NativeLiveObjectContractDescriptor*,IntPtr,FfiCallResult*,int' }
+    @{ Field = 'LiveObjectContractPack_RegisterMany'; Rust = 'live_object_contract_pack_register_many_fn'; Alias = 'FnFfiLiveObjectContractPackRegisterMany'; Method = 'FfiLiveObjectContractPack_RegisterMany'; Signature = 'IntPtr*,uint,FfiCallResult*,int' }
 )
 
 $ffiApiType = $bindingsAssemblyObject.GetType('NativeHost.Bindings+FfiApiV2', $true)
-Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::SizeOf([Type]$ffiApiType)) -Expected 360 -Description 'Managed FfiApiV2 size'
+Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::SizeOf([Type]$ffiApiType)) -Expected 424 -Description 'Managed FfiApiV2 size'
 $ffiApiFields = @($ffiApiType.GetFields($instanceFields) | Sort-Object MetadataToken)
 $expectedFfiApiFieldNames = @('Size', 'AbiVersion', 'FeatureFlags') + @($expectedTableSlots | ForEach-Object { $_.Field })
 Assert-Sequence -Actual @($ffiApiFields | ForEach-Object Name) -Expected $expectedFfiApiFieldNames -Description 'Managed FfiApiV2 slot order'
@@ -297,7 +308,7 @@ for ($index = 0; $index -lt $ffiApiFields.Count; $index++) {
 }
 
 $compactFfiBindingsSource = $ffiBindingsSource -replace '\s+', ''
-$expectedBridgeFeatures = 'FeatureFlags=(1UL<<4)|(1UL<<5)|(1UL<<6)|FfiFeatureAsyncOperationPrimitives|FfiFeatureSessionPrimitives|FfiFeatureSessionPolling|FfiFeatureSnapshotProjections|FfiFeatureSessionConfiguration|FfiFeatureSessionVariables|FfiFeatureCapabilityRpc'
+$expectedBridgeFeatures = 'FeatureFlags=(1UL<<4)|(1UL<<5)|(1UL<<6)|FfiFeatureAsyncOperationPrimitives|FfiFeatureSessionPrimitives|FfiFeatureSessionPolling|FfiFeatureSnapshotProjections|FfiFeatureSessionConfiguration|FfiFeatureSessionVariables|FfiFeatureCapabilityRpc|FfiFeatureLiveObjectProbe|FfiFeatureLiveSessionObjectProbe|FfiFeatureLiveObjectContracts'
 if (-not $compactFfiBindingsSource.Contains($expectedBridgeFeatures)) {
     throw 'Managed FfiApiV2 feature flags no longer advertise the checked bridge capabilities.'
 }
@@ -366,6 +377,14 @@ FnFfiPowerShellSessionSetVariable|unsafeextern"system"fn(PowerShellHandle,*const
 FnFfiPowerShellSessionRemoveVariable|unsafeextern"system"fn(PowerShellHandle,*constu8,i32,*mutu32,*mutFfiCallResult)->i32
 FnFfiPowerShellSessionGetVariableSnapshot|unsafeextern"system"fn(PowerShellHandle,*constu8,i32,*mutu32,*mutu32,*mutu8,i32,*muti32,*mutFfiCallResult)->i32
 FnFfiPowerShellSetCapabilityContext|unsafeextern"system"fn(PowerShellHandle,u64,u64,*constlibc::c_void,*mutFfiCallResult)->i32
+FnFfiLiveObjectProbeCreate|unsafeextern"system"fn(i64,*mut*mutlibc::c_void,*mutFfiCallResult)->i32
+FnFfiLiveObjectProbeRelease|unsafeextern"system"fn(*mutlibc::c_void,*mutFfiCallResult)->i32
+FnFfiLiveObjectProbeUnregister|unsafeextern"system"fn(*mutlibc::c_void,*mutFfiCallResult)->i32
+FnFfiPowerShellAddLiveObject|unsafeextern"system"fn(PowerShellHandle,*mutlibc::c_void,*mutFfiCallResult)->i32
+FnFfiPowerShellSessionSetLiveObjectVariable|unsafeextern"system"fn(PowerShellHandle,*constu8,i32,*mutlibc::c_void,*mutFfiCallResult)->i32
+FnFfiLiveObjectContractPackRegister|unsafeextern"system"fn(*mutlibc::c_void,*mutFfiCallResult)->i32
+FnFfiPowerShellSessionSetLiveObjectContractVariable|unsafeextern"system"fn(PowerShellHandle,*constu8,i32,*constFfiLiveObjectContractDescriptor,*mutlibc::c_void,*mutFfiCallResult)->i32
+FnFfiLiveObjectContractPackRegisterMany|unsafeextern"system"fn(*const*mutlibc::c_void,u32,*mutFfiCallResult)->i32
 '@ -split [Environment]::NewLine | Where-Object { $_ }
 
 foreach ($expectedAlias in $expectedRustFunctionAliases) {

@@ -510,3 +510,78 @@ facade:type:Devolutions.PowerShell.Ffi.PowerShellScriptParameterMetadata
 facade:type:Devolutions.PowerShell.Ffi.PowerShellScriptParseError
 facade:type:Devolutions.PowerShell.Ffi.PowerShellScriptParser
 facade:type:Devolutions.PowerShell.Ffi.PowerShellScriptParseResult
+bindings:FfiLiveObjectContractPack_Register
+bindings:FfiLiveObjectContractPack_RegisterMany
+bindings:FfiLiveObjectProbe_Create
+bindings:FfiLiveObjectProbe_Release
+bindings:FfiLiveObjectProbe_Unregister
+bindings:FfiPowerShell_AddArgumentLiveObject
+bindings:FfiPowerShellSession_SetLiveObjectContractVariable
+bindings:FfiPowerShellSession_SetLiveObjectVariable
+facade:ctor:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract::Void .ctor(System.Guid, UInt16, UInt16, Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection)
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellLiveObject`1::Void .ctor(Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract, TContract)
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPack::Void .ctor(System.String, System.String)
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellSessionObjectProbe::Void .ctor(Int64)
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor::UInt16 MajorVersion
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor::UInt16 MinorVersion
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor::UInt32 Directions
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor::UInt32 Reserved
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor::UInt32 Size
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor::UInt64 InterfaceIdHigh
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor::UInt64 InterfaceIdLow
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi::Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor* Contracts
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi::IntPtr CreatePayloadProxy
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi::IntPtr ReleasePayloadProxy
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi::UInt32 AbiVersion
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi::UInt32 ContractCount
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi::UIntPtr Size
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection ConsumerToSession
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection None
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection PayloadToConsumer
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectTestContracts::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract Count
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount::Int32 GetCount(Int64 ByRef)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount::Int32 Increment(Int64 ByRef)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract::Boolean Equals(Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract::Boolean Equals(System.Object)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract::Int32 GetHashCode()
+facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShell AddArgument(Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe)
+facade:method:Devolutions.PowerShell.Ffi.PowerShell::Void Initialize(System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPack])
+facade:method:Devolutions.PowerShell.Ffi.PowerShell::Void Initialize(System.String, System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPack])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellLiveObject`1::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe::Int64 Increment()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe CreateLiveObjectProbe(Int64)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellRuntime Activate(System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPack])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellRuntime Activate(System.String, System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPack])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSession::Void SetLiveObjectVariable(System.String, Devolutions.PowerShell.Ffi.PowerShellSessionObjectProbe)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSession::Void SetLiveObjectVariable[TContract](System.String, Devolutions.PowerShell.Ffi.PowerShellLiveObject`1[TContract])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSessionObjectProbe::Int64 Increment()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSessionObjectProbe::Void Dispose()
+facade:property:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection Directions
+facade:property:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract::System.Guid InterfaceId
+facade:property:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract::UInt16 MajorVersion
+facade:property:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract::UInt16 MinorVersion
+facade:property:Devolutions.PowerShell.Ffi.PowerShellLiveObject`1::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract Contract
+facade:property:Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPack::System.String PayloadAdapterAssemblyPath
+facade:property:Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPack::System.String PayloadAdapterTypeName
+facade:property:Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe::Int64 Count
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionObjectProbe::Int64 Count
+facade:type:Devolutions.PowerShell.Ffi.IPowerShellLiveObjectBroker
+facade:type:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount
+facade:type:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor
+facade:type:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi
+facade:type:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract
+facade:type:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection
+facade:type:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectTestContracts
+facade:type:Devolutions.PowerShell.Ffi.PowerShellLiveObject`1
+facade:type:Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPack
+facade:type:Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe
+facade:type:Devolutions.PowerShell.Ffi.PowerShellSessionObjectProbe
+native:multi_pwsh_add_argument_live_object
+native:multi_pwsh_initialize_from_path_with_contract_packs
+native:multi_pwsh_initialize_with_contract_packs_utf8
+native:multi_pwsh_live_object_probe_create
+native:multi_pwsh_live_object_probe_release
+native:multi_pwsh_live_object_probe_unregister
+native:multi_pwsh_session_set_live_object_contract_variable
+native:multi_pwsh_session_set_live_object_variable
