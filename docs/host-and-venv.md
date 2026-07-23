@@ -97,7 +97,7 @@ multi-pwsh host 7.4 -venv msgraph-copy -NoLogo -NoProfile
 
 Import is intentionally conservative: importing into an existing destination venv is rejected instead of merging archive contents.
 
-`venv import` also accepts `http://` and `https://` archive URLs. For authenticated remote archives, the preferred parent-process handoff is to create a short-lived token file with restricted permissions and pass its path through `MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE`; `multi-pwsh` sends the token in an Authorization header while downloading. `MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN` is also supported for environments where a direct process environment variable is acceptable. After reading either variable, `multi-pwsh` clears its own process environment copy. When the token-file variable is used, `multi-pwsh` also deletes the token file after reading it successfully.
+`venv import` also accepts `http://` and `https://` archive URLs. For authenticated remote archives, the preferred parent-process handoff is to create a short-lived token file with restricted permissions and pass its path through `MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE`; `multi-pwsh` sends the token in an Authorization header while downloading. `MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN` is also supported for environments where a direct process environment variable is acceptable. Authentication tokens are only sent to `https://` URLs; authenticated `http://` imports are rejected. After reading either variable, `multi-pwsh` clears its own process environment copy. When the token-file variable is used, `multi-pwsh` also deletes the token file after reading it successfully.
 
 ```powershell
 $env:MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE = $tokenFile
