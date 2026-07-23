@@ -48,7 +48,6 @@ use versions::{
 const POWERSHELL_UPDATECHECK_ENV_VAR: &str = "POWERSHELL_UPDATECHECK";
 const POWERSHELL_UPDATECHECK_OFF: &str = "Off";
 const MULTI_PWSH_OFFLINE_CACHE_ENV_VAR: &str = "MULTI_PWSH_OFFLINE_CACHE";
-const MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR: &str = "MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN";
 const VENV_DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const VENV_DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const VIRTUAL_ENVIRONMENT_FLAG: &str = "-virtualenvironment";
@@ -104,7 +103,7 @@ fn help_topic_text(topic: &str) -> Option<&'static str> {
             "Usage:\n  multi-pwsh list [options]\n\nOptions:\n  --scope <user|machine|all>\n  --root <path>\n  --available\n  --include-prerelease\n  --offline-cache <path>\n\nNotes:\n  User scope is the default when --scope is omitted.\n  --root requires --scope <user|machine>.\n  Installed listings include prerelease versions; --include-prerelease only changes --available listings.",
         ),
         "venv" => Some(
-            "Usage:\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip|url>\n  multi-pwsh venv list\n\nNotes:\n  Virtual environments live in the default user layout.\n  Remote imports accept http:// and https:// URLs. Set MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN to a token value to send it in an Authorization header while downloading. Authentication tokens are only sent to https:// URLs; authenticated http:// imports are rejected. After reading the variable, multi-pwsh clears its own process environment copy.",
+            "Usage:\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip|url>\n  multi-pwsh venv list\n\nNotes:\n  Virtual environments live in the default user layout.\n  Remote imports accept http:// and https:// URLs. Include any required one-time credentials in the URL query string.",
         ),
         "alias" => Some(
             "Usage:\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n\nNotes:\n  Direct alias commands operate on the default user layout; machine-scope aliases are normally entered through generated machine-scope shims.",
@@ -1769,56 +1768,9 @@ fn is_remote_venv_archive_url(value: &str) -> bool {
     normalized.starts_with("https://") || normalized.starts_with("http://")
 }
 
-fn is_https_venv_archive_url(value: &str) -> bool {
-    value.to_ascii_lowercase().starts_with("https://")
-}
-
-fn text_env_var(name: &str) -> Result<Option<String>> {
-    match env::var(name) {
-        Ok(value) if value.trim().is_empty() => Ok(None),
-        Ok(value) => Ok(Some(value.trim().to_string())),
-        Err(env::VarError::NotPresent) => Ok(None),
-        Err(env::VarError::NotUnicode(_)) => Err(MultiPwshError::InvalidArguments(format!(
-            "{} must contain valid UTF-8 text",
-            name
-        ))),
-    }
-}
-
-fn clear_venv_download_token_env_vars() {
-    unsafe { env::remove_var(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR) };
-}
-
-fn venv_download_bearer_token_from_env() -> Result<Option<String>> {
-    let token = text_env_var(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR);
-    clear_venv_download_token_env_vars();
-
-    token
-}
-
-fn venv_download_authorization_header(token: &str) -> Option<String> {
-    let token = token.trim();
-    if token.is_empty() {
-        None
-    } else {
-        Some(format!("Bearer {}", token))
-    }
-}
-
-fn venv_download_authorization_header_for_url(url: &str, token: Option<&str>) -> Result<Option<String>> {
-    let authorization_header = token.and_then(venv_download_authorization_header);
-    if authorization_header.is_some() && !is_https_venv_archive_url(url) {
-        return Err(MultiPwshError::InvalidArguments(
-            "authenticated remote virtual environment archive imports require an https:// URL".to_string(),
-        ));
-    }
-    Ok(authorization_header)
-}
-
 fn download_remote_venv_archive_with_retry(
     http: &ureq::Agent,
     url: &str,
-    authorization_header: Option<&str>,
     destination: &Path,
     retries: usize,
 ) -> Result<()> {
@@ -1826,12 +1778,7 @@ fn download_remote_venv_archive_with_retry(
 
     for attempt in 1..=retries {
         let result = (|| -> Result<()> {
-            let mut request = http.get(url).set("User-Agent", "multi-pwsh");
-            if let Some(value) = authorization_header {
-                request = request.set("Authorization", value);
-            }
-
-            let response = request.call()?;
+            let response = http.get(url).set("User-Agent", "multi-pwsh").call()?;
             let mut response_reader = response.into_reader();
             let mut file = fs::File::create(destination)?;
             io::copy(&mut response_reader, &mut file)?;
@@ -1857,14 +1804,12 @@ fn download_remote_venv_archive_with_retry(
 }
 
 fn download_remote_venv_archive(url: &str, destination: &Path) -> Result<()> {
-    let token = venv_download_bearer_token_from_env()?;
-    let authorization_header = venv_download_authorization_header_for_url(url, token.as_deref())?;
     let http = ureq::AgentBuilder::new()
         .timeout_connect(VENV_DOWNLOAD_CONNECT_TIMEOUT)
         .timeout_read(VENV_DOWNLOAD_READ_TIMEOUT)
         .build();
 
-    download_remote_venv_archive_with_retry(&http, url, authorization_header.as_deref(), destination, 8)
+    download_remote_venv_archive_with_retry(&http, url, destination, 8)
 }
 
 fn resolve_venv_import_source(value: &str) -> Result<VenvImportSource> {
@@ -4525,7 +4470,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_venv_download_with_authorization_imports_archive() {
+    fn remote_venv_download_imports_archive_without_authorization_header() {
         let temp_dir = TempDir::new().unwrap();
         let source_venv_dir = temp_dir.path().join("source");
         let source_module_dir = source_venv_dir.join("Modules").join("Graph");
@@ -4536,29 +4481,22 @@ mod tests {
         export_virtual_environment_to_archive(&source_venv_dir, &archive_path).unwrap();
         let archive_bytes = fs::read(&archive_path).unwrap();
         let (url, request_receiver, server_handle) = spawn_remote_venv_archive_server(200, archive_bytes);
+        let url = format!("{}?token=one-time-jwt", url);
 
         let downloaded_archive_path = temp_dir.path().join("downloaded.zip");
         let imported_venv_dir = temp_dir.path().join("imported");
-        let expected_authorization = venv_download_authorization_header("jwt-token").unwrap();
         let http = ureq::AgentBuilder::new().build();
 
-        download_remote_venv_archive_with_retry(
-            &http,
-            &url,
-            Some(&expected_authorization),
-            &downloaded_archive_path,
-            1,
-        )
-        .unwrap();
+        download_remote_venv_archive_with_retry(&http, &url, &downloaded_archive_path, 1).unwrap();
         import_virtual_environment_from_archive(&imported_venv_dir, &downloaded_archive_path).unwrap();
 
         let request = request_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
         server_handle.join().unwrap();
 
-        assert!(request.starts_with("GET /venv.zip HTTP/1.1"));
+        assert!(request.starts_with("GET /venv.zip?token=one-time-jwt HTTP/1.1"));
         assert!(
-            request.contains(&format!("\r\nAuthorization: {}\r\n", expected_authorization)),
-            "request did not include expected Authorization header: {}",
+            !request.contains("\r\nAuthorization:"),
+            "request unexpectedly included Authorization header: {}",
             request
         );
         assert_eq!(
@@ -4577,7 +4515,7 @@ mod tests {
             let (url, request_receiver, server_handle) =
                 spawn_remote_venv_archive_server(status, format!("status {}", status).into_bytes());
 
-            let error = download_remote_venv_archive_with_retry(&http, &url, None, &destination, 1).unwrap_err();
+            let error = download_remote_venv_archive_with_retry(&http, &url, &destination, 1).unwrap_err();
 
             let request = request_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
             server_handle.join().unwrap();
@@ -4591,47 +4529,6 @@ mod tests {
             );
             assert!(!destination.exists());
         }
-    }
-
-    #[test]
-    fn venv_download_authorization_header_uses_bearer_scheme() {
-        assert_eq!(
-            venv_download_authorization_header("  jwt-token  ").as_deref(),
-            Some("Bearer jwt-token")
-        );
-        assert_eq!(venv_download_authorization_header(" \t "), None);
-    }
-
-    #[test]
-    fn venv_download_authorization_header_requires_https_url() {
-        assert!(
-            venv_download_authorization_header_for_url("https://example.invalid/venv.zip", Some("jwt-token"))
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            venv_download_authorization_header_for_url("HTTPS://example.invalid/venv.zip", Some("jwt-token"))
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            venv_download_authorization_header_for_url("http://example.invalid/venv.zip", Some("jwt-token")).is_err()
-        );
-        assert_eq!(
-            venv_download_authorization_header_for_url("http://example.invalid/venv.zip", None).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn venv_download_bearer_token_clears_token_env_var_after_read() {
-        with_env_var_texts(
-            &[(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR, Some("token"))],
-            || {
-                assert_eq!(venv_download_bearer_token_from_env().unwrap().as_deref(), Some("token"));
-                assert!(env::var_os(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR).is_none());
-            },
-        );
     }
 
     #[test]
