@@ -97,10 +97,10 @@ multi-pwsh host 7.4 -venv msgraph-copy -NoLogo -NoProfile
 
 Import is intentionally conservative: importing into an existing destination venv is rejected instead of merging archive contents.
 
-`venv import` also accepts `http://` and `https://` archive URLs. For authenticated remote archives, the preferred parent-process handoff is to create a short-lived token file with restricted permissions and pass its path through `MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE`; `multi-pwsh` sends the token in an Authorization header while downloading. `MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN` is also supported for environments where a direct process environment variable is acceptable. Authentication tokens are only sent to `https://` URLs; authenticated `http://` imports are rejected. After reading either variable, `multi-pwsh` clears its own process environment copy. When the token-file variable is used, `multi-pwsh` also deletes the token file after reading it successfully.
+`venv import` also accepts `http://` and `https://` archive URLs. For authenticated remote archives, set `MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN` to send the token in an Authorization header while downloading. Authentication tokens are only sent to `https://` URLs; authenticated `http://` imports are rejected. After reading the variable, `multi-pwsh` clears its own process environment copy.
 
 ```powershell
-$env:MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE = $tokenFile
+$env:MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN = $appToken
 multi-pwsh venv import msgraph-copy https://example.invalid/venvs/msgraph.zip
 ```
 
@@ -117,7 +117,6 @@ multi-pwsh venv import msgraph-copy https://example.invalid/venvs/msgraph.zip
 - `MULTI_PWSH_BIN_DIR`: override the default user-scope shim and launcher directory.
 - `MULTI_PWSH_CACHE_DIR`: override the default user-scope archive/download cache directory.
 - `MULTI_PWSH_VENV_DIR`: override the default user-scope virtual-environment root directory.
-- `MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE`: path to a file containing a bearer token for remote `venv import` downloads.
 - `MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN`: bearer token value for remote `venv import` downloads.
 - `MULTI_PWSH_CACHE_KEEP`: keep downloaded archives after extraction when set to a truthy value.
 

@@ -49,7 +49,6 @@ const POWERSHELL_UPDATECHECK_ENV_VAR: &str = "POWERSHELL_UPDATECHECK";
 const POWERSHELL_UPDATECHECK_OFF: &str = "Off";
 const MULTI_PWSH_OFFLINE_CACHE_ENV_VAR: &str = "MULTI_PWSH_OFFLINE_CACHE";
 const MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR: &str = "MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN";
-const MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR: &str = "MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE";
 const VENV_DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const VENV_DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const VIRTUAL_ENVIRONMENT_FLAG: &str = "-virtualenvironment";
@@ -105,7 +104,7 @@ fn help_topic_text(topic: &str) -> Option<&'static str> {
             "Usage:\n  multi-pwsh list [options]\n\nOptions:\n  --scope <user|machine|all>\n  --root <path>\n  --available\n  --include-prerelease\n  --offline-cache <path>\n\nNotes:\n  User scope is the default when --scope is omitted.\n  --root requires --scope <user|machine>.\n  Installed listings include prerelease versions; --include-prerelease only changes --available listings.",
         ),
         "venv" => Some(
-            "Usage:\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip|url>\n  multi-pwsh venv list\n\nNotes:\n  Virtual environments live in the default user layout.\n  Remote imports accept http:// and https:// URLs. Set MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE to a token file path, or MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN to a token value, to send the token in an Authorization header while downloading. Authentication tokens are only sent to https:// URLs; authenticated http:// imports are rejected. After reading either variable, multi-pwsh clears its own process environment copy. When the token-file variable is used, multi-pwsh also deletes the token file after reading it successfully.",
+            "Usage:\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip|url>\n  multi-pwsh venv list\n\nNotes:\n  Virtual environments live in the default user layout.\n  Remote imports accept http:// and https:// URLs. Set MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN to a token value to send it in an Authorization header while downloading. Authentication tokens are only sent to https:// URLs; authenticated http:// imports are rejected. After reading the variable, multi-pwsh clears its own process environment copy.",
         ),
         "alias" => Some(
             "Usage:\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n\nNotes:\n  Direct alias commands operate on the default user layout; machine-scope aliases are normally entered through generated machine-scope shims.",
@@ -1787,40 +1786,14 @@ fn text_env_var(name: &str) -> Result<Option<String>> {
 }
 
 fn clear_venv_download_token_env_vars() {
-    unsafe {
-        env::remove_var(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR);
-        env::remove_var(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR);
-    }
+    unsafe { env::remove_var(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR) };
 }
 
 fn venv_download_bearer_token_from_env() -> Result<Option<String>> {
-    let token_file = text_env_var(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR);
     let token = text_env_var(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR);
     clear_venv_download_token_env_vars();
 
-    let token_file = token_file?;
-    let token = token?;
-
-    match (token_file, token) {
-        (Some(_), Some(_)) => Err(MultiPwshError::InvalidArguments(format!(
-            "set only one of {} or {}",
-            MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR, MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR
-        ))),
-        (Some(path), None) => {
-            let token = fs::read_to_string(&path)?;
-            fs::remove_file(&path)?;
-            let token = token.trim().to_string();
-            if token.is_empty() {
-                return Err(MultiPwshError::InvalidArguments(format!(
-                    "{} points to an empty token file",
-                    MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR
-                )));
-            }
-            Ok(Some(token))
-        }
-        (None, Some(token)) => Ok(Some(token)),
-        (None, None) => Ok(None),
-    }
+    token
 }
 
 fn venv_download_authorization_header(token: &str) -> Option<String> {
@@ -4651,55 +4624,11 @@ mod tests {
     }
 
     #[test]
-    fn venv_download_bearer_token_reads_token_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let token_path = temp_dir.path().join("token.txt");
-        fs::write(&token_path, "  file-token\r\n").unwrap();
-        let token_path_text = token_path.to_str().unwrap();
-
-        with_env_var_texts(
-            &[
-                (
-                    MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR,
-                    Some(token_path_text),
-                ),
-                (MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR, None),
-            ],
-            || {
-                assert_eq!(
-                    venv_download_bearer_token_from_env().unwrap().as_deref(),
-                    Some("file-token")
-                );
-                assert!(!token_path.exists());
-                assert!(env::var_os(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR).is_none());
-            },
-        );
-    }
-
-    #[test]
     fn venv_download_bearer_token_clears_token_env_var_after_read() {
         with_env_var_texts(
-            &[
-                (MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR, None),
-                (MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR, Some("token")),
-            ],
+            &[(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR, Some("token"))],
             || {
                 assert_eq!(venv_download_bearer_token_from_env().unwrap().as_deref(), Some("token"));
-                assert!(env::var_os(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR).is_none());
-            },
-        );
-    }
-
-    #[test]
-    fn venv_download_bearer_token_rejects_ambiguous_env_values() {
-        with_env_var_texts(
-            &[
-                (MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR, Some("token.txt")),
-                (MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR, Some("token")),
-            ],
-            || {
-                assert!(venv_download_bearer_token_from_env().is_err());
-                assert!(env::var_os(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR).is_none());
                 assert!(env::var_os(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR).is_none());
             },
         );
