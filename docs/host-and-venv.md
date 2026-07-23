@@ -55,7 +55,7 @@ Available commands:
 - `multi-pwsh venv create <name>`
 - `multi-pwsh venv delete <name>`
 - `multi-pwsh venv export <name> <archive.zip>`
-- `multi-pwsh venv import <name> <archive.zip>`
+- `multi-pwsh venv import <name> <archive.zip|url>`
 - `multi-pwsh venv list`
 
 ### Create and use a venv
@@ -97,6 +97,13 @@ multi-pwsh host 7.4 -venv msgraph-copy -NoLogo -NoProfile
 
 Import is intentionally conservative: importing into an existing destination venv is rejected instead of merging archive contents.
 
+`venv import` also accepts `http://` and `https://` archive URLs. For authenticated remote archives, the preferred parent-process handoff is to create a short-lived token file with restricted permissions and pass its path through `MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE`; `multi-pwsh` sends the token in an Authorization header while downloading. `MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN` is also supported for environments where a direct process environment variable is acceptable. After reading either variable, `multi-pwsh` clears its own process environment copy. When the token-file variable is used, `multi-pwsh` also deletes the token file after reading it successfully.
+
+```powershell
+$env:MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE = $tokenFile
+multi-pwsh venv import msgraph-copy https://example.invalid/venvs/msgraph.zip
+```
+
 ### Current behavior and limitations
 
 - Venv selection changes module discovery and import precedence for hosted launches.
@@ -110,6 +117,8 @@ Import is intentionally conservative: importing into an existing destination ven
 - `MULTI_PWSH_BIN_DIR`: override the default user-scope shim and launcher directory.
 - `MULTI_PWSH_CACHE_DIR`: override the default user-scope archive/download cache directory.
 - `MULTI_PWSH_VENV_DIR`: override the default user-scope virtual-environment root directory.
+- `MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE`: path to a file containing a bearer token for remote `venv import` downloads.
+- `MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN`: bearer token value for remote `venv import` downloads.
 - `MULTI_PWSH_CACHE_KEEP`: keep downloaded archives after extraction when set to a truthy value.
 
 These `MULTI_PWSH_*` path variables affect only the default `user` layout. `machine` scope uses platform machine paths, and `--root` is an explicit install-root override that requires `--scope <user|machine>` and does not mix in child-directory overrides from the environment. Empty or whitespace-only path values are treated as unset.

@@ -47,6 +47,8 @@ use versions::{
 const POWERSHELL_UPDATECHECK_ENV_VAR: &str = "POWERSHELL_UPDATECHECK";
 const POWERSHELL_UPDATECHECK_OFF: &str = "Off";
 const MULTI_PWSH_OFFLINE_CACHE_ENV_VAR: &str = "MULTI_PWSH_OFFLINE_CACHE";
+const MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR: &str = "MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN";
+const MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR: &str = "MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE";
 const VIRTUAL_ENVIRONMENT_FLAG: &str = "-virtualenvironment";
 const VIRTUAL_ENVIRONMENT_SHORT_FLAG: &str = "-venv";
 
@@ -66,7 +68,7 @@ const HELP_TOPICS: &[&str] = &[
 ];
 
 fn usage_text() -> &'static str {
-    "Usage:\n  multi-pwsh --version\n  multi-pwsh -V\n  multi-pwsh --help\n  multi-pwsh help [command]\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease] [--offline-cache <path>]\n  multi-pwsh cache warm <selector> [--os <windows|linux|macos|all>] [--arch <x64|x86|arm64|arm32|all>] [--include-prerelease] [--output <path>] [--product <powershell|multi-pwsh|all>]\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh doctor --repair-aliases\n\nCommands:\n  install, update, uninstall, list, cache, venv, alias, host, doctor, version"
+    "Usage:\n  multi-pwsh --version\n  multi-pwsh -V\n  multi-pwsh --help\n  multi-pwsh help [command]\n  multi-pwsh install <stable|preview|lts|version|major|major.minor|major.minor.x> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh update <stable|preview|lts|major.minor> [--scope <user|machine>] [--root <path>] [--arch <auto|x64|x86|arm64|arm32>] [--include-prerelease] [--offline-cache <path>] [--add-path|--no-add-path] [--register-manifest|--no-register-manifest] [--enable-psremoting] [--disable-telemetry] [--add-explorer-context-menu] [--add-file-context-menu]\n  multi-pwsh uninstall <version> [--scope <user|machine>] [--root <path>] [--force]\n  multi-pwsh list [--scope <user|machine|all>] [--root <path>] [--available] [--include-prerelease] [--offline-cache <path>]\n  multi-pwsh cache warm <selector> [--os <windows|linux|macos|all>] [--arch <x64|x86|arm64|arm32|all>] [--include-prerelease] [--output <path>] [--product <powershell|multi-pwsh|all>]\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip|url>\n  multi-pwsh venv list\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n  multi-pwsh host <version|major|major.minor|pwsh-alias> [-VirtualEnvironment <name>|-venv <name>] [pwsh arguments...]\n  multi-pwsh doctor --repair-aliases\n\nCommands:\n  install, update, uninstall, list, cache, venv, alias, host, doctor, version"
 }
 
 fn print_usage() {
@@ -100,7 +102,7 @@ fn help_topic_text(topic: &str) -> Option<&'static str> {
             "Usage:\n  multi-pwsh list [options]\n\nOptions:\n  --scope <user|machine|all>\n  --root <path>\n  --available\n  --include-prerelease\n  --offline-cache <path>\n\nNotes:\n  User scope is the default when --scope is omitted.\n  --root requires --scope <user|machine>.\n  Installed listings include prerelease versions; --include-prerelease only changes --available listings.",
         ),
         "venv" => Some(
-            "Usage:\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip>\n  multi-pwsh venv list\n\nNotes:\n  Virtual environments live in the default user layout.",
+            "Usage:\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip|url>\n  multi-pwsh venv list\n\nNotes:\n  Virtual environments live in the default user layout.\n  Remote imports accept http:// and https:// URLs. Set MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE to a token file path, or MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN to a token value, to send the token in an Authorization header while downloading. After reading either variable, multi-pwsh clears its own process environment copy. When the token-file variable is used, multi-pwsh also deletes the token file after reading it successfully.",
         ),
         "alias" => Some(
             "Usage:\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n\nNotes:\n  Direct alias commands operate on the default user layout; machine-scope aliases are normally entered through generated machine-scope shims.",
@@ -1754,6 +1756,144 @@ fn run_cache_warm(selector_input: &str, options: CacheWarmOptions) -> Result<()>
     Ok(())
 }
 
+struct VenvImportSource {
+    archive_path: PathBuf,
+    display: String,
+    _temp_dir: Option<tempfile::TempDir>,
+}
+
+fn is_remote_venv_archive_url(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    normalized.starts_with("https://") || normalized.starts_with("http://")
+}
+
+fn text_env_var(name: &str) -> Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value.trim().to_string())),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(MultiPwshError::InvalidArguments(format!(
+            "{} must contain valid UTF-8 text",
+            name
+        ))),
+    }
+}
+
+fn clear_venv_download_token_env_vars() {
+    unsafe {
+        env::remove_var(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR);
+        env::remove_var(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR);
+    }
+}
+
+fn venv_download_bearer_token_from_env() -> Result<Option<String>> {
+    let token_file = text_env_var(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR);
+    let token = text_env_var(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR);
+    clear_venv_download_token_env_vars();
+
+    let token_file = token_file?;
+    let token = token?;
+
+    match (token_file, token) {
+        (Some(_), Some(_)) => Err(MultiPwshError::InvalidArguments(format!(
+            "set only one of {} or {}",
+            MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR, MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR
+        ))),
+        (Some(path), None) => {
+            let token = fs::read_to_string(&path)?;
+            fs::remove_file(&path)?;
+            let token = token.trim().to_string();
+            if token.is_empty() {
+                return Err(MultiPwshError::InvalidArguments(format!(
+                    "{} points to an empty token file",
+                    MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR
+                )));
+            }
+            Ok(Some(token))
+        }
+        (None, Some(token)) => Ok(Some(token)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn venv_download_authorization_header(token: &str) -> Option<String> {
+    let token = token.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(format!("Bearer {}", token))
+    }
+}
+
+fn download_remote_venv_archive_with_retry(
+    http: &ureq::Agent,
+    url: &str,
+    authorization_header: Option<&str>,
+    destination: &Path,
+    retries: usize,
+) -> Result<()> {
+    let mut last_error = None;
+
+    for attempt in 1..=retries {
+        let result = (|| -> Result<()> {
+            let mut request = http.get(url).set("User-Agent", "multi-pwsh");
+            if let Some(value) = authorization_header {
+                request = request.set("Authorization", value);
+            }
+
+            let response = request.call()?;
+            let mut response_reader = response.into_reader();
+            let mut file = fs::File::create(destination)?;
+            io::copy(&mut response_reader, &mut file)?;
+            file.flush()?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < retries {
+                    let delay_seconds = 2u64.pow(attempt as u32);
+                    std::thread::sleep(std::time::Duration::from_secs(delay_seconds.min(30)));
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        MultiPwshError::Archive("remote virtual environment archive download failed without detailed error".to_string())
+    }))
+}
+
+fn download_remote_venv_archive(url: &str, destination: &Path) -> Result<()> {
+    let token = venv_download_bearer_token_from_env()?;
+    let authorization_header = token.as_deref().and_then(venv_download_authorization_header);
+    let http = ureq::AgentBuilder::new().build();
+
+    download_remote_venv_archive_with_retry(&http, url, authorization_header.as_deref(), destination, 8)
+}
+
+fn resolve_venv_import_source(value: &str) -> Result<VenvImportSource> {
+    if !is_remote_venv_archive_url(value) {
+        return Ok(VenvImportSource {
+            archive_path: PathBuf::from(value),
+            display: value.to_string(),
+            _temp_dir: None,
+        });
+    }
+
+    let temp_dir = tempfile::tempdir()?;
+    let archive_path = temp_dir.path().join("venv.zip");
+    download_remote_venv_archive(value, &archive_path)?;
+
+    Ok(VenvImportSource {
+        archive_path,
+        display: value.to_string(),
+        _temp_dir: Some(temp_dir),
+    })
+}
+
 fn run_cache(args: &[String]) -> Result<()> {
     if args.is_empty() {
         return Err(MultiPwshError::InvalidArguments(
@@ -1780,7 +1920,7 @@ fn run_cache(args: &[String]) -> Result<()> {
 fn run_venv(args: &[String]) -> Result<()> {
     if args.is_empty() {
         return Err(MultiPwshError::InvalidArguments(
-            "venv requires: create <name>, delete <name>, export <name> <archive.zip>, import <name> <archive.zip>, or list"
+            "venv requires: create <name>, delete <name>, export <name> <archive.zip>, import <name> <archive.zip|url>, or list"
                 .to_string(),
         ));
     }
@@ -1850,19 +1990,26 @@ fn run_venv(args: &[String]) -> Result<()> {
         "import" => {
             if args.len() != 3 {
                 return Err(MultiPwshError::InvalidArguments(
-                    "venv import requires: <name> <archive.zip>".to_string(),
+                    "venv import requires: <name> <archive.zip|url>".to_string(),
                 ));
             }
 
             let name = validate_venv_name(&args[1])?;
             let venv_dir = layout.venv_dir(name);
-            let archive_path = PathBuf::from(&args[2]);
+            let archive_arg = &args[2];
+            if is_remote_venv_archive_url(archive_arg) && venv_dir.exists() {
+                return Err(MultiPwshError::InvalidArguments(format!(
+                    "virtual environment destination '{}' already exists",
+                    venv_dir.display()
+                )));
+            }
+            let source = resolve_venv_import_source(archive_arg)?;
 
-            import_virtual_environment_from_archive(&venv_dir, &archive_path)?;
+            import_virtual_environment_from_archive(&venv_dir, &source.archive_path)?;
 
             println!("Imported virtual environment: {}", name);
             println!("Path: {}", venv_dir.display());
-            println!("Archive: {}", archive_path.display());
+            println!("Archive: {}", source.display);
             Ok(())
         }
         "list" => {
@@ -1899,7 +2046,7 @@ fn run_venv(args: &[String]) -> Result<()> {
             Ok(())
         }
         _ => Err(MultiPwshError::InvalidArguments(
-            "venv requires: create <name>, delete <name>, export <name> <archive.zip>, import <name> <archive.zip>, or list"
+            "venv requires: create <name>, delete <name>, export <name> <archive.zip>, import <name> <archive.zip|url>, or list"
                 .to_string(),
         )),
     }
@@ -4320,6 +4467,78 @@ mod tests {
         assert!(validate_venv_name("").is_err());
         assert!(validate_venv_name("..").is_err());
         assert!(validate_venv_name("msgraph/tools").is_err());
+    }
+
+    #[test]
+    fn remote_venv_archive_detection_accepts_http_urls_only() {
+        assert!(is_remote_venv_archive_url("https://example.invalid/venv.zip"));
+        assert!(is_remote_venv_archive_url("HTTP://example.invalid/venv.zip"));
+        assert!(!is_remote_venv_archive_url("C:\\venvs\\msgraph.zip"));
+        assert!(!is_remote_venv_archive_url("msgraph.zip"));
+    }
+
+    #[test]
+    fn venv_download_authorization_header_uses_bearer_scheme() {
+        assert_eq!(
+            venv_download_authorization_header("  jwt-token  ").as_deref(),
+            Some("Bearer jwt-token")
+        );
+        assert_eq!(venv_download_authorization_header(" \t "), None);
+    }
+
+    #[test]
+    fn venv_download_bearer_token_reads_token_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let token_path = temp_dir.path().join("token.txt");
+        fs::write(&token_path, "  file-token\r\n").unwrap();
+        let token_path_text = token_path.to_str().unwrap();
+
+        with_env_var_texts(
+            &[
+                (
+                    MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR,
+                    Some(token_path_text),
+                ),
+                (MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR, None),
+            ],
+            || {
+                assert_eq!(
+                    venv_download_bearer_token_from_env().unwrap().as_deref(),
+                    Some("file-token")
+                );
+                assert!(!token_path.exists());
+                assert!(env::var_os(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR).is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn venv_download_bearer_token_clears_token_env_var_after_read() {
+        with_env_var_texts(
+            &[
+                (MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR, None),
+                (MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR, Some("token")),
+            ],
+            || {
+                assert_eq!(venv_download_bearer_token_from_env().unwrap().as_deref(), Some("token"));
+                assert!(env::var_os(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR).is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn venv_download_bearer_token_rejects_ambiguous_env_values() {
+        with_env_var_texts(
+            &[
+                (MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR, Some("token.txt")),
+                (MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR, Some("token")),
+            ],
+            || {
+                assert!(venv_download_bearer_token_from_env().is_err());
+                assert!(env::var_os(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_FILE_ENV_VAR).is_none());
+                assert!(env::var_os(MULTI_PWSH_VENV_DOWNLOAD_BEARER_TOKEN_ENV_VAR).is_none());
+            },
+        );
     }
 
     #[test]
