@@ -103,6 +103,8 @@ Import is intentionally conservative: importing into an existing destination ven
 multi-pwsh venv import msgraph-copy "https://example.invalid/venvs/msgraph.zip?token=$appToken"
 ```
 
+Remote imports cache archives under `MULTI_PWSH_CACHE_DIR` or the default cache root when the server returns an `ETag`. Later imports of the same URL send `If-None-Match` with the stored ETag; if the server returns `304 Not Modified`, `multi-pwsh` imports from the cached archive instead of downloading it again. Cached archive files are identified by both URL and ETag.
+
 ### Current behavior and limitations
 
 - Venv selection changes module discovery and import precedence for hosted launches.
