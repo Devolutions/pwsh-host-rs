@@ -53,6 +53,7 @@ const MULTI_PWSH_OFFLINE_CACHE_ENV_VAR: &str = "MULTI_PWSH_OFFLINE_CACHE";
 const VENV_DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const VENV_DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const VENV_REMOTE_CACHE_DIR: &str = "venv-remote";
+const VENV_REMOTE_CACHE_LOCK_FILE: &str = "metadata.lock";
 const VENV_REMOTE_CACHE_METADATA_FILE: &str = "metadata.json";
 const VIRTUAL_ENVIRONMENT_FLAG: &str = "-virtualenvironment";
 const VIRTUAL_ENVIRONMENT_SHORT_FLAG: &str = "-venv";
@@ -1789,6 +1790,18 @@ struct RemoteVenvDownload {
     etag: Option<String>,
 }
 
+struct RemoteVenvCacheLock {
+    path: PathBuf,
+    file: Option<fs::File>,
+}
+
+impl Drop for RemoteVenvCacheLock {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 fn is_remote_venv_archive_url(value: &str) -> bool {
     let normalized = value.to_ascii_lowercase();
     normalized.starts_with("https://") || normalized.starts_with("http://")
@@ -1800,6 +1813,30 @@ fn remote_venv_cache_dir(cache_root: &Path) -> PathBuf {
 
 fn remote_venv_cache_metadata_path(cache_dir: &Path) -> PathBuf {
     cache_dir.join(VENV_REMOTE_CACHE_METADATA_FILE)
+}
+
+fn remote_venv_cache_lock_path(cache_dir: &Path) -> PathBuf {
+    cache_dir.join(VENV_REMOTE_CACHE_LOCK_FILE)
+}
+
+fn acquire_remote_venv_cache_lock(cache_dir: &Path) -> Result<RemoteVenvCacheLock> {
+    fs::create_dir_all(cache_dir)?;
+    let path = remote_venv_cache_lock_path(cache_dir);
+    for _ in 0..600 {
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => {
+                return Ok(RemoteVenvCacheLock { path, file: Some(file) });
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(MultiPwshError::Archive(
+        "timed out waiting for the remote virtual environment cache lock".to_string(),
+    ))
 }
 
 fn load_remote_venv_cache_metadata(cache_dir: &Path) -> Result<RemoteVenvCacheMetadata> {
@@ -1816,7 +1853,11 @@ fn save_remote_venv_cache_metadata(cache_dir: &Path, metadata: &RemoteVenvCacheM
     fs::create_dir_all(cache_dir)?;
     let path = remote_venv_cache_metadata_path(cache_dir);
     let body = serde_json::to_vec_pretty(metadata)?;
-    fs::write(path, body)?;
+    let mut temp_file = tempfile::NamedTempFile::new_in(cache_dir)?;
+    temp_file.write_all(&body)?;
+    temp_file.flush()?;
+    temp_file.as_file().sync_all()?;
+    temp_file.persist(&path).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -1835,6 +1876,17 @@ fn remote_venv_cache_archive_name(url: &str, etag: &str) -> String {
     format!("{}-{}.zip", sha256_text(url), sha256_text(etag))
 }
 
+fn remote_venv_cache_metadata_key(url: &str) -> String {
+    sha256_text(url)
+}
+
+fn remote_venv_display_url(url: &str) -> String {
+    match url.find('?') {
+        Some(query_start) => format!("{}?<redacted>", &url[..query_start]),
+        None => url.to_string(),
+    }
+}
+
 fn response_etag(response: &ureq::Response) -> Option<String> {
     response
         .header("ETag")
@@ -1843,12 +1895,28 @@ fn response_etag(response: &ureq::Response) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn is_retryable_remote_venv_http_status(status: u16) -> bool {
+    status >= 500 || matches!(status, 408 | 429)
+}
+
+fn is_retryable_remote_venv_download_error(error: &MultiPwshError) -> bool {
+    match error {
+        MultiPwshError::Http(error) => match error.as_ref() {
+            ureq::Error::Status(status, _) => is_retryable_remote_venv_http_status(*status),
+            ureq::Error::Transport(_) => true,
+        },
+        MultiPwshError::Io(_) => true,
+        _ => false,
+    }
+}
+
 fn cached_remote_venv_archive(
     cache_dir: &Path,
     metadata: &RemoteVenvCacheMetadata,
     url: &str,
 ) -> Option<CachedRemoteVenvArchive> {
-    let entry = metadata.entries.get(url)?;
+    let metadata_key = remote_venv_cache_metadata_key(url);
+    let entry = metadata.entries.get(&metadata_key)?;
     let archive_path = cache_dir.join(&entry.archive);
     if !archive_path.is_file() {
         return None;
@@ -1922,10 +1990,12 @@ fn download_remote_venv_archive_with_retry(
             Ok(download) => return Ok(download),
             Err(error) => {
                 let _ = fs::remove_file(download_path);
-                last_error = Some(error);
-                if attempt < retries {
+                if attempt < retries && is_retryable_remote_venv_download_error(&error) {
+                    last_error = Some(error);
                     let delay_seconds = 2u64.pow(attempt as u32);
                     std::thread::sleep(Duration::from_secs(delay_seconds.min(30)));
+                } else {
+                    return Err(error);
                 }
             }
         }
@@ -1939,7 +2009,14 @@ fn download_remote_venv_archive_with_retry(
 fn download_remote_venv_archive(url: &str, cache_root: &Path, temp_dir: &Path) -> Result<RemoteVenvDownload> {
     let cache_dir = remote_venv_cache_dir(cache_root);
     fs::create_dir_all(&cache_dir)?;
+    let _cache_lock = acquire_remote_venv_cache_lock(&cache_dir)?;
     let mut metadata = load_remote_venv_cache_metadata(&cache_dir)?;
+    let metadata_key = remote_venv_cache_metadata_key(url);
+    let mut metadata_changed = false;
+    if let Some(legacy_entry) = metadata.entries.remove(url) {
+        metadata_changed = true;
+        metadata.entries.entry(metadata_key.clone()).or_insert(legacy_entry);
+    }
     let cached = cached_remote_venv_archive(&cache_dir, &metadata, url);
     let download_path = temp_dir.join("venv.zip");
     let http = ureq::AgentBuilder::new()
@@ -1949,7 +2026,10 @@ fn download_remote_venv_archive(url: &str, cache_root: &Path, temp_dir: &Path) -
 
     let download = download_remote_venv_archive_with_retry(&http, url, &download_path, cached.as_ref(), 8)?;
     let Some(etag) = download.etag.as_deref() else {
-        if metadata.entries.remove(url).is_some() {
+        if metadata.entries.remove(&metadata_key).is_some() {
+            metadata_changed = true;
+        }
+        if metadata_changed {
             save_remote_venv_cache_metadata(&cache_dir, &metadata)?;
         }
         return Ok(download);
@@ -1964,14 +2044,14 @@ fn download_remote_venv_archive(url: &str, cache_root: &Path, temp_dir: &Path) -
         fs::rename(&download.archive_path, &archive_path)?;
     }
 
-    if let Some(previous) = metadata.entries.get(url) {
+    if let Some(previous) = metadata.entries.get(&metadata_key) {
         if previous.archive != archive_name {
             let _ = fs::remove_file(cache_dir.join(&previous.archive));
         }
     }
 
     metadata.entries.insert(
-        url.to_string(),
+        metadata_key,
         RemoteVenvCacheEntry {
             etag: etag.to_string(),
             archive: archive_name,
@@ -2000,7 +2080,7 @@ fn resolve_venv_import_source(value: &str, cache_root: &Path) -> Result<VenvImpo
 
     Ok(VenvImportSource {
         archive_path: download.archive_path,
-        display: value.to_string(),
+        display: remote_venv_display_url(value),
         _temp_dir: Some(temp_dir),
     })
 }
@@ -4591,6 +4671,15 @@ mod tests {
         assert!(!is_remote_venv_archive_url("msgraph.zip"));
     }
 
+    #[test]
+    fn remote_venv_retry_statuses_exclude_permanent_client_errors() {
+        assert!(!is_retryable_remote_venv_http_status(401));
+        assert!(!is_retryable_remote_venv_http_status(404));
+        assert!(is_retryable_remote_venv_http_status(408));
+        assert!(is_retryable_remote_venv_http_status(429));
+        assert!(is_retryable_remote_venv_http_status(500));
+    }
+
     fn spawn_remote_venv_archive_server(
         status: u16,
         body: Vec<u8>,
@@ -4789,6 +4878,71 @@ mod tests {
     }
 
     #[test]
+    fn remote_venv_cache_metadata_uses_url_digest_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_venv_dir = temp_dir.path().join("source");
+        let source_module_dir = source_venv_dir.join("Modules").join("Graph");
+        fs::create_dir_all(&source_module_dir).unwrap();
+        fs::write(source_module_dir.join("Graph.psd1"), "module-data").unwrap();
+
+        let archive_path = temp_dir.path().join("source.zip");
+        export_virtual_environment_to_archive(&source_venv_dir, &archive_path).unwrap();
+        let archive_bytes = fs::read(&archive_path).unwrap();
+        let (url, request_receiver, server_handle) =
+            spawn_remote_venv_archive_sequence_server(vec![RemoteVenvArchiveTestResponse {
+                status: 200,
+                etag: Some("\"v1\""),
+                body: archive_bytes,
+            }]);
+        let url = format!("{}?token=one-time-jwt", url);
+        let cache_root = temp_dir.path().join("cache");
+        let cache_dir = remote_venv_cache_dir(&cache_root);
+        let mut legacy_metadata = RemoteVenvCacheMetadata::default();
+        legacy_metadata.entries.insert(
+            url.clone(),
+            RemoteVenvCacheEntry {
+                etag: "\"old\"".to_string(),
+                archive: "missing.zip".to_string(),
+            },
+        );
+        save_remote_venv_cache_metadata(&cache_dir, &legacy_metadata).unwrap();
+
+        download_remote_venv_archive(&url, &cache_root, temp_dir.path()).unwrap();
+
+        let _ = request_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        server_handle.join().unwrap();
+
+        let metadata = load_remote_venv_cache_metadata(&cache_dir).unwrap();
+        assert!(!metadata.entries.contains_key(&url));
+        assert!(metadata.entries.contains_key(&remote_venv_cache_metadata_key(&url)));
+        let metadata_body = fs::read_to_string(remote_venv_cache_metadata_path(&cache_dir)).unwrap();
+        assert!(!metadata_body.contains("one-time-jwt"));
+    }
+
+    #[test]
+    fn remote_venv_import_source_redacts_query_from_display() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_venv_dir = temp_dir.path().join("source");
+        let source_module_dir = source_venv_dir.join("Modules").join("Graph");
+        fs::create_dir_all(&source_module_dir).unwrap();
+        fs::write(source_module_dir.join("Graph.psd1"), "module-data").unwrap();
+
+        let archive_path = temp_dir.path().join("source.zip");
+        export_virtual_environment_to_archive(&source_venv_dir, &archive_path).unwrap();
+        let archive_bytes = fs::read(&archive_path).unwrap();
+        let (url, request_receiver, server_handle) = spawn_remote_venv_archive_server(200, archive_bytes);
+        let url_with_token = format!("{}?token=one-time-jwt", url);
+
+        let source = resolve_venv_import_source(&url_with_token, &temp_dir.path().join("cache")).unwrap();
+
+        let _ = request_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        server_handle.join().unwrap();
+
+        assert_eq!(source.display, format!("{}?<redacted>", url));
+        assert!(!source.display.contains("one-time-jwt"));
+    }
+
+    #[test]
     fn remote_venv_download_reports_http_status_failures() {
         let temp_dir = TempDir::new().unwrap();
         let http = ureq::AgentBuilder::new().build();
@@ -4798,7 +4952,8 @@ mod tests {
             let (url, request_receiver, server_handle) =
                 spawn_remote_venv_archive_server(status, format!("status {}", status).into_bytes());
 
-            let error = download_remote_venv_archive_with_retry(&http, &url, &destination, None, 1).unwrap_err();
+            let retries = if status >= 500 { 1 } else { 3 };
+            let error = download_remote_venv_archive_with_retry(&http, &url, &destination, None, retries).unwrap_err();
 
             let request = request_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
             server_handle.join().unwrap();
