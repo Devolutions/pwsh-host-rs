@@ -55,7 +55,7 @@ Available commands:
 - `multi-pwsh venv create <name>`
 - `multi-pwsh venv delete <name>`
 - `multi-pwsh venv export <name> <archive.zip>`
-- `multi-pwsh venv import <name> <archive.zip>`
+- `multi-pwsh venv import <name> <archive.zip|url>`
 - `multi-pwsh venv list`
 
 ### Create and use a venv
@@ -96,6 +96,14 @@ multi-pwsh host 7.4 -venv msgraph-copy -NoLogo -NoProfile
 ```
 
 Import is intentionally conservative: importing into an existing destination venv is rejected instead of merging archive contents.
+
+`venv import` also accepts `https://` archive URLs. `http://` remote imports are rejected. For authenticated remote archives, include any required one-time credential in the URL query string.
+
+```powershell
+multi-pwsh venv import msgraph-copy "https://example.invalid/venvs/msgraph.zip?token=$appToken"
+```
+
+Remote imports cache archives under `MULTI_PWSH_CACHE_DIR` or the default cache root when the server returns an `ETag`. Later imports of the same URL send `If-None-Match` with the stored ETag; if the server returns `304 Not Modified`, `multi-pwsh` imports from the cached archive instead of downloading it again. Cached archive files are identified by both URL and ETag.
 
 ### Current behavior and limitations
 
