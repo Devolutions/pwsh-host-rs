@@ -108,7 +108,7 @@ fn help_topic_text(topic: &str) -> Option<&'static str> {
             "Usage:\n  multi-pwsh list [options]\n\nOptions:\n  --scope <user|machine|all>\n  --root <path>\n  --available\n  --include-prerelease\n  --offline-cache <path>\n\nNotes:\n  User scope is the default when --scope is omitted.\n  --root requires --scope <user|machine>.\n  Installed listings include prerelease versions; --include-prerelease only changes --available listings.",
         ),
         "venv" => Some(
-            "Usage:\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip|url>\n  multi-pwsh venv list\n\nNotes:\n  Virtual environments live in the default user layout.\n  Remote imports accept http:// and https:// URLs. Include any required one-time credentials in the URL query string.",
+            "Usage:\n  multi-pwsh venv create <name>\n  multi-pwsh venv delete <name>\n  multi-pwsh venv export <name> <archive.zip>\n  multi-pwsh venv import <name> <archive.zip|url>\n  multi-pwsh venv list\n\nNotes:\n  Virtual environments live in the default user layout.\n  Remote imports require https:// URLs. Include any required one-time credentials in the URL query string.",
         ),
         "alias" => Some(
             "Usage:\n  multi-pwsh alias set <major.minor> <version|latest>\n  multi-pwsh alias set <pwsh|pwsh-preview|pwsh-lts> <stable|preview|lts|version>\n  multi-pwsh alias unset <major.minor|pwsh|pwsh-preview|pwsh-lts>\n\nNotes:\n  Direct alias commands operate on the default user layout; machine-scope aliases are normally entered through generated machine-scope shims.",
@@ -1807,6 +1807,21 @@ fn is_remote_venv_archive_url(value: &str) -> bool {
     normalized.starts_with("https://") || normalized.starts_with("http://")
 }
 
+fn is_http_venv_archive_url(value: &str) -> bool {
+    value.to_ascii_lowercase().starts_with("http://")
+}
+
+fn reject_http_venv_archive_url(value: &str) -> Result<()> {
+    if is_http_venv_archive_url(value) {
+        return Err(MultiPwshError::InvalidArguments(format!(
+            "remote virtual environment imports require an https:// URL; http:// is not supported: {}",
+            value
+        )));
+    }
+
+    Ok(())
+}
+
 fn remote_venv_cache_dir(cache_root: &Path) -> PathBuf {
     cache_root.join(VENV_REMOTE_CACHE_DIR)
 }
@@ -2073,6 +2088,7 @@ fn resolve_venv_import_source(value: &str, cache_root: &Path) -> Result<VenvImpo
             _temp_dir: None,
         });
     }
+    reject_http_venv_archive_url(value)?;
     let cache_dir = remote_venv_cache_dir(cache_root);
     fs::create_dir_all(&cache_dir)?;
     let temp_dir = tempfile::tempdir_in(&cache_dir)?;
@@ -2188,6 +2204,7 @@ fn run_venv(args: &[String]) -> Result<()> {
             let name = validate_venv_name(&args[1])?;
             let venv_dir = layout.venv_dir(name);
             let archive_arg = &args[2];
+            reject_http_venv_archive_url(archive_arg)?;
             if is_remote_venv_archive_url(archive_arg) && venv_dir.exists() {
                 return Err(MultiPwshError::InvalidArguments(format!(
                     "virtual environment destination '{}' already exists",
@@ -4664,11 +4681,30 @@ mod tests {
     }
 
     #[test]
-    fn remote_venv_archive_detection_accepts_http_urls_only() {
+    fn remote_venv_archive_detection_recognizes_remote_urls() {
         assert!(is_remote_venv_archive_url("https://example.invalid/venv.zip"));
         assert!(is_remote_venv_archive_url("HTTP://example.invalid/venv.zip"));
+        assert!(!is_http_venv_archive_url("https://example.invalid/venv.zip"));
+        assert!(is_http_venv_archive_url("HTTP://example.invalid/venv.zip"));
         assert!(!is_remote_venv_archive_url("C:\\venvs\\msgraph.zip"));
         assert!(!is_remote_venv_archive_url("msgraph.zip"));
+    }
+
+    #[test]
+    fn remote_venv_import_source_rejects_http_urls() {
+        let temp_dir = TempDir::new().unwrap();
+        let error = match resolve_venv_import_source(
+            "http://example.invalid/venv.zip?token=one-time-jwt",
+            &temp_dir.path().join("cache"),
+        ) {
+            Ok(_) => panic!("expected http remote venv import to be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, MultiPwshError::InvalidArguments(_)));
+        assert!(error
+            .to_string()
+            .contains("remote virtual environment imports require an https:// URL; http:// is not supported"));
     }
 
     #[test]
@@ -4921,25 +4957,10 @@ mod tests {
 
     #[test]
     fn remote_venv_import_source_redacts_query_from_display() {
-        let temp_dir = TempDir::new().unwrap();
-        let source_venv_dir = temp_dir.path().join("source");
-        let source_module_dir = source_venv_dir.join("Modules").join("Graph");
-        fs::create_dir_all(&source_module_dir).unwrap();
-        fs::write(source_module_dir.join("Graph.psd1"), "module-data").unwrap();
+        let display = remote_venv_display_url("https://example.invalid/venv.zip?token=one-time-jwt");
 
-        let archive_path = temp_dir.path().join("source.zip");
-        export_virtual_environment_to_archive(&source_venv_dir, &archive_path).unwrap();
-        let archive_bytes = fs::read(&archive_path).unwrap();
-        let (url, request_receiver, server_handle) = spawn_remote_venv_archive_server(200, archive_bytes);
-        let url_with_token = format!("{}?token=one-time-jwt", url);
-
-        let source = resolve_venv_import_source(&url_with_token, &temp_dir.path().join("cache")).unwrap();
-
-        let _ = request_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-        server_handle.join().unwrap();
-
-        assert_eq!(source.display, format!("{}?<redacted>", url));
-        assert!(!source.display.contains("one-time-jwt"));
+        assert_eq!(display, "https://example.invalid/venv.zip?<redacted>");
+        assert!(!display.contains("one-time-jwt"));
     }
 
     #[test]

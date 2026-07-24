@@ -97,7 +97,7 @@ multi-pwsh host 7.4 -venv msgraph-copy -NoLogo -NoProfile
 
 Import is intentionally conservative: importing into an existing destination venv is rejected instead of merging archive contents.
 
-`venv import` also accepts `http://` and `https://` archive URLs. For authenticated remote archives, include any required one-time credential in the URL query string.
+`venv import` also accepts `https://` archive URLs. `http://` remote imports are rejected. For authenticated remote archives, include any required one-time credential in the URL query string.
 
 ```powershell
 multi-pwsh venv import msgraph-copy "https://example.invalid/venvs/msgraph.zip?token=$appToken"
