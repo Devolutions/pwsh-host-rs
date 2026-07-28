@@ -111,6 +111,22 @@ internal struct NativeSessionPoolOptions
     internal uint Reserved;
 }
 
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeOperationStreamBatchInfo
+{
+    internal uint Size;
+    internal uint OperationState;
+    internal int TerminalStatus;
+    internal uint Flags;
+    internal ulong NextSequence;
+    internal ulong TotalRecordCount;
+    internal ulong DroppedRecordCount;
+    internal ulong SourceDroppedRecordCount;
+    internal ulong LostRecordCount;
+    internal uint RecordCount;
+    internal uint Reserved;
+}
+
 internal static unsafe partial class NativeMethods
 {
     internal const string LibraryName = "multi-pwsh-sdk";
@@ -439,6 +455,46 @@ internal static unsafe partial class NativeMethods
         ulong operationHandle,
         ulong* resultHandle,
         NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_operation_read_stream_batch")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int ReadOperationStreamBatch(
+        ulong operationHandle,
+        ulong afterSequence,
+        uint maximumRecords,
+        ulong* batchHandle,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_operation_stream_batch_get_info")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int GetOperationStreamBatchInfo(
+        ulong batchHandle,
+        NativeOperationStreamBatchInfo* info,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_operation_stream_batch_get_record_info")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int GetOperationStreamBatchRecordInfo(
+        ulong batchHandle,
+        uint recordIndex,
+        uint* stream,
+        ulong* sequence,
+        uint* flags,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_operation_stream_batch_copy_record_text_utf8")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CopyOperationStreamBatchRecordText(
+        ulong batchHandle,
+        uint recordIndex,
+        byte* buffer,
+        nuint bufferLength,
+        nuint* requiredLength,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_operation_stream_batch_release")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int ReleaseOperationStreamBatch(ulong batchHandle, NativeCallResult* result);
 
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_session_create")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

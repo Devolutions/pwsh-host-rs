@@ -12,8 +12,8 @@ pub(crate) use self::bindings_generated::Bindings;
 use self::bindings_generated::PowerShellHandle;
 pub(crate) use self::ffi::FfiBindings;
 pub use self::ffi::{
-    FfiBindingError, FfiInvocationResult, FfiLiveObjectContractDescriptor, FfiPowerShell, FfiPowerShellSession,
-    FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue,
+    FfiBindingError, FfiInvocationResult, FfiLiveInvocation, FfiLiveObjectContractDescriptor, FfiLiveStreamBatch,
+    FfiLiveStreamRecord, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue,
 };
 use crate::loader::HostedRuntime;
 

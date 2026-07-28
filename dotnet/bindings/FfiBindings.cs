@@ -21,6 +21,7 @@ namespace NativeHost
     public static partial class Bindings
     {
         private const uint FfiBindingsAbiVersion = 2;
+        private const uint FfiBindingsLiveStreamAbiVersion = 3;
         private const uint FfiCallResultTruncatedDiagnostic = 1;
         private const int FfiStatusSuccess = 0;
         private const int FfiStatusInvalidArgument = -1;
@@ -60,6 +61,7 @@ namespace NativeHost
         private const ulong FfiFeatureLiveObjectProbe = 1UL << 17;
         private const ulong FfiFeatureLiveSessionObjectProbe = 1UL << 18;
         private const ulong FfiFeatureLiveObjectContracts = 1UL << 19;
+        private const ulong FfiFeatureLiveStreamPolling = 1UL << 20;
         private const int FfiMaxSessionEvents = 32;
 
         [StructLayout(LayoutKind.Sequential)]
@@ -159,6 +161,24 @@ namespace NativeHost
             public IntPtr LiveObjectContractPack_RegisterMany;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FfiApiV3
+        {
+            public nuint Size;
+            public uint AbiVersion;
+            public ulong FeatureFlags;
+            public IntPtr PowerShell_BeginLiveInvocation;
+            public IntPtr LiveInvocation_Poll;
+            public IntPtr LiveInvocation_ReadBatch;
+            public IntPtr LiveInvocationBatch_GetInfo;
+            public IntPtr LiveInvocationBatch_GetRecordInfo;
+            public IntPtr LiveInvocationBatch_CopyRecordTextToUtf8;
+            public IntPtr LiveInvocationBatch_Release;
+            public IntPtr LiveInvocation_Complete;
+            public IntPtr LiveInvocation_Stop;
+            public IntPtr LiveInvocation_Release;
+        }
+
         private static string[] NormalizeDirectories(string[] directories, string description)
         {
             if (directories.Length > FfiMaxSessionEvents)
@@ -244,6 +264,7 @@ namespace NativeHost
             static pointer => new FfiManagedLiveObjectLease(FfiLiveSessionObjectProbeProxy.Create(pointer)));
         private static long FfiNextInvocationId;
         private static IntPtr FfiApiV2Ptr = IntPtr.Zero;
+        private static IntPtr FfiApiV3Ptr = IntPtr.Zero;
 
         [UnmanagedCallersOnly]
         public static IntPtr Bindings_GetFfiApiV2()
@@ -260,6 +281,29 @@ namespace NativeHost
                     }
 
                     return FfiApiV2Ptr;
+                }
+            }
+            catch
+            {
+                return IntPtr.Zero;
+            }
+        }
+
+        [UnmanagedCallersOnly]
+        public static IntPtr Bindings_GetFfiApiV3()
+        {
+            try
+            {
+                lock (FfiApiV2Lock)
+                {
+                    if (FfiApiV3Ptr == IntPtr.Zero)
+                    {
+                        FfiApiV3 api = CreateFfiApiV3();
+                        FfiApiV3Ptr = Marshal.AllocCoTaskMem(Marshal.SizeOf<FfiApiV3>());
+                        Marshal.StructureToPtr(api, FfiApiV3Ptr, false);
+                    }
+
+                    return FfiApiV3Ptr;
                 }
             }
             catch
@@ -328,6 +372,26 @@ namespace NativeHost
                 LiveObjectContractPack_Register = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiLiveObjectContractPack_Register,
                 PowerShellSession_SetLiveObjectContractVariable = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, NativeLiveObjectContractDescriptor*, IntPtr, FfiCallResult*, int>)&FfiPowerShellSession_SetLiveObjectContractVariable,
                 LiveObjectContractPack_RegisterMany = (IntPtr)(delegate* unmanaged<IntPtr*, uint, FfiCallResult*, int>)&FfiLiveObjectContractPack_RegisterMany,
+            };
+        }
+
+        private static unsafe FfiApiV3 CreateFfiApiV3()
+        {
+            return new FfiApiV3
+            {
+                Size = (nuint)Marshal.SizeOf<FfiApiV3>(),
+                AbiVersion = FfiBindingsLiveStreamAbiVersion,
+                FeatureFlags = FfiFeatureLiveStreamPolling,
+                PowerShell_BeginLiveInvocation = (IntPtr)(delegate* unmanaged<IntPtr, IntPtr*, FfiCallResult*, int>)&FfiPowerShell_BeginLiveInvocation,
+                LiveInvocation_Poll = (IntPtr)(delegate* unmanaged<IntPtr, int*, FfiCallResult*, int>)&FfiLiveInvocation_Poll,
+                LiveInvocation_ReadBatch = (IntPtr)(delegate* unmanaged<IntPtr, long, int, IntPtr*, FfiCallResult*, int>)&FfiLiveInvocation_ReadBatch,
+                LiveInvocationBatch_GetInfo = (IntPtr)(delegate* unmanaged<IntPtr, long*, long*, long*, int*, FfiCallResult*, int>)&FfiLiveInvocationBatch_GetInfo,
+                LiveInvocationBatch_GetRecordInfo = (IntPtr)(delegate* unmanaged<IntPtr, int, int*, long*, uint*, FfiCallResult*, int>)&FfiLiveInvocationBatch_GetRecordInfo,
+                LiveInvocationBatch_CopyRecordTextToUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, int, byte*, int, int*, FfiCallResult*, int>)&FfiLiveInvocationBatch_CopyRecordTextToUtf8,
+                LiveInvocationBatch_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiLiveInvocationBatch_Release,
+                LiveInvocation_Complete = (IntPtr)(delegate* unmanaged<IntPtr, IntPtr*, FfiCallResult*, int>)&FfiLiveInvocation_Complete,
+                LiveInvocation_Stop = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiLiveInvocation_Stop,
+                LiveInvocation_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiLiveInvocation_Release,
             };
         }
 
@@ -1285,6 +1349,220 @@ namespace NativeHost
                 GCHandle handle = GCHandle.Alloc(snapshot, GCHandleType.Normal);
                 *ptrResultHandle = GCHandle.ToIntPtr(handle);
             });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiPowerShell_BeginLiveInvocation(
+            IntPtr ptrHandle,
+            IntPtr* ptrLiveInvocationHandle,
+            FfiCallResult* result)
+        {
+            if (ptrLiveInvocationHandle == null)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Live invocation handle output pointer is null.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                FfiInvocationResults.TryRemove(ptrHandle, out _);
+                var liveInvocation = new FfiLiveInvocation(
+                    pipeline.PowerShell,
+                    TakeCompletedInput(ptrHandle),
+                    pipeline.Session,
+                    pipeline.TakeCapabilityContext());
+                try
+                {
+                    liveInvocation.Start();
+                    GCHandle handle = GCHandle.Alloc(liveInvocation, GCHandleType.Normal);
+                    *ptrLiveInvocationHandle = GCHandle.ToIntPtr(handle);
+                }
+                catch
+                {
+                    liveInvocation.Dispose();
+                    throw;
+                }
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveInvocation_Poll(
+            IntPtr ptrLiveInvocationHandle,
+            int* isCompleted,
+            FfiCallResult* result)
+        {
+            if (isCompleted == null)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Live invocation completion output pointer is null.");
+            }
+
+            return Execute(result, () =>
+            {
+                *isCompleted = GetLiveInvocation(ptrLiveInvocationHandle).IsCompleted ? 1 : 0;
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveInvocation_ReadBatch(
+            IntPtr ptrLiveInvocationHandle,
+            long afterSequence,
+            int maximumRecords,
+            IntPtr* ptrBatchHandle,
+            FfiCallResult* result)
+        {
+            if (ptrBatchHandle == null || afterSequence < 0 || maximumRecords < 1 || maximumRecords > FfiMaxStreamRecords)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Live invocation stream batch arguments are invalid.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiLiveStreamBatch batch = GetLiveInvocation(ptrLiveInvocationHandle)
+                    .ReadBatch(afterSequence, maximumRecords);
+                GCHandle handle = GCHandle.Alloc(batch, GCHandleType.Normal);
+                *ptrBatchHandle = GCHandle.ToIntPtr(handle);
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveInvocationBatch_GetInfo(
+            IntPtr ptrBatchHandle,
+            long* nextSequence,
+            long* totalRecordCount,
+            long* lostRecordCount,
+            int* recordCount,
+            FfiCallResult* result)
+        {
+            if (nextSequence == null || totalRecordCount == null || lostRecordCount == null || recordCount == null)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Live invocation stream batch info output pointer is null.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiLiveStreamBatch batch = GetLiveStreamBatch(ptrBatchHandle);
+                *nextSequence = batch.NextSequence;
+                *totalRecordCount = batch.TotalRecordCount;
+                *lostRecordCount = batch.LostRecordCount;
+                *recordCount = batch.Records.Length;
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveInvocationBatch_GetRecordInfo(
+            IntPtr ptrBatchHandle,
+            int recordIndex,
+            int* stream,
+            long* sequence,
+            uint* flags,
+            FfiCallResult* result)
+        {
+            if (stream == null || sequence == null || flags == null)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Live invocation stream record info output pointer is null.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiLiveStreamRecord record = GetLiveStreamBatch(ptrBatchHandle).GetRecord(recordIndex);
+                *stream = record.Stream;
+                *sequence = record.Sequence;
+                *flags = record.Flags;
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveInvocationBatch_CopyRecordTextToUtf8(
+            IntPtr ptrBatchHandle,
+            int recordIndex,
+            byte* buffer,
+            int bufferLength,
+            int* requiredLength,
+            FfiCallResult* result)
+        {
+            if (requiredLength == null || bufferLength < 0)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Live invocation stream record buffer arguments are invalid.");
+            }
+
+            IntPtr outputBuffer = (IntPtr)buffer;
+            IntPtr outputRequiredLength = (IntPtr)requiredLength;
+            return Execute(result, () =>
+            {
+                string value = GetLiveStreamBatch(ptrBatchHandle).GetRecord(recordIndex).DisplayText;
+                int required = Encoding.UTF8.GetByteCount(value);
+                Marshal.WriteInt32(outputRequiredLength, required);
+                if (bufferLength < required)
+                {
+                    throw new BufferTooSmallException();
+                }
+
+                if (required > 0)
+                {
+                    byte[] valueBytes = Encoding.UTF8.GetBytes(value);
+                    Marshal.Copy(valueBytes, 0, outputBuffer, required);
+                }
+            }, bufferTooSmallIsSuccess: true);
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveInvocationBatch_Release(IntPtr ptrBatchHandle, FfiCallResult* result)
+        {
+            return ReleaseLiveHandle<FfiLiveStreamBatch>(
+                ptrBatchHandle,
+                result,
+                "Live invocation stream batch handle is invalid.");
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveInvocation_Complete(
+            IntPtr ptrLiveInvocationHandle,
+            IntPtr* ptrResultHandle,
+            FfiCallResult* result)
+        {
+            if (ptrResultHandle == null)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Invocation result handle output pointer is null.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiInvocationResultSnapshot snapshot = GetLiveInvocation(ptrLiveInvocationHandle).Complete();
+                GCHandle handle = GCHandle.Alloc(snapshot, GCHandleType.Normal);
+                *ptrResultHandle = GCHandle.ToIntPtr(handle);
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveInvocation_Stop(IntPtr ptrLiveInvocationHandle, FfiCallResult* result)
+        {
+            return Execute(result, () => GetLiveInvocation(ptrLiveInvocationHandle).Stop());
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiLiveInvocation_Release(IntPtr ptrLiveInvocationHandle, FfiCallResult* result)
+        {
+            if (!TryInitializeResult(result))
+            {
+                return FfiStatusInvalidArgument;
+            }
+
+            try
+            {
+                GCHandle handle = GCHandle.FromIntPtr(ptrLiveInvocationHandle);
+                if (!handle.IsAllocated || handle.Target is not FfiLiveInvocation invocation)
+                {
+                    return WriteFailure(result, FfiStatusInvalidHandle, "Live invocation handle is invalid.");
+                }
+
+                handle.Free();
+                invocation.Dispose();
+                return WriteSuccess(result);
+            }
+            catch (Exception exception)
+            {
+                return WriteFailure(result, FfiStatusInvalidHandle, exception);
+            }
         }
 
         [UnmanagedCallersOnly]
@@ -3070,14 +3348,69 @@ namespace NativeHost
             public long Sequence { get; }
         }
 
+        private sealed class FfiLiveStreamRecord
+        {
+            public FfiLiveStreamRecord(int stream, long sequence, string displayText, uint flags)
+            {
+                Stream = stream;
+                Sequence = sequence;
+                DisplayText = displayText;
+                Flags = flags;
+            }
+
+            public int Stream { get; }
+
+            public long Sequence { get; }
+
+            public string DisplayText { get; }
+
+            public uint Flags { get; }
+        }
+
+        private sealed class FfiLiveStreamBatch
+        {
+            public FfiLiveStreamBatch(
+                FfiLiveStreamRecord[] records,
+                long nextSequence,
+                long totalRecordCount,
+                long lostRecordCount)
+            {
+                Records = records;
+                NextSequence = nextSequence;
+                TotalRecordCount = totalRecordCount;
+                LostRecordCount = lostRecordCount;
+            }
+
+            public FfiLiveStreamRecord[] Records { get; }
+
+            public long NextSequence { get; }
+
+            public long TotalRecordCount { get; }
+
+            public long LostRecordCount { get; }
+
+            public FfiLiveStreamRecord GetRecord(int index)
+            {
+                if (index < 0 || index >= Records.Length)
+                {
+                    throw new InvalidOperationException("Live invocation stream record index is invalid.");
+                }
+
+                return Records[index];
+            }
+        }
+
         private sealed class FfiSnapshotCollector
         {
             private const int FieldCount = 20;
+            private const int LiveRecordCapacity = FfiMaxStreamRecords * FfiStreamCount;
             private readonly List<FfiStreamRecord>[] streams;
             private readonly uint[] streamFlags;
             private readonly long[] streamTotalRecordCounts;
             private readonly List<FfiSequenceRecord> sequence;
+            private readonly Queue<FfiLiveStreamRecord> liveRecords;
             private long nextSequence;
+            private long nextLiveSequence = 1;
             private bool terminatingFailure;
             private bool sequenceTruncated;
 
@@ -3092,6 +3425,7 @@ namespace NativeHost
                 }
 
                 sequence = new List<FfiSequenceRecord>(FfiMaxStreamRecords * FfiStreamCount);
+                liveRecords = new Queue<FfiLiveStreamRecord>(LiveRecordCapacity);
             }
 
             public long ErrorCount => streamTotalRecordCounts[(int)FfiStreamKind.Error];
@@ -3230,6 +3564,31 @@ namespace NativeHost
                     Interlocked.Increment(ref FfiNextInvocationId));
             }
 
+            public FfiLiveStreamBatch ReadLiveBatch(long afterSequence, int maximumRecords)
+            {
+                if (afterSequence < 0 || maximumRecords < 1 || maximumRecords > FfiMaxStreamRecords)
+                {
+                    throw new InvalidOperationException("Live invocation stream batch arguments are invalid.");
+                }
+
+                long lastSequence = nextLiveSequence - 1;
+                if (afterSequence > lastSequence)
+                {
+                    throw new InvalidOperationException("Live invocation stream cursor is invalid.");
+                }
+
+                long firstSequence = liveRecords.Count == 0 ? 0 : liveRecords.Peek().Sequence;
+                long lostRecordCount = firstSequence != 0 && afterSequence < firstSequence
+                    ? firstSequence - afterSequence - 1
+                    : 0;
+                FfiLiveStreamRecord[] records = liveRecords
+                    .Where(record => record.Sequence > afterSequence)
+                    .Take(maximumRecords)
+                    .ToArray();
+                long next = records.Length == 0 ? afterSequence : records[^1].Sequence;
+                return new FfiLiveStreamBatch(records, next, lastSequence, lostRecordCount);
+            }
+
             private void Add(FfiStreamKind stream, string[] fields, bool fieldsTruncated)
             {
                 Add(stream, fields, fieldsTruncated, 0, null, null, null, 0, 0, 0, 0);
@@ -3255,6 +3614,21 @@ namespace NativeHost
                 }
 
                 long currentSequence = nextSequence == long.MaxValue ? long.MaxValue : nextSequence++;
+                long currentLiveSequence = nextLiveSequence == long.MaxValue
+                    ? long.MaxValue
+                    : nextLiveSequence++;
+                uint snapshotFlags = projectionFlags;
+                if (fieldsTruncated)
+                {
+                    snapshotFlags |= FfiRecordFieldsTruncated;
+                }
+                if (liveRecords.Count == LiveRecordCapacity)
+                {
+                    liveRecords.Dequeue();
+                }
+                uint liveFlags = 0;
+                string liveDisplayText = BoundLiveDisplayText(fields[0], ref liveFlags);
+                liveRecords.Enqueue(new FfiLiveStreamRecord(streamIndex, currentLiveSequence, liveDisplayText, liveFlags));
                 List<FfiStreamRecord> records = streams[streamIndex];
                 if (records.Count == FfiMaxStreamRecords)
                 {
@@ -3263,16 +3637,11 @@ namespace NativeHost
                     return;
                 }
 
-                uint flags = projectionFlags;
-                if (fieldsTruncated)
-                {
-                    flags |= FfiRecordFieldsTruncated;
-                }
                 int recordIndex = records.Count;
                 records.Add(new FfiStreamRecord(
                     currentSequence,
                     fields,
-                    flags,
+                    snapshotFlags,
                     scalarValue,
                     propertyBagValue,
                     errorTargetValue,
@@ -3304,6 +3673,38 @@ namespace NativeHost
 
                 truncated = true;
                 return value.Substring(0, FfiMaxStreamFieldLength);
+            }
+
+            private static string BoundLiveDisplayText(string value, ref uint flags)
+            {
+                const int maximumUtf8Bytes = 4096;
+                if (Encoding.UTF8.GetByteCount(value) <= maximumUtf8Bytes)
+                {
+                    return value;
+                }
+
+                int length = 0;
+                int byteCount = 0;
+                while (length < value.Length)
+                {
+                    int characterLength = char.IsHighSurrogate(value[length]) &&
+                        length + 1 < value.Length &&
+                        char.IsLowSurrogate(value[length + 1])
+                        ? 2
+                        : 1;
+                    int characterByteCount = Encoding.UTF8.GetByteCount(
+                        value.AsSpan(length, characterLength));
+                    if (byteCount + characterByteCount > maximumUtf8Bytes)
+                    {
+                        break;
+                    }
+
+                    byteCount += characterByteCount;
+                    length += characterLength;
+                }
+
+                flags |= FfiRecordFieldsTruncated;
+                return value.Substring(0, length);
             }
 
             private static string SafeDisplayText(object value)
@@ -3873,6 +4274,294 @@ namespace NativeHost
             }
         }
 
+        private sealed class FfiLiveInvocation : IDisposable
+        {
+            private readonly object gate = new object();
+            private readonly PowerShell powerShell;
+            private readonly object[] input;
+            private readonly FfiPowerShellSession session;
+            private readonly FfiCapabilityContext capabilityContext;
+            private readonly FfiSnapshotCollector collector = new FfiSnapshotCollector();
+            private PSDataCollection<PSObject> output;
+            private PSDataCollection<object> inputCollection;
+            private IAsyncResult asyncResult;
+            private EventHandler<DataAddedEventArgs> outputAdded;
+            private EventHandler<DataAddedEventArgs> errorAdded;
+            private EventHandler<DataAddedEventArgs> warningAdded;
+            private EventHandler<DataAddedEventArgs> verboseAdded;
+            private EventHandler<DataAddedEventArgs> debugAdded;
+            private EventHandler<DataAddedEventArgs> informationAdded;
+            private EventHandler<DataAddedEventArgs> progressAdded;
+            private Runspace capabilityRunspace;
+            private PSVariable previousCapabilityVariable;
+            private Exception terminatingException;
+            private ErrorRecord terminatingError;
+            private FfiInvocationResultSnapshot snapshot;
+            private bool cleanedUp;
+            private bool disposed;
+            private bool sessionInvocationStarted;
+
+            public FfiLiveInvocation(
+                PowerShell powerShell,
+                object[] input,
+                FfiPowerShellSession session,
+                FfiCapabilityContext capabilityContext)
+            {
+                this.powerShell = powerShell ?? throw new ArgumentNullException(nameof(powerShell));
+                this.input = input;
+                this.session = session;
+                this.capabilityContext = capabilityContext;
+            }
+
+            public bool IsCompleted
+            {
+                get
+                {
+                    lock (gate)
+                    {
+                        return asyncResult?.IsCompleted ?? false;
+                    }
+                }
+            }
+
+            public void Start()
+            {
+                lock (gate)
+                {
+                    if (asyncResult != null)
+                    {
+                        throw new InvalidOperationException("Live invocation has already started.");
+                    }
+
+                    output = new PSDataCollection<PSObject> { DataAddedCount = 1 };
+                    outputAdded = (_, args) =>
+                    {
+                        lock (gate)
+                        {
+                            collector.AddOutput(output[args.Index]);
+                            output.Clear();
+                        }
+                    };
+                    errorAdded = (_, args) => AddError(args.Index);
+                    warningAdded = (_, args) => AddText(FfiStreamKind.Warning, powerShell.Streams.Warning, args.Index);
+                    verboseAdded = (_, args) => AddText(FfiStreamKind.Verbose, powerShell.Streams.Verbose, args.Index);
+                    debugAdded = (_, args) => AddText(FfiStreamKind.Debug, powerShell.Streams.Debug, args.Index);
+                    informationAdded = (_, args) => AddText(FfiStreamKind.Information, powerShell.Streams.Information, args.Index);
+                    progressAdded = (_, args) => AddText(FfiStreamKind.Progress, powerShell.Streams.Progress, args.Index);
+
+                    ClearStreamBuffers(powerShell);
+                    output.DataAdded += outputAdded;
+                    powerShell.Streams.Error.DataAdded += errorAdded;
+                    powerShell.Streams.Warning.DataAdded += warningAdded;
+                    powerShell.Streams.Verbose.DataAdded += verboseAdded;
+                    powerShell.Streams.Debug.DataAdded += debugAdded;
+                    powerShell.Streams.Information.DataAdded += informationAdded;
+                    powerShell.Streams.Progress.DataAdded += progressAdded;
+                    if (session != null)
+                    {
+                        session.BeginInvocation();
+                        sessionInvocationStarted = true;
+                    }
+                    PSInvocationSettings invocationSettings = session?.CreateInvocationSettings();
+                    if (capabilityContext != null)
+                    {
+                        capabilityRunspace = powerShell.Runspace ?? throw new InvalidOperationException(
+                            "Bounded capability RPC requires a PowerShell pipeline with an explicit local runspace.");
+                        previousCapabilityVariable = capabilityRunspace.SessionStateProxy.PSVariable.Get("DpsCapabilities");
+                        capabilityRunspace.SessionStateProxy.SetVariable(
+                            "DpsCapabilities",
+                            new FfiCapabilityBridge(capabilityContext));
+                    }
+
+                    if (input == null)
+                    {
+                        asyncResult = powerShell.BeginInvoke<PSObject, PSObject>(
+                            null,
+                            output,
+                            invocationSettings,
+                            null,
+                            null);
+                    }
+                    else
+                    {
+                        inputCollection = new PSDataCollection<object>();
+                        foreach (object value in input)
+                        {
+                            inputCollection.Add(value);
+                        }
+
+                        inputCollection.Complete();
+                        asyncResult = powerShell.BeginInvoke<object, PSObject>(
+                            inputCollection,
+                            output,
+                            invocationSettings,
+                            null,
+                            null);
+                    }
+                }
+            }
+
+            public FfiLiveStreamBatch ReadBatch(long afterSequence, int maximumRecords)
+            {
+                lock (gate)
+                {
+                    EnsureStarted();
+                    return collector.ReadLiveBatch(afterSequence, maximumRecords);
+                }
+            }
+
+            public void Stop()
+            {
+                powerShell.Stop();
+            }
+
+            public FfiInvocationResultSnapshot Complete()
+            {
+                lock (gate)
+                {
+                    EnsureStarted();
+                    if (snapshot != null)
+                    {
+                        return snapshot;
+                    }
+
+                    if (!asyncResult.IsCompleted)
+                    {
+                        throw new InvalidOperationException("Live invocation has not reached a terminal state.");
+                    }
+
+                    try
+                    {
+                        powerShell.EndInvoke(asyncResult);
+                        foreach (PSObject value in output)
+                        {
+                            collector.AddOutput(value);
+                        }
+                    }
+                    catch (RuntimeException exception)
+                    {
+                        collector.MarkTerminatingFailure();
+                        terminatingException = exception;
+                        terminatingError = exception.ErrorRecord;
+                    }
+                    catch (Exception exception)
+                    {
+                        collector.MarkTerminatingFailure();
+                        terminatingException = exception;
+                    }
+                    finally
+                    {
+                        Cleanup();
+                    }
+
+                    snapshot = collector.Build();
+                    return snapshot;
+                }
+            }
+
+            public void Dispose()
+            {
+                IAsyncResult invocation;
+                lock (gate)
+                {
+                    if (disposed)
+                    {
+                        return;
+                    }
+
+                    disposed = true;
+                    if (asyncResult is null)
+                    {
+                        Cleanup();
+                        return;
+                    }
+
+                    invocation = asyncResult;
+                }
+
+                if (!invocation.IsCompleted)
+                {
+                    Stop();
+                }
+
+                invocation.AsyncWaitHandle.WaitOne();
+                _ = Complete();
+            }
+
+            private void AddError(int index)
+            {
+                lock (gate)
+                {
+                    collector.AddError(powerShell.Streams.Error[index]);
+                    powerShell.Streams.Error.Clear();
+                }
+            }
+
+            private void AddText<T>(FfiStreamKind stream, PSDataCollection<T> records, int index)
+            {
+                lock (gate)
+                {
+                    collector.AddText(stream, records[index]);
+                    records.Clear();
+                }
+            }
+
+            private void EnsureStarted()
+            {
+                if (asyncResult == null)
+                {
+                    throw new InvalidOperationException("Live invocation has not started.");
+                }
+            }
+
+            private void Cleanup()
+            {
+                if (cleanedUp)
+                {
+                    return;
+                }
+
+                cleanedUp = true;
+                if (output != null)
+                {
+                    output.DataAdded -= outputAdded;
+                }
+                powerShell.Streams.Error.DataAdded -= errorAdded;
+                powerShell.Streams.Warning.DataAdded -= warningAdded;
+                powerShell.Streams.Verbose.DataAdded -= verboseAdded;
+                powerShell.Streams.Debug.DataAdded -= debugAdded;
+                powerShell.Streams.Information.DataAdded -= informationAdded;
+                powerShell.Streams.Progress.DataAdded -= progressAdded;
+
+                if (terminatingException != null && collector.ErrorCount == 0)
+                {
+                    collector.AddError(terminatingError, terminatingException);
+                }
+
+                output?.Clear();
+                inputCollection?.Clear();
+                ClearStreamBuffers(powerShell);
+                if (capabilityRunspace != null)
+                {
+                    if (previousCapabilityVariable == null)
+                    {
+                        capabilityRunspace.SessionStateProxy.PSVariable.Remove("DpsCapabilities");
+                    }
+                    else
+                    {
+                        capabilityRunspace.SessionStateProxy.SetVariable(
+                            "DpsCapabilities",
+                            previousCapabilityVariable.Value);
+                    }
+                }
+                if (sessionInvocationStarted)
+                {
+                    session.EndInvocation(terminatingException != null);
+                    sessionInvocationStarted = false;
+                }
+            }
+        }
+
         private static FfiInvocationResultSnapshot InvokeAndCaptureStreamSnapshot(
             PowerShell ps,
             object[] input = null,
@@ -4065,6 +4754,63 @@ namespace NativeHost
             }
 
             return snapshot;
+        }
+
+        private static FfiLiveInvocation GetLiveInvocation(IntPtr ptrLiveInvocationHandle)
+        {
+            if (ptrLiveInvocationHandle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Live invocation handle is invalid.");
+            }
+
+            GCHandle handle = GCHandle.FromIntPtr(ptrLiveInvocationHandle);
+            if (!handle.IsAllocated || handle.Target is not FfiLiveInvocation invocation)
+            {
+                throw new InvalidOperationException("Live invocation handle is invalid.");
+            }
+
+            return invocation;
+        }
+
+        private static FfiLiveStreamBatch GetLiveStreamBatch(IntPtr ptrBatchHandle)
+        {
+            if (ptrBatchHandle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Live invocation stream batch handle is invalid.");
+            }
+
+            GCHandle handle = GCHandle.FromIntPtr(ptrBatchHandle);
+            if (!handle.IsAllocated || handle.Target is not FfiLiveStreamBatch batch)
+            {
+                throw new InvalidOperationException("Live invocation stream batch handle is invalid.");
+            }
+
+            return batch;
+        }
+
+        private static unsafe int ReleaseLiveHandle<T>(IntPtr ptrHandle, FfiCallResult* result, string invalidMessage)
+            where T : class
+        {
+            if (!TryInitializeResult(result))
+            {
+                return FfiStatusInvalidArgument;
+            }
+
+            try
+            {
+                GCHandle handle = GCHandle.FromIntPtr(ptrHandle);
+                if (!handle.IsAllocated || handle.Target is not T)
+                {
+                    return WriteFailure(result, FfiStatusInvalidHandle, invalidMessage);
+                }
+
+                handle.Free();
+                return WriteSuccess(result);
+            }
+            catch (Exception exception)
+            {
+                return WriteFailure(result, FfiStatusInvalidHandle, exception);
+            }
         }
 
         private sealed class BufferTooSmallException : Exception

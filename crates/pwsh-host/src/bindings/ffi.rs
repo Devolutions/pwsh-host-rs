@@ -12,6 +12,7 @@ use crate::pdcstring::{PdCStr, PdCString};
 use super::bindings_generated::PowerShellHandle;
 
 const FFI_BINDINGS_ABI_VERSION: u32 = 2;
+const FFI_BINDINGS_LIVE_STREAM_ABI_VERSION: u32 = 3;
 const FFI_CALL_DIAGNOSTIC_CAPACITY: usize = 4096;
 const FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES: u64 = 1 << 8;
 const FFI_FEATURE_SESSION_PRIMITIVES: u64 = 1 << 10;
@@ -23,6 +24,7 @@ const FFI_FEATURE_CAPABILITY_RPC: u64 = 1 << 16;
 const FFI_FEATURE_LIVE_OBJECT_PROBE: u64 = 1 << 17;
 const FFI_FEATURE_LIVE_SESSION_OBJECT_PROBE: u64 = 1 << 18;
 const FFI_FEATURE_LIVE_OBJECT_CONTRACTS: u64 = 1 << 19;
+const FFI_FEATURE_LIVE_STREAM_POLLING: u64 = 1 << 20;
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_BUFFER_TOO_SMALL: i32 = 1;
 
@@ -107,7 +109,26 @@ struct FfiApiV2 {
     live_object_contract_pack_register_many_fn: *const libc::c_void,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FfiApiV3 {
+    size: usize,
+    abi_version: u32,
+    feature_flags: u64,
+    power_shell_begin_live_invocation_fn: *const libc::c_void,
+    live_invocation_poll_fn: *const libc::c_void,
+    live_invocation_read_batch_fn: *const libc::c_void,
+    live_invocation_batch_get_info_fn: *const libc::c_void,
+    live_invocation_batch_get_record_info_fn: *const libc::c_void,
+    live_invocation_batch_copy_record_text_to_utf8_fn: *const libc::c_void,
+    live_invocation_batch_release_fn: *const libc::c_void,
+    live_invocation_complete_fn: *const libc::c_void,
+    live_invocation_stop_fn: *const libc::c_void,
+    live_invocation_release_fn: *const libc::c_void,
+}
+
 type FnBindingsGetFfiApiV2 = unsafe extern "system" fn() -> *const FfiApiV2;
+type FnBindingsGetFfiApiV3 = unsafe extern "system" fn() -> *const FfiApiV3;
 type FnFfiPowerShellCreate = unsafe extern "system" fn(*mut PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiPowerShellRelease = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiPowerShellAddUtf8 = unsafe extern "system" fn(PowerShellHandle, *const u8, i32, *mut FfiCallResult) -> i32;
@@ -125,6 +146,20 @@ type FnFfiPowerShellCopyInvocationErrorFieldToUtf8 =
 type FnFfiPowerShellClear = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiPowerShellStop = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiPowerShellInvokeToResult =
+    unsafe extern "system" fn(PowerShellHandle, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellBeginLiveInvocation =
+    unsafe extern "system" fn(PowerShellHandle, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiLiveInvocationPoll = unsafe extern "system" fn(PowerShellHandle, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiLiveInvocationReadBatch =
+    unsafe extern "system" fn(PowerShellHandle, i64, i32, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiLiveInvocationBatchGetInfo =
+    unsafe extern "system" fn(PowerShellHandle, *mut i64, *mut i64, *mut i64, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiLiveInvocationBatchGetRecordInfo =
+    unsafe extern "system" fn(PowerShellHandle, i32, *mut i32, *mut i64, *mut u32, *mut FfiCallResult) -> i32;
+type FnFfiLiveInvocationBatchCopyRecordTextToUtf8 =
+    unsafe extern "system" fn(PowerShellHandle, i32, *mut u8, i32, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiLiveInvocationRelease = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiLiveInvocationComplete =
     unsafe extern "system" fn(PowerShellHandle, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiInvocationResultRelease = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiInvocationResultGetInfo =
@@ -310,6 +345,21 @@ pub(crate) struct FfiBindings {
     live_object_contract_pack_register_fn: FnFfiLiveObjectContractPackRegister,
     power_shell_session_set_live_object_contract_variable_fn: FnFfiPowerShellSessionSetLiveObjectContractVariable,
     live_object_contract_pack_register_many_fn: FnFfiLiveObjectContractPackRegisterMany,
+    live_stream: Option<FfiLiveStreamBindings>,
+}
+
+#[derive(Clone, Copy)]
+struct FfiLiveStreamBindings {
+    power_shell_begin_live_invocation_fn: FnFfiPowerShellBeginLiveInvocation,
+    live_invocation_poll_fn: FnFfiLiveInvocationPoll,
+    live_invocation_read_batch_fn: FnFfiLiveInvocationReadBatch,
+    live_invocation_batch_get_info_fn: FnFfiLiveInvocationBatchGetInfo,
+    live_invocation_batch_get_record_info_fn: FnFfiLiveInvocationBatchGetRecordInfo,
+    live_invocation_batch_copy_record_text_to_utf8_fn: FnFfiLiveInvocationBatchCopyRecordTextToUtf8,
+    live_invocation_batch_release_fn: FnFfiLiveInvocationRelease,
+    live_invocation_complete_fn: FnFfiLiveInvocationComplete,
+    live_invocation_stop_fn: FnFfiLiveInvocationRelease,
+    live_invocation_release_fn: FnFfiLiveInvocationRelease,
 }
 
 #[derive(Debug)]
@@ -459,6 +509,96 @@ impl FfiBindings {
                 "managed FFI binding table contains a null function pointer",
             )));
         }
+
+        let live_stream = match get_function_pointer(
+            fn_loader,
+            pdcstr!("NativeHost.Bindings, Devolutions.PowerShell.SDK.Bindings"),
+            pdcstr!("Bindings_GetFfiApiV3"),
+        ) {
+            Ok(pointer) => {
+                let get_api_fn: FnBindingsGetFfiApiV3 = unsafe { mem::transmute(pointer) };
+                let api_ptr = unsafe { get_api_fn() };
+                if api_ptr.is_null() {
+                    return Err(Error::IO(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "managed live stream binding table is null",
+                    )));
+                }
+                let api = unsafe { *api_ptr };
+                let fields = [
+                    api.power_shell_begin_live_invocation_fn,
+                    api.live_invocation_poll_fn,
+                    api.live_invocation_read_batch_fn,
+                    api.live_invocation_batch_get_info_fn,
+                    api.live_invocation_batch_get_record_info_fn,
+                    api.live_invocation_batch_copy_record_text_to_utf8_fn,
+                    api.live_invocation_batch_release_fn,
+                    api.live_invocation_complete_fn,
+                    api.live_invocation_stop_fn,
+                    api.live_invocation_release_fn,
+                ];
+                if api.abi_version != FFI_BINDINGS_LIVE_STREAM_ABI_VERSION
+                    || api.size < mem::size_of::<FfiApiV3>()
+                    || api.feature_flags & FFI_FEATURE_LIVE_STREAM_POLLING == 0
+                    || fields.iter().any(|field| field.is_null())
+                {
+                    return Err(Error::IO(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "managed live stream bindings are incompatible",
+                    )));
+                }
+
+                Some(FfiLiveStreamBindings {
+                    power_shell_begin_live_invocation_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiPowerShellBeginLiveInvocation>(
+                            api.power_shell_begin_live_invocation_fn,
+                        )
+                    },
+                    live_invocation_poll_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationPoll>(api.live_invocation_poll_fn)
+                    },
+                    live_invocation_read_batch_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationReadBatch>(
+                            api.live_invocation_read_batch_fn,
+                        )
+                    },
+                    live_invocation_batch_get_info_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationBatchGetInfo>(
+                            api.live_invocation_batch_get_info_fn,
+                        )
+                    },
+                    live_invocation_batch_get_record_info_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationBatchGetRecordInfo>(
+                            api.live_invocation_batch_get_record_info_fn,
+                        )
+                    },
+                    live_invocation_batch_copy_record_text_to_utf8_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationBatchCopyRecordTextToUtf8>(
+                            api.live_invocation_batch_copy_record_text_to_utf8_fn,
+                        )
+                    },
+                    live_invocation_batch_release_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationRelease>(
+                            api.live_invocation_batch_release_fn,
+                        )
+                    },
+                    live_invocation_complete_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationComplete>(
+                            api.live_invocation_complete_fn,
+                        )
+                    },
+                    live_invocation_stop_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationRelease>(api.live_invocation_stop_fn)
+                    },
+                    live_invocation_release_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationRelease>(
+                            api.live_invocation_release_fn,
+                        )
+                    },
+                })
+            }
+            Err(_) => None,
+        };
 
         Ok(Self {
             create_fn: unsafe { mem::transmute::<*const libc::c_void, FnFfiPowerShellCreate>(api.create_fn) },
@@ -647,6 +787,7 @@ impl FfiBindings {
                     api.live_object_contract_pack_register_many_fn,
                 )
             },
+            live_stream,
         })
     }
 
@@ -949,6 +1090,32 @@ impl FfiPowerShell {
         })
     }
 
+    pub fn supports_live_stream_polling(&self) -> bool {
+        self.bindings.live_stream.is_some()
+    }
+
+    pub fn begin_live_invocation(&self) -> Result<FfiLiveInvocation, FfiBindingError> {
+        let live_stream = self.bindings.live_stream.ok_or_else(|| {
+            FfiBindingError::from_status(-17, "managed bindings do not support live stream polling".to_owned())
+        })?;
+        let mut live_handle = std::ptr::null_mut();
+        self.call(|handle, result| unsafe {
+            (live_stream.power_shell_begin_live_invocation_fn)(handle, &mut live_handle, result)
+        })?;
+        if live_handle.is_null() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed live invocation returned a null handle".to_owned(),
+            ));
+        }
+
+        Ok(FfiLiveInvocation {
+            _runtime: Arc::clone(&self._runtime),
+            bindings: self.bindings,
+            handle: Some(live_handle),
+        })
+    }
+
     /// # Safety
     ///
     /// `dispatcher` must remain valid for the lifetime of the configured invocation.
@@ -1075,6 +1242,275 @@ impl Drop for FfiPowerShell {
         let mut call_result = new_call_result(&mut diagnostic);
         unsafe {
             (self.bindings.release_fn)(handle, &mut call_result);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FfiLiveStreamRecord {
+    pub stream: u32,
+    pub sequence: u64,
+    pub text: String,
+    pub flags: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct FfiLiveStreamBatch {
+    pub next_sequence: u64,
+    pub total_record_count: u64,
+    pub lost_record_count: u64,
+    pub records: Vec<FfiLiveStreamRecord>,
+}
+
+pub struct FfiLiveInvocation {
+    _runtime: Arc<HostedRuntime>,
+    bindings: FfiBindings,
+    handle: Option<PowerShellHandle>,
+}
+
+impl FfiLiveInvocation {
+    pub fn poll(&self) -> Result<bool, FfiBindingError> {
+        let live_stream = self.live_stream()?;
+        let mut completed = 0_i32;
+        self.call(|handle, result| unsafe { (live_stream.live_invocation_poll_fn)(handle, &mut completed, result) })?;
+        match completed {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(FfiBindingError::from_status(
+                -6,
+                "managed live invocation returned invalid completion metadata".to_owned(),
+            )),
+        }
+    }
+
+    pub fn read_stream_batch(
+        &self,
+        after_sequence: u64,
+        maximum_records: u32,
+    ) -> Result<FfiLiveStreamBatch, FfiBindingError> {
+        if maximum_records == 0 || maximum_records > 32 || after_sequence > i64::MAX as u64 {
+            return Err(FfiBindingError::from_status(
+                -1,
+                "live stream batch cursor or limit is invalid".to_owned(),
+            ));
+        }
+
+        let live_stream = self.live_stream()?;
+        let mut batch_handle = std::ptr::null_mut();
+        self.call(|handle, result| unsafe {
+            (live_stream.live_invocation_read_batch_fn)(
+                handle,
+                after_sequence as i64,
+                maximum_records as i32,
+                &mut batch_handle,
+                result,
+            )
+        })?;
+        if batch_handle.is_null() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed live invocation returned a null stream batch handle".to_owned(),
+            ));
+        }
+
+        let batch = (|| {
+            let mut next_sequence = 0_i64;
+            let mut total_record_count = 0_i64;
+            let mut lost_record_count = 0_i64;
+            let mut record_count = 0_i32;
+            let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+            let mut call_result = new_call_result(&mut diagnostic);
+            let status = unsafe {
+                (live_stream.live_invocation_batch_get_info_fn)(
+                    batch_handle,
+                    &mut next_sequence,
+                    &mut total_record_count,
+                    &mut lost_record_count,
+                    &mut record_count,
+                    &mut call_result,
+                )
+            };
+            check_status(status, &call_result, &diagnostic)?;
+            let next_sequence = u64::try_from(next_sequence).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed live stream next sequence is invalid".to_owned())
+            })?;
+            let total_record_count = u64::try_from(total_record_count)
+                .map_err(|_| FfiBindingError::from_status(-6, "managed live stream total is invalid".to_owned()))?;
+            let lost_record_count = u64::try_from(lost_record_count).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed live stream loss count is invalid".to_owned())
+            })?;
+            if record_count < 0 || record_count > maximum_records as i32 {
+                return Err(FfiBindingError::from_status(
+                    -6,
+                    "managed live stream record count is invalid".to_owned(),
+                ));
+            }
+
+            let mut records = Vec::with_capacity(record_count as usize);
+            let mut previous_sequence = after_sequence;
+            for index in 0..record_count {
+                let mut stream = 0_i32;
+                let mut sequence = 0_i64;
+                let mut flags = 0_u32;
+                call_result = new_call_result(&mut diagnostic);
+                let status = unsafe {
+                    (live_stream.live_invocation_batch_get_record_info_fn)(
+                        batch_handle,
+                        index,
+                        &mut stream,
+                        &mut sequence,
+                        &mut flags,
+                        &mut call_result,
+                    )
+                };
+                check_status(status, &call_result, &diagnostic)?;
+                let stream = u32::try_from(stream)
+                    .map_err(|_| FfiBindingError::from_status(-6, "managed live stream kind is invalid".to_owned()))?;
+                let sequence = u64::try_from(sequence).map_err(|_| {
+                    FfiBindingError::from_status(-6, "managed live stream sequence is invalid".to_owned())
+                })?;
+                if stream >= 7 || sequence == 0 || sequence <= previous_sequence {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed live stream records are not ordered".to_owned(),
+                    ));
+                }
+                previous_sequence = sequence;
+
+                let mut required_length = 0_i32;
+                call_result = new_call_result(&mut diagnostic);
+                let status = unsafe {
+                    (live_stream.live_invocation_batch_copy_record_text_to_utf8_fn)(
+                        batch_handle,
+                        index,
+                        std::ptr::null_mut(),
+                        0,
+                        &mut required_length,
+                        &mut call_result,
+                    )
+                };
+                if status != STATUS_SUCCESS && status != STATUS_BUFFER_TOO_SMALL {
+                    check_status(status, &call_result, &diagnostic)?;
+                }
+                if required_length < 0 || required_length as usize > 4096 {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed live stream record text exceeds its bound".to_owned(),
+                    ));
+                }
+                let mut text = vec![0_u8; required_length as usize];
+                call_result = new_call_result(&mut diagnostic);
+                let status = unsafe {
+                    (live_stream.live_invocation_batch_copy_record_text_to_utf8_fn)(
+                        batch_handle,
+                        index,
+                        text.as_mut_ptr(),
+                        required_length,
+                        &mut required_length,
+                        &mut call_result,
+                    )
+                };
+                check_status(status, &call_result, &diagnostic)?;
+                if required_length as usize != text.len() {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed live stream record text changed during copy".to_owned(),
+                    ));
+                }
+                records.push(FfiLiveStreamRecord {
+                    stream,
+                    sequence,
+                    text: String::from_utf8(text).map_err(|_| {
+                        FfiBindingError::from_status(-6, "managed live stream text is not UTF-8".to_owned())
+                    })?,
+                    flags,
+                });
+            }
+
+            if next_sequence < after_sequence
+                || next_sequence < previous_sequence
+                || lost_record_count > total_record_count
+            {
+                return Err(FfiBindingError::from_status(
+                    -6,
+                    "managed live stream batch metadata is invalid".to_owned(),
+                ));
+            }
+            Ok(FfiLiveStreamBatch {
+                next_sequence,
+                total_record_count,
+                lost_record_count,
+                records,
+            })
+        })();
+
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let release_status = unsafe { (live_stream.live_invocation_batch_release_fn)(batch_handle, &mut call_result) };
+        match (batch, check_status(release_status, &call_result, &diagnostic)) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    pub fn stop(&self) -> Result<(), FfiBindingError> {
+        let live_stream = self.live_stream()?;
+        self.call(|handle, result| unsafe { (live_stream.live_invocation_stop_fn)(handle, result) })
+    }
+
+    pub fn complete(&self) -> Result<FfiInvocationResult, FfiBindingError> {
+        let live_stream = self.live_stream()?;
+        let mut result_handle = std::ptr::null_mut();
+        self.call(|handle, result| unsafe {
+            (live_stream.live_invocation_complete_fn)(handle, &mut result_handle, result)
+        })?;
+        if result_handle.is_null() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed live invocation returned a null result handle".to_owned(),
+            ));
+        }
+
+        Ok(FfiInvocationResult {
+            _runtime: Arc::clone(&self._runtime),
+            bindings: self.bindings,
+            handle: Some(result_handle),
+        })
+    }
+
+    fn live_stream(&self) -> Result<FfiLiveStreamBindings, FfiBindingError> {
+        self.bindings.live_stream.ok_or_else(|| {
+            FfiBindingError::from_status(-17, "managed bindings do not support live stream polling".to_owned())
+        })
+    }
+
+    fn call<F>(&self, operation: F) -> Result<(), FfiBindingError>
+    where
+        F: FnOnce(PowerShellHandle, *mut FfiCallResult) -> i32,
+    {
+        let handle = self
+            .handle
+            .ok_or_else(|| FfiBindingError::from_status(-4, "Live invocation handle has been released".to_owned()))?;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = operation(handle, &mut call_result);
+        check_status(status, &call_result, &diagnostic)
+    }
+}
+
+impl Drop for FfiLiveInvocation {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let Some(live_stream) = self.bindings.live_stream else {
+            return;
+        };
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        unsafe {
+            (live_stream.live_invocation_release_fn)(handle, &mut call_result);
         }
     }
 }

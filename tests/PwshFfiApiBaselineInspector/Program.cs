@@ -133,6 +133,11 @@ static void ValidateAbiCompatibility(Assembly facadeAssembly, BindingFlags stati
         throw new InvalidOperationException("Facade ABI validation accepted an incompatible ABI version.");
     }
 
+    if (!IsRejected(ensureSupportedAbi, CreateAbiInfo(abiInfoType, allRequiredFeatures, abiVersion: 3, minimumCompatibleAbiVersion: 2)))
+    {
+        throw new InvalidOperationException("Facade ABI validation accepted an incompatible ABI version.");
+    }
+
     if (!IsRejected(ensureSupportedAbi, CreateAbiInfo(abiInfoType, allRequiredFeatures, abiVersion: 2, minimumCompatibleAbiVersion: 3)))
     {
         throw new InvalidOperationException("Facade ABI validation accepted an incompatible minimum ABI version.");

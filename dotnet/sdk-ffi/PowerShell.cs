@@ -30,6 +30,7 @@ public sealed unsafe class PowerShell : IDisposable
     private const ulong LiveObjectProbeFeature = 1UL << 17;
     private const ulong LiveSessionObjectProbeFeature = 1UL << 18;
     private const ulong LiveObjectContractsFeature = 1UL << 19;
+    private const ulong LiveStreamPollingFeature = 1UL << 20;
     private const ulong RequiredFeatures =
         StructuredInvocationErrorsFeature | PerCallDiagnosticsFeature | Utf8SpansFeature |
         ImmutableResultsFeature | TaggedValuesFeature | CommandOptionsFeature | BoundedInputFeature |
@@ -628,6 +629,18 @@ public sealed unsafe class PowerShell : IDisposable
             throw new PowerShellFfiException(
                 PowerShellFfiStatus.UnsupportedCapability,
                 "The selected PowerShell payload does not support registered live object contracts.");
+        }
+    }
+
+    internal static void EnsureLiveStreamPollingSupported()
+    {
+        NativeAbiInfo info = GetAbiInfo();
+        EnsureSupportedAbi(info);
+        if ((info.FeatureFlags & LiveStreamPollingFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell native asset does not support live stream polling.");
         }
     }
 

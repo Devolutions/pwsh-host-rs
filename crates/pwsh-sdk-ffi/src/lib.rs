@@ -1,7 +1,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fs;
 use std::mem;
@@ -14,12 +14,16 @@ use std::sync::MutexGuard;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use pwsh_host::FfiLiveStreamRecord;
 use pwsh_host::{
-    find_pwsh_dir, FfiBindingError, FfiInvocationResult, FfiLiveObjectContractDescriptor, FfiPowerShell,
-    FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue, HostedRuntime, LiveObjectContractPack,
+    find_pwsh_dir, FfiBindingError, FfiInvocationResult, FfiLiveInvocation, FfiLiveObjectContractDescriptor,
+    FfiLiveStreamBatch, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue,
+    HostedRuntime, LiveObjectContractPack,
 };
 
 const ABI_VERSION: u32 = 2;
+const MINIMUM_COMPATIBLE_ABI_VERSION: u32 = 2;
 const FEATURE_STRUCTURED_INVOCATION_ERRORS: u64 = 1;
 const FEATURE_PER_CALL_DIAGNOSTICS: u64 = 1 << 1;
 const FEATURE_UTF8_SPANS: u64 = 1 << 2;
@@ -39,6 +43,7 @@ const FEATURE_CAPABILITY_RPC: u64 = 1 << 16;
 const FEATURE_LIVE_OBJECT_PROBE: u64 = 1 << 17;
 const FEATURE_LIVE_SESSION_OBJECT_PROBE: u64 = 1 << 18;
 const FEATURE_LIVE_OBJECT_CONTRACTS: u64 = 1 << 19;
+const FEATURE_LIVE_STREAM_POLLING: u64 = 1 << 20;
 const CALL_RESULT_DIAGNOSTIC_TRUNCATED: u32 = 1;
 #[cfg(test)]
 const RESULT_RECORD_SCALAR_VALUE_PRESENT: u32 = 1 << 1;
@@ -50,6 +55,9 @@ const MAX_VALUE_PAYLOAD_BYTES: usize = 64 * 1024;
 const MAX_VALUE_CONTAINER_ENTRIES: u32 = 64;
 const MAX_VALUE_DEPTH: u8 = 8;
 const MAX_OPERATION_DIAGNOSTIC_BYTES: usize = 4096;
+const MAX_OPERATION_STREAM_RECORDS: usize = 32;
+const MAX_OPERATION_STREAM_RECORD_BYTES: usize = 4096;
+const OPERATION_STREAM_RECORD_TEXT_TRUNCATED: u32 = 1;
 const MAX_SESSION_CONFIGURATION_ENTRIES: usize = 32;
 const MAX_SESSION_PATH_BYTES: usize = 16 * 1024;
 const SESSION_OPTIONS_PREFIX_SIZE: u32 = mem::size_of::<SessionOptionsPrefix>() as u32;
@@ -98,6 +106,21 @@ pub struct AbiInfo {
     abi_version: u32,
     feature_flags: u64,
     minimum_compatible_abi_version: u32,
+    _reserved: u32,
+}
+
+#[repr(C)]
+pub struct OperationStreamBatchInfo {
+    size: u32,
+    operation_state: u32,
+    terminal_status: i32,
+    flags: u32,
+    next_sequence: u64,
+    total_record_count: u64,
+    dropped_record_count: u64,
+    source_dropped_record_count: u64,
+    lost_record_count: u64,
+    record_count: u32,
     _reserved: u32,
 }
 
@@ -235,10 +258,12 @@ struct State {
     runspace_sessions: HashMap<u64, Arc<RunspaceSession>>,
     results: HashMap<u64, Arc<InvocationResult>>,
     operations: HashMap<u64, Arc<Operation>>,
+    operation_stream_batches: HashMap<u64, Arc<OperationStreamBatch>>,
     capabilities: HashMap<u64, Arc<CapabilityRegistrationState>>,
     next_handle: u64,
     next_result_handle: u64,
     next_operation_handle: u64,
+    next_operation_stream_batch_handle: u64,
     next_runspace_session_handle: u64,
     next_capability_handle: u64,
 }
@@ -311,9 +336,146 @@ struct Operation {
     builder_handle: u64,
     session: Arc<Session>,
     runspace_session: Option<Arc<RunspaceSession>>,
+    supports_live_stream_polling: bool,
     cancellation_requested: AtomicBool,
     capability: Option<CapabilityInvocation>,
     completion: (Mutex<OperationCompletion>, Condvar),
+    stream: Mutex<OperationStreamState>,
+}
+
+#[derive(Clone)]
+struct OperationStreamRecord {
+    stream: u32,
+    sequence: u64,
+    flags: u32,
+    text: String,
+}
+
+struct OperationStreamState {
+    records: VecDeque<OperationStreamRecord>,
+    next_sequence: u64,
+    total_record_count: u64,
+    dropped_record_count: u64,
+    source_dropped_record_count: u64,
+}
+
+struct OperationStreamBatch {
+    state: OperationState,
+    terminal_status: Status,
+    next_sequence: u64,
+    total_record_count: u64,
+    dropped_record_count: u64,
+    source_dropped_record_count: u64,
+    lost_record_count: u64,
+    records: Vec<OperationStreamRecord>,
+}
+
+impl OperationStreamState {
+    fn capture_batch(&mut self, batch: FfiLiveStreamBatch) -> Result<(), (Status, String)> {
+        if batch.total_record_count < self.total_record_count {
+            return Err((
+                Status::ManagedFailure,
+                "managed live stream total record count is not monotonic".to_owned(),
+            ));
+        }
+        self.source_dropped_record_count = self.source_dropped_record_count.saturating_add(batch.lost_record_count);
+        self.total_record_count = batch.total_record_count;
+        for record in batch.records {
+            if record.stream >= 7 || record.sequence == 0 || record.sequence > batch.total_record_count {
+                return Err((
+                    Status::ManagedFailure,
+                    "managed live stream record is invalid".to_owned(),
+                ));
+            }
+            let sequence = self.next_sequence;
+            if sequence == 0 {
+                return Err((
+                    Status::ManagedFailure,
+                    "native live stream sequence exhausted".to_owned(),
+                ));
+            }
+            self.next_sequence = self.next_sequence.checked_add(1).ok_or_else(|| {
+                (
+                    Status::ManagedFailure,
+                    "native live stream sequence exhausted".to_owned(),
+                )
+            })?;
+            if self.records.len() == MAX_OPERATION_STREAM_RECORDS {
+                self.records.pop_front();
+                self.dropped_record_count = self.dropped_record_count.saturating_add(1);
+            }
+            let mut flags = record.flags;
+            let text = bound_operation_stream_text(record.text, &mut flags);
+            self.records.push_back(OperationStreamRecord {
+                stream: record.stream,
+                sequence,
+                flags,
+                text,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn read_batch(
+        &self,
+        state: OperationState,
+        terminal_status: Status,
+        after_sequence: u64,
+        maximum_records: u32,
+    ) -> Result<OperationStreamBatch, (Status, String)> {
+        if maximum_records == 0 || maximum_records as usize > MAX_OPERATION_STREAM_RECORDS {
+            return Err((
+                Status::InvalidArgument,
+                "live stream batch maximum records must be between 1 and 32".to_owned(),
+            ));
+        }
+        let last_sequence = self.next_sequence.saturating_sub(1);
+        if after_sequence > last_sequence {
+            return Err((
+                Status::InvalidArgument,
+                "live stream batch cursor is beyond the latest sequence".to_owned(),
+            ));
+        }
+        let first_sequence = self.records.front().map_or(0, |record| record.sequence);
+        let lost_record_count = if first_sequence != 0 && after_sequence < first_sequence {
+            first_sequence.saturating_sub(after_sequence).saturating_sub(1)
+        } else {
+            0
+        };
+        let records: Vec<_> = self
+            .records
+            .iter()
+            .filter(|record| record.sequence > after_sequence)
+            .take(maximum_records as usize)
+            .cloned()
+            .collect();
+        let next_sequence = records.last().map_or(after_sequence, |record| record.sequence);
+        Ok(OperationStreamBatch {
+            state,
+            terminal_status,
+            next_sequence,
+            total_record_count: self.total_record_count,
+            dropped_record_count: self.dropped_record_count,
+            source_dropped_record_count: self.source_dropped_record_count,
+            lost_record_count,
+            records,
+        })
+    }
+}
+
+fn bound_operation_stream_text(mut text: String, flags: &mut u32) -> String {
+    if text.len() <= MAX_OPERATION_STREAM_RECORD_BYTES {
+        return text;
+    }
+
+    let mut end = MAX_OPERATION_STREAM_RECORD_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    *flags |= OPERATION_STREAM_RECORD_TEXT_TRUNCATED;
+    text
 }
 
 // Normal operations are serialized by SESSION_OPERATION_LOCK. Stop is the sole
@@ -332,6 +494,7 @@ impl Operation {
         Self {
             builder_handle,
             runspace_session: session.runspace_session.clone(),
+            supports_live_stream_polling: session.power_shell.supports_live_stream_polling(),
             session,
             cancellation_requested: AtomicBool::new(false),
             capability,
@@ -344,6 +507,13 @@ impl Operation {
                 }),
                 Condvar::new(),
             ),
+            stream: Mutex::new(OperationStreamState {
+                records: VecDeque::with_capacity(MAX_OPERATION_STREAM_RECORDS),
+                next_sequence: 1,
+                total_record_count: 0,
+                dropped_record_count: 0,
+                source_dropped_record_count: 0,
+            }),
         }
     }
 
@@ -496,6 +666,27 @@ impl Operation {
         )
     }
 
+    fn capture_stream_batch(&self, batch: FfiLiveStreamBatch) -> Result<(), (Status, String)> {
+        let mut stream = self.stream.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        stream.capture_batch(batch)
+    }
+
+    fn stream_batch(
+        &self,
+        after_sequence: u64,
+        maximum_records: u32,
+    ) -> Result<OperationStreamBatch, (Status, String)> {
+        if !self.supports_live_stream_polling {
+            return Err((
+                Status::UnsupportedCapability,
+                "The selected PowerShell payload does not support live stream polling.".to_owned(),
+            ));
+        }
+        let (state, terminal_status, _, _) = self.snapshot();
+        let stream = self.stream.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        stream.read_batch(state, terminal_status, after_sequence, maximum_records)
+    }
+
     fn cancellation_requested(&self) -> bool {
         self.cancellation_requested.load(Ordering::Acquire)
     }
@@ -523,6 +714,7 @@ impl Operation {
     }
 
     fn finish_capability(&self) {
+        set_active_capability(&self.session, None);
         finish_capability(self.capability.as_ref());
     }
 }
@@ -537,10 +729,12 @@ impl Default for State {
             runspace_sessions: HashMap::new(),
             results: HashMap::new(),
             operations: HashMap::new(),
+            operation_stream_batches: HashMap::new(),
             capabilities: HashMap::new(),
             next_handle: 1,
             next_result_handle: 1_u64 << 63,
             next_operation_handle: 1_u64 << 62,
+            next_operation_stream_batch_handle: 1_u64 << 59,
             next_runspace_session_handle: 1_u64 << 61,
             next_capability_handle: 1_u64 << 60,
         }
@@ -1388,6 +1582,36 @@ fn invoke_with_capability(
     }
 }
 
+fn begin_live_invocation_with_capability(
+    session: &Session,
+    capability: Option<CapabilityInvocation>,
+) -> Result<FfiLiveInvocation, FfiBindingError> {
+    if let Some(capability) = capability {
+        set_active_capability(session, Some(capability.clone()));
+        let configured = unsafe {
+            session.power_shell.set_capability_context(
+                capability.registration.handle,
+                capability.invocation_id,
+                capability_dispatch as *const () as *const _,
+            )
+        };
+        if let Err(error) = configured {
+            set_active_capability(session, None);
+            capability.registration.end_invocation(capability.invocation_id);
+            return Err(error);
+        }
+        let invocation = session.power_shell.begin_live_invocation();
+        if invocation.is_err() {
+            let _ = unsafe { session.power_shell.set_capability_context(0, 0, std::ptr::null()) };
+            set_active_capability(session, None);
+            capability.registration.end_invocation(capability.invocation_id);
+        }
+        invocation
+    } else {
+        session.power_shell.begin_live_invocation()
+    }
+}
+
 fn status_from_callback(value: i32) -> Status {
     match value {
         0 => Status::Success,
@@ -1655,6 +1879,12 @@ where
         Ok(result) => result,
         Err(status) => return status.value(),
     };
+    #[cfg(test)]
+    let _test_call_lock = if !allow_active_pipeline && pipeline_execution_depth() == 0 {
+        Some(TestFfiCallScope::enter())
+    } else {
+        None
+    };
     if CAPABILITY_CALLBACK_DEPTH.with(|depth| depth.get() != 0) {
         return complete_call_result(
             result,
@@ -1673,13 +1903,6 @@ where
             "PowerShell FFI calls are not permitted from code invoked by an active PowerShell pipeline.",
         );
     }
-    #[cfg(test)]
-    let _test_call_lock = if !allow_active_pipeline && pipeline_execution_depth() == 0 {
-        Some(TestFfiCallScope::enter())
-    } else {
-        None
-    };
-
     match catch_unwind(AssertUnwindSafe(operation)) {
         Ok(Ok(status)) => complete_call_result(result, status, ""),
         Ok(Err((status, diagnostic))) => complete_call_result(result, status, &diagnostic),
@@ -1832,6 +2055,136 @@ fn run_operation(operation: Arc<Operation>) {
         return;
     }
 
+    if !operation.session.power_shell.supports_live_stream_polling() {
+        run_legacy_operation(operation);
+        return;
+    }
+
+    let _operation_lock = SESSION_OPERATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _execution_scope = InvocationExecutionScope::enter();
+    let invocation = if operation.cancellation_requested() {
+        None
+    } else {
+        Some(begin_live_invocation_with_capability(
+            &operation.session,
+            operation.capability.clone(),
+        ))
+    };
+
+    if operation.cancellation_requested() {
+        drop(invocation);
+        operation.finish_capability();
+        operation.complete(
+            OperationState::Cancelled,
+            Status::OperationCancelled,
+            "PowerShell async operation was cancelled; no result is available.".to_owned(),
+            None,
+        );
+        return;
+    }
+
+    match invocation {
+        Some(Ok(live_invocation)) => {
+            let mut source_cursor = 0_u64;
+            let mut stream_failure = None;
+            loop {
+                if operation.cancellation_requested() {
+                    let _ = live_invocation.stop();
+                }
+
+                match live_invocation.read_stream_batch(source_cursor, MAX_OPERATION_STREAM_RECORDS as u32) {
+                    Ok(batch) => {
+                        source_cursor = batch.next_sequence;
+                        if let Err(error) = operation.capture_stream_batch(batch) {
+                            stream_failure = Some(error);
+                            let _ = live_invocation.stop();
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        stream_failure = Some(managed_failure(error));
+                        let _ = live_invocation.stop();
+                        break;
+                    }
+                }
+
+                match live_invocation.poll() {
+                    Ok(true) => break,
+                    Ok(false) => std::thread::sleep(Duration::from_millis(5)),
+                    Err(error) => {
+                        stream_failure = Some(managed_failure(error));
+                        let _ = live_invocation.stop();
+                        break;
+                    }
+                }
+            }
+
+            if stream_failure.is_none() {
+                match live_invocation.read_stream_batch(source_cursor, MAX_OPERATION_STREAM_RECORDS as u32) {
+                    Ok(batch) => {
+                        source_cursor = batch.next_sequence;
+                        if let Err(error) = operation.capture_stream_batch(batch) {
+                            stream_failure = Some(error);
+                        }
+                    }
+                    Err(error) => stream_failure = Some(managed_failure(error)),
+                }
+            }
+
+            let completed = live_invocation.complete();
+            if stream_failure.is_none() {
+                match live_invocation.read_stream_batch(source_cursor, MAX_OPERATION_STREAM_RECORDS as u32) {
+                    Ok(batch) => {
+                        if let Err(error) = operation.capture_stream_batch(batch) {
+                            stream_failure = Some(error);
+                        }
+                    }
+                    Err(error) => stream_failure = Some(managed_failure(error)),
+                }
+            }
+            let completion = if operation.cancellation_requested() {
+                (
+                    OperationState::Cancelled,
+                    Status::OperationCancelled,
+                    "PowerShell async operation was cancelled; no result is available.".to_owned(),
+                    None,
+                )
+            } else if let Some((status, diagnostic)) = stream_failure {
+                (OperationState::Failed, status, diagnostic, None)
+            } else {
+                match completed {
+                    Ok(result) => (
+                        OperationState::Completed,
+                        Status::Success,
+                        String::new(),
+                        Some(Arc::new(InvocationResult { result })),
+                    ),
+                    Err(error) => {
+                        let (status, diagnostic) = managed_failure(error);
+                        (OperationState::Failed, status, diagnostic, None)
+                    }
+                }
+            };
+            drop(live_invocation);
+            operation.complete(completion.0, completion.1, completion.2, completion.3);
+        }
+        Some(Err(error)) => {
+            let (status, diagnostic) = managed_failure(error);
+            operation.complete(OperationState::Failed, status, diagnostic, None);
+        }
+        None => operation.complete(
+            OperationState::Cancelled,
+            Status::OperationCancelled,
+            "PowerShell async operation was cancelled before invocation started.".to_owned(),
+            None,
+        ),
+    }
+    operation.finish_capability();
+}
+
+fn run_legacy_operation(operation: Arc<Operation>) {
     let invocation = {
         let _operation_lock = SESSION_OPERATION_LOCK
             .lock()
@@ -2097,6 +2450,117 @@ fn operation_result(handle: u64) -> Result<u64, (Status, String)> {
         .unwrap_or(1_u64 << 63);
     state.results.insert(result_handle, invocation_result);
     Ok(result_handle)
+}
+
+fn read_operation_stream_batch(
+    handle: u64,
+    after_sequence: u64,
+    maximum_records: u32,
+) -> Result<u64, (Status, String)> {
+    let operation = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.operations.get(&handle).cloned().ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "PowerShell operation handle is invalid".to_owned(),
+            )
+        })?
+    };
+    let batch = Arc::new(operation.stream_batch(after_sequence, maximum_records)?);
+    let mut state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let batch_handle = state.next_operation_stream_batch_handle;
+    state.next_operation_stream_batch_handle = state
+        .next_operation_stream_batch_handle
+        .checked_add(1)
+        .filter(|value| *value != 0)
+        .unwrap_or(1_u64 << 59);
+    state.operation_stream_batches.insert(batch_handle, batch);
+    Ok(batch_handle)
+}
+
+fn with_operation_stream_batch<F>(handle: u64, operation: F) -> Result<Status, (Status, String)>
+where
+    F: FnOnce(&OperationStreamBatch) -> Result<Status, (Status, String)>,
+{
+    let batch = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.operation_stream_batches.get(&handle).cloned().ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "PowerShell operation stream batch handle is invalid".to_owned(),
+            )
+        })?
+    };
+    operation(&batch)
+}
+
+fn release_operation_stream_batch(handle: u64) -> Result<Status, (Status, String)> {
+    let mut state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    state
+        .operation_stream_batches
+        .remove(&handle)
+        .map(|_| Status::Success)
+        .ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "PowerShell operation stream batch handle is invalid".to_owned(),
+            )
+        })
+}
+
+fn write_operation_stream_batch_info(
+    batch: &OperationStreamBatch,
+    info: *mut OperationStreamBatchInfo,
+) -> Result<Status, (Status, String)> {
+    if info.is_null() || unsafe { (*info).size } < mem::size_of::<OperationStreamBatchInfo>() as u32 {
+        return Err((
+            Status::InvalidArgument,
+            "PowerShell operation stream batch info output is null or too small".to_owned(),
+        ));
+    }
+    let mut flags = 0_u32;
+    if batch.lost_record_count != 0 {
+        flags |= 1;
+    }
+    if batch.dropped_record_count != 0
+        || batch.source_dropped_record_count != 0
+        || batch
+            .records
+            .iter()
+            .any(|record| record.flags & OPERATION_STREAM_RECORD_TEXT_TRUNCATED != 0)
+    {
+        flags |= 1 << 1;
+    }
+    unsafe {
+        (*info).operation_state = batch.state as u32;
+        (*info).terminal_status = batch.terminal_status.value();
+        (*info).flags = flags;
+        (*info).next_sequence = batch.next_sequence;
+        (*info).total_record_count = batch.total_record_count;
+        (*info).dropped_record_count = batch.dropped_record_count;
+        (*info).source_dropped_record_count = batch.source_dropped_record_count;
+        (*info).lost_record_count = batch.lost_record_count;
+        (*info).record_count = u32::try_from(batch.records.len()).map_err(|_| {
+            (
+                Status::ManagedFailure,
+                "PowerShell operation stream batch exceeds its fixed record bound".to_owned(),
+            )
+        })?;
+        (*info)._reserved = 0;
+    }
+    Ok(Status::Success)
+}
+
+fn operation_stream_batch_record(
+    batch: &OperationStreamBatch,
+    record_index: u32,
+) -> Result<&OperationStreamRecord, (Status, String)> {
+    batch.records.get(record_index as usize).ok_or_else(|| {
+        (
+            Status::InvalidArgument,
+            "PowerShell operation stream batch record index is invalid".to_owned(),
+        )
+    })
 }
 
 fn stop_session_operation(handle: u64) -> Result<Status, (Status, String)> {
@@ -3143,6 +3607,7 @@ fn feature_flags() -> u64 {
         | FEATURE_LIVE_OBJECT_PROBE
         | FEATURE_LIVE_SESSION_OBJECT_PROBE
         | FEATURE_LIVE_OBJECT_CONTRACTS
+        | FEATURE_LIVE_STREAM_POLLING
 }
 
 fn create_live_object_probe(initial_count: i64) -> Result<*mut std::ffi::c_void, (Status, String)> {
@@ -3215,7 +3680,7 @@ pub unsafe extern "C" fn multi_pwsh_get_abi_info(info: *mut AbiInfo) -> i32 {
 
     (*info).abi_version = ABI_VERSION;
     (*info).feature_flags = feature_flags();
-    (*info).minimum_compatible_abi_version = ABI_VERSION;
+    (*info).minimum_compatible_abi_version = MINIMUM_COMPATIBLE_ABI_VERSION;
     (*info)._reserved = 0;
     Status::Success.value()
 }
@@ -4201,6 +4666,94 @@ pub unsafe extern "C" fn multi_pwsh_operation_get_result(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_operation_read_stream_batch(
+    handle: u64,
+    after_sequence: u64,
+    maximum_records: u32,
+    batch_handle: *mut u64,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        if batch_handle.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "PowerShell operation stream batch handle output pointer is null".to_owned(),
+            ));
+        }
+        *batch_handle = read_operation_stream_batch(handle, after_sequence, maximum_records)?;
+        Ok(Status::Success)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_operation_stream_batch_get_info(
+    batch_handle: u64,
+    info: *mut OperationStreamBatchInfo,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        with_operation_stream_batch(batch_handle, |batch| write_operation_stream_batch_info(batch, info))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_operation_stream_batch_get_record_info(
+    batch_handle: u64,
+    record_index: u32,
+    stream: *mut u32,
+    sequence: *mut u64,
+    flags: *mut u32,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        if stream.is_null() || sequence.is_null() || flags.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "PowerShell operation stream batch record output pointer is null".to_owned(),
+            ));
+        }
+        with_operation_stream_batch(batch_handle, |batch| {
+            let record = operation_stream_batch_record(batch, record_index)?;
+            *stream = record.stream;
+            *sequence = record.sequence;
+            *flags = record.flags;
+            Ok(Status::Success)
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_operation_stream_batch_copy_record_text_utf8(
+    batch_handle: u64,
+    record_index: u32,
+    buffer: *mut u8,
+    buffer_len: usize,
+    required_len: *mut usize,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        with_operation_stream_batch(batch_handle, |batch| {
+            let record = operation_stream_batch_record(batch, record_index)?;
+            if record.text.len() > MAX_OPERATION_STREAM_RECORD_BYTES {
+                return Err((
+                    Status::ManagedFailure,
+                    "PowerShell operation stream record exceeds its fixed text bound".to_owned(),
+                ));
+            }
+            match unsafe { write_utf8(buffer, buffer_len, required_len, &record.text) } {
+                Status::Success => Ok(Status::Success),
+                status => Err((status, "PowerShell operation stream text buffer is invalid".to_owned())),
+            }
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_operation_stream_batch_release(batch_handle: u64, result: *mut CallResult) -> i32 {
+    v2_call_allow_active_pipeline(result, || release_operation_stream_batch(batch_handle))
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_session_create(
     options: *const SessionOptions,
     session_handle: *mut u64,
@@ -4537,6 +5090,80 @@ mod tests {
         }
     }
 
+    #[test]
+    fn live_stream_batches_enforce_cursor_limit_release_and_terminal_metadata() {
+        let mut stream = OperationStreamState {
+            records: VecDeque::with_capacity(MAX_OPERATION_STREAM_RECORDS),
+            next_sequence: 1,
+            total_record_count: 0,
+            dropped_record_count: 0,
+            source_dropped_record_count: 0,
+        };
+        for source_sequence in 1..=33_u64 {
+            stream
+                .capture_batch(FfiLiveStreamBatch {
+                    next_sequence: source_sequence,
+                    total_record_count: source_sequence,
+                    lost_record_count: 0,
+                    records: vec![FfiLiveStreamRecord {
+                        stream: 0,
+                        sequence: source_sequence,
+                        text: source_sequence.to_string(),
+                        flags: 0,
+                    }],
+                })
+                .unwrap();
+        }
+
+        let batch = stream
+            .read_batch(OperationState::Cancelled, Status::OperationCancelled, 0, 2)
+            .unwrap();
+        assert_eq!(batch.records.len(), 2);
+        assert_eq!(batch.records[0].sequence, 2);
+        assert_eq!(batch.records[1].sequence, 3);
+        assert_eq!(batch.next_sequence, 3);
+        assert_eq!(batch.lost_record_count, 1);
+        assert_eq!(batch.dropped_record_count, 1);
+        assert_eq!(batch.state, OperationState::Cancelled);
+        assert_eq!(batch.terminal_status, Status::OperationCancelled);
+        assert!(matches!(
+            stream.read_batch(OperationState::Running, Status::Success, 3, 0),
+            Err((Status::InvalidArgument, _))
+        ));
+        assert!(matches!(
+            stream.read_batch(OperationState::Running, Status::Success, 34, 1),
+            Err((Status::InvalidArgument, _))
+        ));
+
+        let _scope = TEST_PIPELINE_SCOPE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let handle = u64::MAX - 91;
+        state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .operation_stream_batches
+            .insert(handle, Arc::new(batch));
+        assert_eq!(release_operation_stream_batch(handle), Ok(Status::Success));
+        assert_eq!(
+            release_operation_stream_batch(handle),
+            Err((
+                Status::InvalidHandle,
+                "PowerShell operation stream batch handle is invalid".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn live_stream_record_text_is_utf8_bounded() {
+        let mut flags = 0;
+        let text = bound_operation_stream_text("é".repeat(MAX_OPERATION_STREAM_RECORD_BYTES), &mut flags);
+
+        assert!(text.len() <= MAX_OPERATION_STREAM_RECORD_BYTES);
+        assert!(std::str::from_utf8(text.as_bytes()).is_ok());
+        assert_ne!(flags & OPERATION_STREAM_RECORD_TEXT_TRUNCATED, 0);
+    }
+
     fn append_u32(output: &mut Vec<u8>, value: u32) {
         output.extend_from_slice(&value.to_le_bytes());
     }
@@ -4804,9 +5431,11 @@ mod tests {
             | FEATURE_CAPABILITY_RPC
             | FEATURE_LIVE_OBJECT_PROBE
             | FEATURE_LIVE_SESSION_OBJECT_PROBE
-            | FEATURE_LIVE_OBJECT_CONTRACTS;
+            | FEATURE_LIVE_OBJECT_CONTRACTS
+            | FEATURE_LIVE_STREAM_POLLING;
 
         assert_eq!(ABI_VERSION, 2);
+        assert_eq!(MINIMUM_COMPATIBLE_ABI_VERSION, 2);
         assert_eq!(feature_flags(), REQUIRED_FEATURES);
 
         let mut abi_info = AbiInfo {
@@ -4821,7 +5450,7 @@ mod tests {
             Status::Success.value()
         );
         assert_eq!(abi_info.abi_version, ABI_VERSION);
-        assert_eq!(abi_info.minimum_compatible_abi_version, ABI_VERSION);
+        assert_eq!(abi_info.minimum_compatible_abi_version, MINIMUM_COMPATIBLE_ABI_VERSION);
         assert_eq!(abi_info.feature_flags, REQUIRED_FEATURES);
         assert_eq!(abi_info._reserved, 0);
 
@@ -5055,7 +5684,7 @@ mod tests {
             Status::Success.value()
         );
         assert_eq!(abi_info.abi_version, ABI_VERSION);
-        assert_eq!(abi_info.minimum_compatible_abi_version, ABI_VERSION);
+        assert_eq!(abi_info.minimum_compatible_abi_version, MINIMUM_COMPATIBLE_ABI_VERSION);
         assert_ne!(abi_info.feature_flags & FEATURE_PER_CALL_DIAGNOSTICS, 0);
         assert_ne!(abi_info.feature_flags & FEATURE_UTF8_SPANS, 0);
         let payload_span = Utf8Span {
