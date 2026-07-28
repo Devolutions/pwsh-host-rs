@@ -22,7 +22,7 @@ use pwsh_host::{
     HostedRuntime, LiveObjectContractPack,
 };
 
-const ABI_VERSION: u32 = 3;
+const ABI_VERSION: u32 = 2;
 const MINIMUM_COMPATIBLE_ABI_VERSION: u32 = 2;
 const FEATURE_STRUCTURED_INVOCATION_ERRORS: u64 = 1;
 const FEATURE_PER_CALL_DIAGNOSTICS: u64 = 1 << 1;
@@ -5425,7 +5425,7 @@ mod tests {
             | FEATURE_LIVE_OBJECT_CONTRACTS
             | FEATURE_LIVE_STREAM_POLLING;
 
-        assert_eq!(ABI_VERSION, 3);
+        assert_eq!(ABI_VERSION, 2);
         assert_eq!(MINIMUM_COMPATIBLE_ABI_VERSION, 2);
         assert_eq!(feature_flags(), REQUIRED_FEATURES);
 

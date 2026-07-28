@@ -134,11 +134,9 @@ A session-affine dispatcher is required before supporting that category.
   `multi_pwsh_get_abi_info`; the managed package and native asset ship together
   and use the unversioned `multi_pwsh_*` exports. The injected managed function
   table independently reports its compatibility version.
-- ABI v3 is additive: it reports a minimum compatible ABI of v2. The facade
-  continues to activate a v2 native asset for the v2 surface, while
-  `ReadStreamBatch` is enabled only when ABI v3 and the
-  `LIVE_STREAM_POLLING` feature bit are both present. This prevents an optional
-  stream-polling call from becoming a required v2 export.
+- The public native ABI remains v2. `ReadStreamBatch` is enabled only when the
+  `LIVE_STREAM_POLLING` feature bit is present, so consumers can reject a native
+  asset that lacks polling before calling its additive export.
 - The supported ABI uses sized, caller-owned `multi_pwsh_call_result` structures. Each operation
   returns its own bounded UTF-8 diagnostic and truncation metadata, so concurrent
   calls never read a process-global error slot. `multi_pwsh_utf8_span` permits
@@ -226,7 +224,7 @@ pipeline until the operation reaches a terminal state. It is not a managed
   until terminal completion. Builder `Stop` targets its active operation and
   has the same cancellation-wins semantics.
 
-### Live stream polling (ABI v3)
+### Live stream polling
 
 `PowerShellInvocationOperation.ReadStreamBatch(afterSequence, maximumRecords)`
 is a polling-only, copied-record view of a running operation. `afterSequence`

@@ -389,7 +389,7 @@ Assert-Sequence -Actual $rustLiveApiTableFields -Expected @(
     'live_invocation_release_fn'
 ) -Description 'Rust FfiApiV3 slot order'
 if (-not $rustBindingsSource.Contains('Err(_) => None')) {
-    throw 'Rust bindings must treat the ABI v3 managed table as optional for ABI v2 compatibility.'
+    throw 'Rust bindings must treat the live-stream managed table as optional for payload compatibility.'
 }
 
 $rustBindingsTableMatch = [regex]::Match($rustBindingsSource, '(?s)pub\(crate\)\s+struct\s+FfiBindings\s*\{(?<body>.*?)\n\s*\}')

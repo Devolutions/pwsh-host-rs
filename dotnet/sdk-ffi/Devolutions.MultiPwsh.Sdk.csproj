@@ -12,7 +12,7 @@
     <RepositoryType>git</RepositoryType>
     <PackageTags>PowerShell;NativeAOT;FFI;experimental</PackageTags>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
-    <PackageReleaseNotes>Native deployment is opt-in. PowerShell is not included; activation selects pwsh from PATH by default or accepts an explicit payload directory. ABI v3 adds bounded copied live stream polling while retaining ABI v2 compatibility for the existing surface. Windows x64 is the current end-to-end validated runtime.</PackageReleaseNotes>
+    <PackageReleaseNotes>Native deployment is opt-in. PowerShell is not included; activation selects pwsh from PATH by default or accepts an explicit payload directory. ABI v2 adds feature-gated bounded copied live stream polling. Windows x64 is the current end-to-end validated runtime.</PackageReleaseNotes>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
     <EnableAotAnalyzer>true</EnableAotAnalyzer>

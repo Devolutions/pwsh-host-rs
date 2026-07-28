@@ -47,12 +47,11 @@ containment remains effective at the ABI boundary.
 The SDK NuGet version and the native DLL `FileVersion`/`ProductVersion` match
 the `multi-pwsh` CLI release version.
 
-The facade supports native ABI v2 for the existing API surface and native ABI
-v3 for live stream polling. ABI v3 reports v2 as its minimum compatible ABI,
-so a v2 native asset remains usable for existing calls; attempting
-`ReadStreamBatch` against it fails with `UnsupportedCapability`. Use matching
-0.17.0 package and native assets to enable polling. Its `SafeHandle` wrapper
-keeps a native handle alive for each P/Invoke call, including concurrent
+The facade requires native ABI v2. `ReadStreamBatch` is independently gated by
+the `LIVE_STREAM_POLLING` feature bit, so a native asset that lacks polling
+returns `UnsupportedCapability` before its additive export is called. Use
+matching 0.17.0 package and native assets to enable polling. Its `SafeHandle`
+wrapper keeps a native handle alive for each P/Invoke call, including concurrent
 disposal races. Empty strings are valid UTF-8 inputs; embedded NUL characters
 are rejected.
 

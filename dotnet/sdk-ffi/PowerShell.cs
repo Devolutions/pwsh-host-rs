@@ -8,8 +8,7 @@ namespace Devolutions.PowerShell.Ffi;
 
 public sealed unsafe class PowerShell : IDisposable
 {
-    private const uint MinimumSupportedAbiVersion = 2;
-    private const uint FacadeAbiVersion = 3;
+    private const uint RequiredAbiVersion = 2;
     private const int Success = (int)PowerShellFfiStatus.Success;
     private const int BufferTooSmall = (int)PowerShellFfiStatus.BufferTooSmall;
     private const ulong StructuredInvocationErrorsFeature = 1UL << 0;
@@ -637,7 +636,7 @@ public sealed unsafe class PowerShell : IDisposable
     {
         NativeAbiInfo info = GetAbiInfo();
         EnsureSupportedAbi(info);
-        if (info.AbiVersion < FacadeAbiVersion || (info.FeatureFlags & LiveStreamPollingFeature) == 0)
+        if ((info.FeatureFlags & LiveStreamPollingFeature) == 0)
         {
             throw new PowerShellFfiException(
                 PowerShellFfiStatus.UnsupportedCapability,
@@ -647,13 +646,12 @@ public sealed unsafe class PowerShell : IDisposable
 
     private static void EnsureSupportedAbi(NativeAbiInfo info)
     {
-        if (info.AbiVersion < MinimumSupportedAbiVersion ||
-            info.MinimumCompatibleAbiVersion > info.AbiVersion ||
-            info.MinimumCompatibleAbiVersion > FacadeAbiVersion ||
+        if (info.AbiVersion != RequiredAbiVersion ||
+            info.MinimumCompatibleAbiVersion > RequiredAbiVersion ||
             (info.FeatureFlags & RequiredFeatures) != RequiredFeatures)
         {
             throw new NotSupportedException(
-                $"Native PowerShell FFI ABI {info.AbiVersion} does not support facade ABI {FacadeAbiVersion} structured errors, diagnostics, UTF-8, value, command, input, result, async operation, and session features.");
+                $"Native PowerShell FFI ABI {info.AbiVersion} does not support facade ABI {RequiredAbiVersion} structured errors, diagnostics, UTF-8, value, command, input, result, async operation, and session features.");
         }
     }
 
