@@ -3617,17 +3617,18 @@ namespace NativeHost
                 long currentLiveSequence = nextLiveSequence == long.MaxValue
                     ? long.MaxValue
                     : nextLiveSequence++;
-                uint flags = projectionFlags;
+                uint snapshotFlags = projectionFlags;
                 if (fieldsTruncated)
                 {
-                    flags |= FfiRecordFieldsTruncated;
+                    snapshotFlags |= FfiRecordFieldsTruncated;
                 }
                 if (liveRecords.Count == LiveRecordCapacity)
                 {
                     liveRecords.Dequeue();
                 }
-                string liveDisplayText = BoundLiveDisplayText(fields[0], ref flags);
-                liveRecords.Enqueue(new FfiLiveStreamRecord(streamIndex, currentLiveSequence, liveDisplayText, flags));
+                uint liveFlags = 0;
+                string liveDisplayText = BoundLiveDisplayText(fields[0], ref liveFlags);
+                liveRecords.Enqueue(new FfiLiveStreamRecord(streamIndex, currentLiveSequence, liveDisplayText, liveFlags));
                 List<FfiStreamRecord> records = streams[streamIndex];
                 if (records.Count == FfiMaxStreamRecords)
                 {
@@ -3640,7 +3641,7 @@ namespace NativeHost
                 records.Add(new FfiStreamRecord(
                     currentSequence,
                     fields,
-                    flags,
+                    snapshotFlags,
                     scalarValue,
                     propertyBagValue,
                     errorTargetValue,
@@ -4460,6 +4461,7 @@ namespace NativeHost
 
             public void Dispose()
             {
+                IAsyncResult invocation;
                 lock (gate)
                 {
                     if (disposed)
@@ -4471,13 +4473,19 @@ namespace NativeHost
                     if (asyncResult is null)
                     {
                         Cleanup();
+                        return;
                     }
+
+                    invocation = asyncResult;
                 }
 
-                if (!IsCompleted)
+                if (!invocation.IsCompleted)
                 {
                     Stop();
                 }
+
+                invocation.AsyncWaitHandle.WaitOne();
+                _ = Complete();
             }
 
             private void AddError(int index)

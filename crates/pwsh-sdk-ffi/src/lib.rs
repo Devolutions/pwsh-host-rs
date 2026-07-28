@@ -336,6 +336,7 @@ struct Operation {
     builder_handle: u64,
     session: Arc<Session>,
     runspace_session: Option<Arc<RunspaceSession>>,
+    supports_live_stream_polling: bool,
     cancellation_requested: AtomicBool,
     capability: Option<CapabilityInvocation>,
     completion: (Mutex<OperationCompletion>, Condvar),
@@ -493,6 +494,7 @@ impl Operation {
         Self {
             builder_handle,
             runspace_session: session.runspace_session.clone(),
+            supports_live_stream_polling: session.power_shell.supports_live_stream_polling(),
             session,
             cancellation_requested: AtomicBool::new(false),
             capability,
@@ -674,6 +676,12 @@ impl Operation {
         after_sequence: u64,
         maximum_records: u32,
     ) -> Result<OperationStreamBatch, (Status, String)> {
+        if !self.supports_live_stream_polling {
+            return Err((
+                Status::UnsupportedCapability,
+                "The selected PowerShell payload does not support live stream polling.".to_owned(),
+            ));
+        }
         let (state, terminal_status, _, _) = self.snapshot();
         let stream = self.stream.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         stream.read_batch(state, terminal_status, after_sequence, maximum_records)
@@ -1592,10 +1600,7 @@ fn begin_live_invocation_with_capability(
             capability.registration.end_invocation(capability.invocation_id);
             return Err(error);
         }
-        let invocation = {
-            let _execution_scope = InvocationExecutionScope::enter();
-            session.power_shell.begin_live_invocation()
-        };
+        let invocation = session.power_shell.begin_live_invocation();
         if invocation.is_err() {
             let _ = unsafe { session.power_shell.set_capability_context(0, 0, std::ptr::null()) };
             set_active_capability(session, None);
@@ -1603,7 +1608,6 @@ fn begin_live_invocation_with_capability(
         }
         invocation
     } else {
-        let _execution_scope = InvocationExecutionScope::enter();
         session.power_shell.begin_live_invocation()
     }
 }
@@ -1875,6 +1879,12 @@ where
         Ok(result) => result,
         Err(status) => return status.value(),
     };
+    #[cfg(test)]
+    let _test_call_lock = if !allow_active_pipeline && pipeline_execution_depth() == 0 {
+        Some(TestFfiCallScope::enter())
+    } else {
+        None
+    };
     if CAPABILITY_CALLBACK_DEPTH.with(|depth| depth.get() != 0) {
         return complete_call_result(
             result,
@@ -1893,13 +1903,6 @@ where
             "PowerShell FFI calls are not permitted from code invoked by an active PowerShell pipeline.",
         );
     }
-    #[cfg(test)]
-    let _test_call_lock = if !allow_active_pipeline && pipeline_execution_depth() == 0 {
-        Some(TestFfiCallScope::enter())
-    } else {
-        None
-    };
-
     match catch_unwind(AssertUnwindSafe(operation)) {
         Ok(Ok(status)) => complete_call_result(result, status, ""),
         Ok(Err((status, diagnostic))) => complete_call_result(result, status, &diagnostic),
@@ -2060,6 +2063,7 @@ fn run_operation(operation: Arc<Operation>) {
     let _operation_lock = SESSION_OPERATION_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _execution_scope = InvocationExecutionScope::enter();
     let invocation = if operation.cancellation_requested() {
         None
     } else {
@@ -2070,6 +2074,7 @@ fn run_operation(operation: Arc<Operation>) {
     };
 
     if operation.cancellation_requested() {
+        drop(invocation);
         operation.finish_capability();
         operation.complete(
             OperationState::Cancelled,
@@ -2095,11 +2100,13 @@ fn run_operation(operation: Arc<Operation>) {
                         if let Err(error) = operation.capture_stream_batch(batch) {
                             stream_failure = Some(error);
                             let _ = live_invocation.stop();
+                            break;
                         }
                     }
                     Err(error) => {
                         stream_failure = Some(managed_failure(error));
                         let _ = live_invocation.stop();
+                        break;
                     }
                 }
 
@@ -2109,7 +2116,7 @@ fn run_operation(operation: Arc<Operation>) {
                     Err(error) => {
                         stream_failure = Some(managed_failure(error));
                         let _ = live_invocation.stop();
-                        std::thread::sleep(Duration::from_millis(5));
+                        break;
                     }
                 }
             }
@@ -2137,18 +2144,18 @@ fn run_operation(operation: Arc<Operation>) {
                     Err(error) => stream_failure = Some(managed_failure(error)),
                 }
             }
-            if operation.cancellation_requested() {
-                operation.complete(
+            let completion = if operation.cancellation_requested() {
+                (
                     OperationState::Cancelled,
                     Status::OperationCancelled,
                     "PowerShell async operation was cancelled; no result is available.".to_owned(),
                     None,
-                );
+                )
             } else if let Some((status, diagnostic)) = stream_failure {
-                operation.complete(OperationState::Failed, status, diagnostic, None);
+                (OperationState::Failed, status, diagnostic, None)
             } else {
                 match completed {
-                    Ok(result) => operation.complete(
+                    Ok(result) => (
                         OperationState::Completed,
                         Status::Success,
                         String::new(),
@@ -2156,10 +2163,12 @@ fn run_operation(operation: Arc<Operation>) {
                     ),
                     Err(error) => {
                         let (status, diagnostic) = managed_failure(error);
-                        operation.complete(OperationState::Failed, status, diagnostic, None);
+                        (OperationState::Failed, status, diagnostic, None)
                     }
                 }
-            }
+            };
+            drop(live_invocation);
+            operation.complete(completion.0, completion.1, completion.2, completion.3);
         }
         Some(Err(error)) => {
             let (status, diagnostic) = managed_failure(error);

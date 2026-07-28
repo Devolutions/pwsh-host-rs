@@ -220,7 +220,7 @@ using (PowerShell liveStream = PowerShell.Create())
 using (PowerShellInvocationOperation operation = liveStream
     .AddScript(@"
         Write-Output 'nativeaot-live-before'
-        Write-Error -Message 'nativeaot-live-error'
+        Write-Error -Message 'nativeaot-live-error' -TargetObject ('x' * 5000)
         Write-Progress -Activity 'nativeaot-live-progress' -Status 'running' -PercentComplete 50
         Start-Sleep -Milliseconds 300
         Write-Output 'nativeaot-live-after'
@@ -269,6 +269,7 @@ using (PowerShellInvocationOperation operation = liveStream
         records[0].Stream != PowerShellStreamKind.Output ||
         records[0].DisplayText != "nativeaot-live-before" ||
         records[1].Stream != PowerShellStreamKind.Error ||
+        records[1].IsTruncated ||
         !records[1].DisplayText.Contains("nativeaot-live-error", StringComparison.Ordinal) ||
         records[2].Stream != PowerShellStreamKind.Progress ||
         records[3].Stream != PowerShellStreamKind.Output ||
