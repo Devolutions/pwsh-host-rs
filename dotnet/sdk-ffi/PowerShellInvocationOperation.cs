@@ -6,6 +6,11 @@ namespace Devolutions.PowerShell.Ffi;
 public sealed class PowerShellInvocationOperation : IDisposable
 {
     private const uint InfiniteTimeoutMilliseconds = uint.MaxValue;
+    private const int MaximumStreamBatchRecords = 32;
+    private const uint StreamBatchCursorLost = 1;
+    private const uint StreamBatchTruncated = 1 << 1;
+    private const uint StreamRecordFieldsTruncated = 1;
+    private const nuint MaximumStreamRecordUtf8Bytes = 4096;
     private readonly PowerShellOperationHandle handle;
 
     internal PowerShellInvocationOperation(PowerShellOperationHandle handle)
@@ -48,6 +53,17 @@ public sealed class PowerShellInvocationOperation : IDisposable
         return GetResultCore();
     }
 
+    public PowerShellInvocationStreamBatch ReadStreamBatch(ulong afterSequence, int maximumRecords = MaximumStreamBatchRecords)
+    {
+        if (maximumRecords < 1 || maximumRecords > MaximumStreamBatchRecords)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumRecords));
+        }
+
+        PowerShell.EnsureLiveStreamPollingSupported();
+        return ReadStreamBatchCore(afterSequence, checked((uint)maximumRecords));
+    }
+
     public Task<PowerShellInvocationResult> GetResultAsync(CancellationToken cancellationToken = default)
     {
         return PowerShellAsyncOperationAwaiter.GetResultAsync(this, cancellationToken, releaseWhenComplete: false);
@@ -87,6 +103,151 @@ public sealed class PowerShellInvocationOperation : IDisposable
         }
 
         return invocationResult;
+    }
+
+    private unsafe PowerShellInvocationStreamBatch ReadStreamBatchCore(ulong afterSequence, uint maximumRecords)
+    {
+        using PowerShellOperationHandle.HandleLease lease = handle.Borrow();
+        byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+        NativeCallResult result = NativeCall.CreateResult(diagnostic);
+        ulong batchHandle = 0;
+        int status = NativeMethods.ReadOperationStreamBatch(
+            lease.Value,
+            afterSequence,
+            maximumRecords,
+            &batchHandle,
+            &result);
+        NativeCall.ThrowIfFailed(status, result, diagnostic);
+        if (batchHandle == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned an invalid operation stream batch handle.");
+        }
+
+        try
+        {
+            NativeOperationStreamBatchInfo info = new()
+            {
+                Size = checked((uint)sizeof(NativeOperationStreamBatchInfo)),
+            };
+            result = NativeCall.CreateResult(diagnostic);
+            status = NativeMethods.GetOperationStreamBatchInfo(batchHandle, &info, &result);
+            NativeCall.ThrowIfFailed(status, result, diagnostic);
+
+            if (!Enum.IsDefined((PowerShellOperationState)info.OperationState) ||
+                !Enum.IsDefined((PowerShellFfiStatus)info.TerminalStatus) ||
+                info.RecordCount > maximumRecords ||
+                info.NextSequence < afterSequence ||
+                info.LostRecordCount > info.DroppedRecordCount ||
+                info.DroppedRecordCount > info.TotalRecordCount ||
+                info.SourceDroppedRecordCount > info.TotalRecordCount)
+            {
+                throw new PowerShellFfiException(
+                    PowerShellFfiStatus.ManagedFailure,
+                    "Native PowerShell FFI returned invalid live stream batch metadata.");
+            }
+
+            var records = new PowerShellInvocationStreamRecord[checked((int)info.RecordCount)];
+            ulong previousSequence = afterSequence;
+            for (uint index = 0; index < info.RecordCount; index++)
+            {
+                uint stream = 0;
+                ulong sequence = 0;
+                uint flags = 0;
+                result = NativeCall.CreateResult(diagnostic);
+                status = NativeMethods.GetOperationStreamBatchRecordInfo(
+                    batchHandle,
+                    index,
+                    &stream,
+                    &sequence,
+                    &flags,
+                    &result);
+                NativeCall.ThrowIfFailed(status, result, diagnostic);
+                if (!Enum.IsDefined((PowerShellStreamKind)stream) ||
+                    sequence == 0 ||
+                    sequence <= previousSequence ||
+                    sequence > info.NextSequence)
+                {
+                    throw new PowerShellFfiException(
+                        PowerShellFfiStatus.ManagedFailure,
+                        "Native PowerShell FFI returned unordered live stream records.");
+                }
+
+                records[checked((int)index)] = new PowerShellInvocationStreamRecord(
+                    (PowerShellStreamKind)stream,
+                    sequence,
+                    ReadStreamBatchRecordText(batchHandle, index, diagnostic),
+                    (flags & StreamRecordFieldsTruncated) != 0);
+                previousSequence = sequence;
+            }
+
+            if (records.Length == 0 ? info.NextSequence != afterSequence : info.NextSequence != previousSequence)
+            {
+                throw new PowerShellFfiException(
+                    PowerShellFfiStatus.ManagedFailure,
+                    "Native PowerShell FFI returned an inconsistent live stream cursor.");
+            }
+
+            return new PowerShellInvocationStreamBatch(
+                records,
+                info.NextSequence,
+                (PowerShellOperationState)info.OperationState,
+                (PowerShellFfiStatus)info.TerminalStatus,
+                (info.Flags & StreamBatchCursorLost) != 0,
+                info.LostRecordCount,
+                (info.Flags & StreamBatchTruncated) != 0,
+                info.TotalRecordCount,
+                info.DroppedRecordCount,
+                info.SourceDroppedRecordCount);
+        }
+        finally
+        {
+            result = NativeCall.CreateResult(diagnostic);
+            status = NativeMethods.ReleaseOperationStreamBatch(batchHandle, &result);
+            NativeCall.ThrowIfFailed(status, result, diagnostic);
+        }
+    }
+
+    private static unsafe string ReadStreamBatchRecordText(ulong batchHandle, uint recordIndex, byte* diagnostic)
+    {
+        NativeCallResult result = NativeCall.CreateResult(diagnostic);
+        nuint requiredLength = 0;
+        int status = NativeMethods.CopyOperationStreamBatchRecordText(
+            batchHandle,
+            recordIndex,
+            null,
+            0,
+            &requiredLength,
+            &result);
+        if (status != (int)PowerShellFfiStatus.Success &&
+            status != (int)PowerShellFfiStatus.BufferTooSmall)
+        {
+            NativeCall.ThrowIfFailed(status, result, diagnostic);
+        }
+
+        if (requiredLength > MaximumStreamRecordUtf8Bytes)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned an unbounded live stream record.");
+        }
+
+        byte[] value = new byte[checked((int)requiredLength)];
+        fixed (byte* valuePointer = value)
+        {
+            result = NativeCall.CreateResult(diagnostic);
+            status = NativeMethods.CopyOperationStreamBatchRecordText(
+                batchHandle,
+                recordIndex,
+                valuePointer,
+                (nuint)value.Length,
+                &requiredLength,
+                &result);
+            NativeCall.ThrowIfFailed(status, result, diagnostic);
+        }
+
+        return System.Text.Encoding.UTF8.GetString(value);
     }
 
     private PowerShellInvocationOperationStatus GetStatus(uint timeoutMilliseconds, bool wait)

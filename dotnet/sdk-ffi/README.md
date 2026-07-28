@@ -47,10 +47,14 @@ containment remains effective at the ABI boundary.
 The SDK NuGet version and the native DLL `FileVersion`/`ProductVersion` match
 the `multi-pwsh` CLI release version.
 
-The facade requires native ABI v2 and obtains a bounded diagnostic from the
-specific native call that failed. Its `SafeHandle` wrapper keeps a native handle
-alive for each P/Invoke call, including concurrent disposal races. Empty
-strings are valid UTF-8 inputs; embedded NUL characters are rejected.
+The facade supports native ABI v2 for the existing API surface and native ABI
+v3 for live stream polling. ABI v3 reports v2 as its minimum compatible ABI,
+so a v2 native asset remains usable for existing calls; attempting
+`ReadStreamBatch` against it fails with `UnsupportedCapability`. Use matching
+0.17.0 package and native assets to enable polling. Its `SafeHandle` wrapper
+keeps a native handle alive for each P/Invoke call, including concurrent
+disposal races. Empty strings are valid UTF-8 inputs; embedded NUL characters
+are rejected.
 
 `PowerShellValue` is the only way to pass non-string values. It supports
 bounded primitive values, bytes, arrays, and property bags that become copied
@@ -96,6 +100,15 @@ concurrent completion, so cancelled operations expose no partial result.
 Async input is limited to the existing copied, bounded producer: add input,
 call `CompleteInput`, then start the operation. Input cannot be fed after
 start.
+
+`ReadStreamBatch(afterSequence, maximumRecords)` polls an active operation's
+immutable copied display records. Batches contain ordered stream kind/sequence/
+text records, terminal state, and explicit cursor-loss and truncation counters.
+The operation retains at most 32 records; pass the previous `NextSequence` to
+advance the cursor and treat any loss or truncation as incomplete display data.
+This is neither a live console, `PSHost`, callback/event API, nor a stream of
+SMA objects, credentials, or other CLR references. Cancellation can expose
+already-captured records, but still never produces a successful final result.
 
 `PowerShellRuntime.CreateSession(PowerShellSessionOptions)` creates a separate,
 reusable local-runspace session. `PowerShellSessionConfiguration` supplies

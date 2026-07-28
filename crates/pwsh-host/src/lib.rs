@@ -25,8 +25,9 @@ extern crate quick_error;
 mod pdcstring;
 
 pub use bindings::{
-    FfiBindingError, FfiInvocationResult, FfiLiveObjectContractDescriptor, FfiPowerShell, FfiPowerShellSession,
-    FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue, PowerShell,
+    FfiBindingError, FfiInvocationResult, FfiLiveInvocation, FfiLiveObjectContractDescriptor, FfiLiveStreamBatch,
+    FfiLiveStreamRecord, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue,
+    PowerShell,
 };
 pub use host_detect::find_pwsh_dir;
 pub use loader::{get_assembly_delegate_loader_for_pwsh_dir, HostedRuntime, LiveObjectContractPack};

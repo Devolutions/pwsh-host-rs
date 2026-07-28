@@ -153,6 +153,7 @@ $expectedManagedStructs = [ordered]@{
     'NativeSessionOptions' = @{ Size = 216; Fields = @('Size|0|System.UInt32', 'RunspaceMode|4|System.UInt32', 'InitialConfiguration|8|System.UInt32', 'HistoryMode|12|System.UInt32', 'ErrorPreference|16|System.UInt32', 'WarningPreference|20|System.UInt32', 'VerbosePreference|24|System.UInt32', 'DebugPreference|28|System.UInt32', 'InformationPreference|32|System.UInt32', 'Flags|36|System.UInt32', 'Reserved|40|System.UInt32', 'AllowedModulePath|48|Devolutions.PowerShell.Ffi.NativeUtf8Span', 'ExecutionPolicy|64|System.UInt32', 'ConfigurationFlags|68|System.UInt32', 'InitialVariables|72|Devolutions.PowerShell.Ffi.NativeDataValue', 'ModuleImports|104|Devolutions.PowerShell.Ffi.NativeDataValue', 'AllowedModulePaths|136|Devolutions.PowerShell.Ffi.NativeDataValue', 'WorkingDirectory|168|Devolutions.PowerShell.Ffi.NativeUtf8Span', 'Environment|184|Devolutions.PowerShell.Ffi.NativeDataValue') }
     'NativeSessionSnapshot' = @{ Size = 40; Fields = @('Size|0|System.UInt32', 'State|4|System.UInt32', 'RunspaceState|8|System.UInt32', 'Flags|12|System.UInt32', 'ActivePipelineCount|16|System.UInt32', 'EventCount|20|System.UInt32', 'InvocationCount|24|System.UInt64', 'HistoryCount|32|System.UInt64') }
     'NativeSessionPoolOptions' = @{ Size = 20; Fields = @('Size|0|System.UInt32', 'MinimumSessions|4|System.UInt32', 'MaximumSessions|8|System.UInt32', 'Flags|12|System.UInt32', 'Reserved|16|System.UInt32') }
+    'NativeOperationStreamBatchInfo' = @{ Size = 64; Fields = @('Size|0|System.UInt32', 'OperationState|4|System.UInt32', 'TerminalStatus|8|System.Int32', 'Flags|12|System.UInt32', 'NextSequence|16|System.UInt64', 'TotalRecordCount|24|System.UInt64', 'DroppedRecordCount|32|System.UInt64', 'SourceDroppedRecordCount|40|System.UInt64', 'LostRecordCount|48|System.UInt64', 'RecordCount|56|System.UInt32', 'Reserved|60|System.UInt32') }
     'NativeLiveObjectContractDescriptor' = @{ Size = 32; Fields = @('Size|0|System.UInt32', 'Directions|4|System.UInt32', 'InterfaceIdLow|8|System.UInt64', 'InterfaceIdHigh|16|System.UInt64', 'MajorVersion|24|System.UInt16', 'MinorVersion|26|System.UInt16', 'Reserved|28|System.UInt32') }
     'NativeLiveObjectContractPackApi' = @{ Size = 40; Fields = @('Size|0|System.UIntPtr', 'AbiVersion|8|System.UInt32', 'ContractCount|12|System.UInt32', 'Contracts|16|Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor*', 'CreatePayloadProxy|24|System.IntPtr', 'ReleasePayloadProxy|32|System.IntPtr') }
 }
@@ -307,6 +308,31 @@ for ($index = 0; $index -lt $ffiApiFields.Count; $index++) {
     Assert-Equal -Actual (Get-ManagedTypeName $field.FieldType) -Expected $expectedType -Description "Managed FfiApiV2 '$($field.Name)' type"
 }
 
+$expectedLiveTableSlots = @(
+    @{ Field = 'PowerShell_BeginLiveInvocation'; Method = 'FfiPowerShell_BeginLiveInvocation'; Signature = 'IntPtr,IntPtr*,FfiCallResult*,int' }
+    @{ Field = 'LiveInvocation_Poll'; Method = 'FfiLiveInvocation_Poll'; Signature = 'IntPtr,int*,FfiCallResult*,int' }
+    @{ Field = 'LiveInvocation_ReadBatch'; Method = 'FfiLiveInvocation_ReadBatch'; Signature = 'IntPtr,long,int,IntPtr*,FfiCallResult*,int' }
+    @{ Field = 'LiveInvocationBatch_GetInfo'; Method = 'FfiLiveInvocationBatch_GetInfo'; Signature = 'IntPtr,long*,long*,long*,int*,FfiCallResult*,int' }
+    @{ Field = 'LiveInvocationBatch_GetRecordInfo'; Method = 'FfiLiveInvocationBatch_GetRecordInfo'; Signature = 'IntPtr,int,int*,long*,uint*,FfiCallResult*,int' }
+    @{ Field = 'LiveInvocationBatch_CopyRecordTextToUtf8'; Method = 'FfiLiveInvocationBatch_CopyRecordTextToUtf8'; Signature = 'IntPtr,int,byte*,int,int*,FfiCallResult*,int' }
+    @{ Field = 'LiveInvocationBatch_Release'; Method = 'FfiLiveInvocationBatch_Release'; Signature = 'IntPtr,FfiCallResult*,int' }
+    @{ Field = 'LiveInvocation_Complete'; Method = 'FfiLiveInvocation_Complete'; Signature = 'IntPtr,IntPtr*,FfiCallResult*,int' }
+    @{ Field = 'LiveInvocation_Stop'; Method = 'FfiLiveInvocation_Stop'; Signature = 'IntPtr,FfiCallResult*,int' }
+    @{ Field = 'LiveInvocation_Release'; Method = 'FfiLiveInvocation_Release'; Signature = 'IntPtr,FfiCallResult*,int' }
+)
+$ffiApiV3Type = $bindingsAssemblyObject.GetType('NativeHost.Bindings+FfiApiV3', $true)
+Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::SizeOf([Type]$ffiApiV3Type)) -Expected 104 -Description 'Managed FfiApiV3 size'
+$ffiApiV3Fields = @($ffiApiV3Type.GetFields($instanceFields) | Sort-Object MetadataToken)
+$expectedFfiApiV3FieldNames = @('Size', 'AbiVersion', 'FeatureFlags') + @($expectedLiveTableSlots | ForEach-Object { $_.Field })
+Assert-Sequence -Actual @($ffiApiV3Fields | ForEach-Object Name) -Expected $expectedFfiApiV3FieldNames -Description 'Managed FfiApiV3 slot order'
+for ($index = 0; $index -lt $ffiApiV3Fields.Count; $index++) {
+    $field = $ffiApiV3Fields[$index]
+    $expectedOffset = if ($index -eq 0) { 0 } elseif ($index -eq 1) { 8 } elseif ($index -eq 2) { 16 } else { 24 + (($index - 3) * 8) }
+    $expectedType = if ($index -eq 0) { 'System.UIntPtr' } elseif ($index -eq 1) { 'System.UInt32' } elseif ($index -eq 2) { 'System.UInt64' } else { 'System.IntPtr' }
+    Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::OffsetOf($ffiApiV3Type, $field.Name).ToInt64()) -Expected ([Int64]$expectedOffset) -Description "Managed FfiApiV3 '$($field.Name)' offset"
+    Assert-Equal -Actual (Get-ManagedTypeName $field.FieldType) -Expected $expectedType -Description "Managed FfiApiV3 '$($field.Name)' type"
+}
+
 $compactFfiBindingsSource = $ffiBindingsSource -replace '\s+', ''
 $expectedBridgeFeatures = 'FeatureFlags=(1UL<<4)|(1UL<<5)|(1UL<<6)|FfiFeatureAsyncOperationPrimitives|FfiFeatureSessionPrimitives|FfiFeatureSessionPolling|FfiFeatureSnapshotProjections|FfiFeatureSessionConfiguration|FfiFeatureSessionVariables|FfiFeatureCapabilityRpc|FfiFeatureLiveObjectProbe|FfiFeatureLiveSessionObjectProbe|FfiFeatureLiveObjectContracts'
 if (-not $compactFfiBindingsSource.Contains($expectedBridgeFeatures)) {
@@ -316,6 +342,15 @@ foreach ($slot in $expectedTableSlots) {
     $assignment = "$($slot.Field)=(IntPtr)(delegate*unmanaged<$($slot.Signature)>)&$($slot.Method)"
     if ($compactFfiBindingsSource.IndexOf($assignment, [StringComparison]::Ordinal) -lt 0) {
         throw "Managed FfiApiV2 slot '$($slot.Field)' does not have its checked target and signature '$($slot.Signature)'."
+    }
+}
+if (-not $compactFfiBindingsSource.Contains('FeatureFlags=FfiFeatureLiveStreamPolling')) {
+    throw 'Managed FfiApiV3 does not advertise live stream polling.'
+}
+foreach ($slot in $expectedLiveTableSlots) {
+    $assignment = "$($slot.Field)=(IntPtr)(delegate*unmanaged<$($slot.Signature)>)&$($slot.Method)"
+    if ($compactFfiBindingsSource.IndexOf($assignment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Managed FfiApiV3 slot '$($slot.Field)' does not have its checked target and signature '$($slot.Signature)'."
     }
 }
 
@@ -329,6 +364,33 @@ $rustApiTableFields = @(
 )
 $expectedRustApiTableFields = @('size', 'abi_version', 'feature_flags') + @($expectedTableSlots | ForEach-Object Rust)
 Assert-Sequence -Actual $rustApiTableFields -Expected $expectedRustApiTableFields -Description 'Rust FfiApiV2 slot order'
+
+$rustLiveApiTableMatch = [regex]::Match($rustBindingsSource, '(?s)struct\s+FfiApiV3\s*\{(?<body>.*?)\n\s*\}')
+if (-not $rustLiveApiTableMatch.Success) {
+    throw 'Rust FfiApiV3 table declaration is missing.'
+}
+$rustLiveApiTableFields = @(
+    [regex]::Matches($rustLiveApiTableMatch.Groups['body'].Value, '(?m)^\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*[^,]+,') |
+        ForEach-Object { $_.Groups['name'].Value }
+)
+Assert-Sequence -Actual $rustLiveApiTableFields -Expected @(
+    'size',
+    'abi_version',
+    'feature_flags',
+    'power_shell_begin_live_invocation_fn',
+    'live_invocation_poll_fn',
+    'live_invocation_read_batch_fn',
+    'live_invocation_batch_get_info_fn',
+    'live_invocation_batch_get_record_info_fn',
+    'live_invocation_batch_copy_record_text_to_utf8_fn',
+    'live_invocation_batch_release_fn',
+    'live_invocation_complete_fn',
+    'live_invocation_stop_fn',
+    'live_invocation_release_fn'
+) -Description 'Rust FfiApiV3 slot order'
+if (-not $rustBindingsSource.Contains('Err(_) => None')) {
+    throw 'Rust bindings must treat the ABI v3 managed table as optional for ABI v2 compatibility.'
+}
 
 $rustBindingsTableMatch = [regex]::Match($rustBindingsSource, '(?s)pub\(crate\)\s+struct\s+FfiBindings\s*\{(?<body>.*?)\n\s*\}')
 if (-not $rustBindingsTableMatch.Success) {

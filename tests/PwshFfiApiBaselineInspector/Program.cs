@@ -113,6 +113,7 @@ static void ValidateAbiCompatibility(Assembly facadeAssembly, BindingFlags stati
 
     const ulong allRequiredFeatures = 0xFFDFF;
     ensureSupportedAbi.Invoke(null, [CreateAbiInfo(abiInfoType, allRequiredFeatures, abiVersion: 2, minimumCompatibleAbiVersion: 2)]);
+    ensureSupportedAbi.Invoke(null, [CreateAbiInfo(abiInfoType, allRequiredFeatures, abiVersion: 3, minimumCompatibleAbiVersion: 2)]);
     for (int bit = 0; bit <= 19; bit++)
     {
         if ((allRequiredFeatures & (1UL << bit)) == 0)

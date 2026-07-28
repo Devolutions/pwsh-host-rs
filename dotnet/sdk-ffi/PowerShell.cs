@@ -8,7 +8,8 @@ namespace Devolutions.PowerShell.Ffi;
 
 public sealed unsafe class PowerShell : IDisposable
 {
-    private const uint RequiredAbiVersion = 2;
+    private const uint MinimumSupportedAbiVersion = 2;
+    private const uint FacadeAbiVersion = 3;
     private const int Success = (int)PowerShellFfiStatus.Success;
     private const int BufferTooSmall = (int)PowerShellFfiStatus.BufferTooSmall;
     private const ulong StructuredInvocationErrorsFeature = 1UL << 0;
@@ -30,6 +31,7 @@ public sealed unsafe class PowerShell : IDisposable
     private const ulong LiveObjectProbeFeature = 1UL << 17;
     private const ulong LiveSessionObjectProbeFeature = 1UL << 18;
     private const ulong LiveObjectContractsFeature = 1UL << 19;
+    private const ulong LiveStreamPollingFeature = 1UL << 20;
     private const ulong RequiredFeatures =
         StructuredInvocationErrorsFeature | PerCallDiagnosticsFeature | Utf8SpansFeature |
         ImmutableResultsFeature | TaggedValuesFeature | CommandOptionsFeature | BoundedInputFeature |
@@ -631,14 +633,27 @@ public sealed unsafe class PowerShell : IDisposable
         }
     }
 
+    internal static void EnsureLiveStreamPollingSupported()
+    {
+        NativeAbiInfo info = GetAbiInfo();
+        EnsureSupportedAbi(info);
+        if (info.AbiVersion < FacadeAbiVersion || (info.FeatureFlags & LiveStreamPollingFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell native asset does not support live stream polling.");
+        }
+    }
+
     private static void EnsureSupportedAbi(NativeAbiInfo info)
     {
-        if (info.AbiVersion != RequiredAbiVersion ||
-            info.MinimumCompatibleAbiVersion > RequiredAbiVersion ||
+        if (info.AbiVersion < MinimumSupportedAbiVersion ||
+            info.MinimumCompatibleAbiVersion > info.AbiVersion ||
+            info.MinimumCompatibleAbiVersion > FacadeAbiVersion ||
             (info.FeatureFlags & RequiredFeatures) != RequiredFeatures)
         {
             throw new NotSupportedException(
-                $"Native PowerShell FFI ABI {info.AbiVersion} does not support facade ABI {RequiredAbiVersion} structured errors, diagnostics, UTF-8, value, command, input, result, async operation, and session features.");
+                $"Native PowerShell FFI ABI {info.AbiVersion} does not support facade ABI {FacadeAbiVersion} structured errors, diagnostics, UTF-8, value, command, input, result, async operation, and session features.");
         }
     }
 

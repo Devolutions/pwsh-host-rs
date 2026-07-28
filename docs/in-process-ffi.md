@@ -134,6 +134,11 @@ A session-affine dispatcher is required before supporting that category.
   `multi_pwsh_get_abi_info`; the managed package and native asset ship together
   and use the unversioned `multi_pwsh_*` exports. The injected managed function
   table independently reports its compatibility version.
+- ABI v3 is additive: it reports a minimum compatible ABI of v2. The facade
+  continues to activate a v2 native asset for the v2 surface, while
+  `ReadStreamBatch` is enabled only when ABI v3 and the
+  `LIVE_STREAM_POLLING` feature bit are both present. This prevents an optional
+  stream-polling call from becoming a required v2 export.
 - The supported ABI uses sized, caller-owned `multi_pwsh_call_result` structures. Each operation
   returns its own bounded UTF-8 diagnostic and truncation metadata, so concurrent
   calls never read a process-global error slot. `multi_pwsh_utf8_span` permits
@@ -220,6 +225,28 @@ pipeline until the operation reaches a terminal state. It is not a managed
   synchronous invocation, and input calls return `MULTI_PWSH_BACKPRESSURE`
   until terminal completion. Builder `Stop` targets its active operation and
   has the same cancellation-wins semantics.
+
+### Live stream polling (ABI v3)
+
+`PowerShellInvocationOperation.ReadStreamBatch(afterSequence, maximumRecords)`
+is a polling-only, copied-record view of a running operation. `afterSequence`
+is a record-sequence cursor where `0` starts at the beginning; a cursor beyond
+the newest sequence or a limit outside `1..32` is rejected. Each returned
+record contains only its stream kind, a native-owned monotonic nonzero
+sequence, a fixed-bounded copied display-text field, and a truncation bit. It
+never carries `PSObject`, `ErrorRecord`, SMA state, CLR objects, credentials,
+callbacks, or pipeline input.
+
+The batch is immutable and includes `NextSequence`, operation state and
+terminal status, cursor-loss metadata, total/dropped/source-dropped counters,
+and truncation metadata. The native operation owns a 32-record ring; reading a
+cursor older than its retained range succeeds with `IsCursorLost` and
+`LostRecordCount` rather than silently skipping data. The payload-to-native
+capture path is separately bounded, and source eviction is reported through
+`SourceDroppedRecordCount`. Stream records can be read while an operation is
+running and remain readable after completion or cancellation, but cancellation
+still wins: `GetResult` never converts partial live output into a successful
+result.
 
 The facade projects this model as `PowerShell.BeginInvoke()` and
 `PowerShell.InvokeAsync(CancellationToken)`. `PowerShellInvocationOperation`

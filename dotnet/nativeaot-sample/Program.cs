@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Devolutions.PowerShell.Ffi;
 using Devolutions.PowerShell.Ffi.LiveObjects;
 using NativeAotFfiSample;
@@ -215,6 +216,69 @@ if (asynchronousOutput.Output.Records.Count != 1 ||
     return 1;
 }
 
+using (PowerShell liveStream = PowerShell.Create())
+using (PowerShellInvocationOperation operation = liveStream
+    .AddScript(@"
+        Write-Output 'nativeaot-live-before'
+        Write-Error -Message 'nativeaot-live-error'
+        Write-Progress -Activity 'nativeaot-live-progress' -Status 'running' -PercentComplete 50
+        Start-Sleep -Milliseconds 300
+        Write-Output 'nativeaot-live-after'
+    ")
+    .BeginInvoke())
+{
+    ulong cursor = 0;
+    var records = new List<PowerShellInvocationStreamRecord>();
+    bool observedOutputBeforeCompletion = false;
+    bool observedErrorBeforeCompletion = false;
+    bool observedProgressBeforeCompletion = false;
+    for (int attempt = 0; attempt < 100; attempt++)
+    {
+        PowerShellInvocationStreamBatch batch = operation.ReadStreamBatch(cursor);
+        records.AddRange(batch.Records);
+        cursor = batch.NextSequence;
+        if (!batch.IsTerminal)
+        {
+            observedOutputBeforeCompletion |= batch.Records.Any(record => record.Stream == PowerShellStreamKind.Output);
+            observedErrorBeforeCompletion |= batch.Records.Any(record => record.Stream == PowerShellStreamKind.Error);
+            observedProgressBeforeCompletion |= batch.Records.Any(record => record.Stream == PowerShellStreamKind.Progress);
+        }
+        if (batch.IsTerminal)
+        {
+            break;
+        }
+
+        await Task.Delay(25);
+    }
+
+    PowerShellInvocationOperationStatus status = operation.Wait(TimeSpan.FromSeconds(5));
+    PowerShellInvocationStreamBatch terminalBatch = operation.ReadStreamBatch(cursor);
+    records.AddRange(terminalBatch.Records);
+    bool ordered = records.Count == 4;
+    for (int index = 0; index < records.Count; index++)
+    {
+        ordered &= records[index].Sequence != 0 &&
+            (index == 0 || records[index].Sequence > records[index - 1].Sequence);
+    }
+    if (status.State != PowerShellOperationState.Completed ||
+        status.TerminalStatus != PowerShellFfiStatus.Success ||
+        !observedOutputBeforeCompletion ||
+        !observedErrorBeforeCompletion ||
+        !observedProgressBeforeCompletion ||
+        !ordered ||
+        records[0].Stream != PowerShellStreamKind.Output ||
+        records[0].DisplayText != "nativeaot-live-before" ||
+        records[1].Stream != PowerShellStreamKind.Error ||
+        !records[1].DisplayText.Contains("nativeaot-live-error", StringComparison.Ordinal) ||
+        records[2].Stream != PowerShellStreamKind.Progress ||
+        records[3].Stream != PowerShellStreamKind.Output ||
+        records[3].DisplayText != "nativeaot-live-after")
+    {
+        Console.Error.WriteLine("NativeAOT facade did not preserve ordered copied output, error, and progress records before completion.");
+        return 1;
+    }
+}
+
 using (var cancellationSource = new CancellationTokenSource(TimeSpan.FromMilliseconds(100)))
 using (PowerShell cancellation = PowerShell.Create())
 {
@@ -233,14 +297,38 @@ using (PowerShell cancellation = PowerShell.Create())
 
 using (PowerShell doubleStop = PowerShell.Create())
 using (PowerShellInvocationOperation operation = doubleStop
-    .AddScript("Start-Sleep -Seconds 30; 'unexpected double-stop completion'")
+    .AddScript("Write-Output 'nativeaot-cancel-stream'; Start-Sleep -Seconds 30; 'unexpected double-stop completion'")
     .BeginInvoke())
 {
+    ulong cursor = 0;
+    PowerShellInvocationStreamBatch liveBatch = null;
+    for (int attempt = 0; attempt < 100; attempt++)
+    {
+        liveBatch = operation.ReadStreamBatch(cursor);
+        cursor = liveBatch.NextSequence;
+        if (liveBatch.Records.Count != 0)
+        {
+            break;
+        }
+
+        await Task.Delay(25);
+    }
+    if (liveBatch?.Records.Count != 1 ||
+        liveBatch.Records[0].DisplayText != "nativeaot-cancel-stream" ||
+        liveBatch.IsTerminal)
+    {
+        Console.Error.WriteLine("NativeAOT facade did not expose a running operation stream before cancellation.");
+        return 1;
+    }
+
     operation.Stop();
     operation.Stop();
     PowerShellInvocationOperationStatus status = operation.Wait(TimeSpan.FromSeconds(5));
+    PowerShellInvocationStreamBatch cancelledBatch = operation.ReadStreamBatch(cursor);
     if (status.State != PowerShellOperationState.Cancelled ||
-        status.TerminalStatus != PowerShellFfiStatus.OperationCancelled)
+        status.TerminalStatus != PowerShellFfiStatus.OperationCancelled ||
+        cancelledBatch.State != PowerShellOperationState.Cancelled ||
+        cancelledBatch.TerminalStatus != PowerShellFfiStatus.OperationCancelled)
     {
         Console.Error.WriteLine("NativeAOT facade did not preserve the cancellation terminal state.");
         return 1;
