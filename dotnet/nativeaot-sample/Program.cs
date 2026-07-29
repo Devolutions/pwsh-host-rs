@@ -357,6 +357,33 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
             return 1;
         }
     }
+
+    using (var broker = new SessionCreatorBroker())
+    using (var brokerLiveObject = new PowerShellLiveObject<IPowerShellLiveObjectTestBroker>(
+        PowerShellLiveObjectTestContracts.SessionCreatorBroker,
+        broker))
+    {
+        session.SetLiveObjectVariable("brokerRdm", brokerLiveObject);
+        using PowerShell brokerScript = session.CreatePowerShell();
+        PowerShellInvocationResult brokerOutput = brokerScript
+            .AddScript(@"
+                $child = $brokerRdm.Add(""na$([char]0x00EF)ve-$([char]0x6771)$([char]0x4EAC)"")
+                $child.Host = ""host-$([char]0x6771)$([char]0x4EAC)""
+                $brokerRdm.Children[0].Description = ""description""
+                $brokerRdm.Children[0].Group = ""group""
+                $same = [object]::ReferenceEquals($child, $brokerRdm.Children[0]) -and $child -eq $brokerRdm.Children[0]
+                $names = @($brokerRdm.Children | ForEach-Object Name) -join ','
+                ""$($child.Name)|$($child.Host)|$($brokerRdm.Children[0].Description)|$($brokerRdm.Children[0].Group)|$same|$names""
+            ")
+            .Invoke();
+        if (brokerOutput.Output.Records.Count != 1 ||
+            brokerOutput.Output.Records[0].DisplayText != "na\u00EFve-\u6771\u4EAC|host-\u6771\u4EAC|description|group|True|na\u00EFve-\u6771\u4EAC" ||
+            !session.RemoveVariable("brokerRdm"))
+        {
+            Console.Error.WriteLine("NativeAOT facade did not preserve the single-interface SessionCreator broker contract.");
+            return 1;
+        }
+    }
 }
 
 using PowerShell asynchronous = PowerShell.Create();

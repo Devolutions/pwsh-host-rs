@@ -4,6 +4,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.Marshalling;
 using Devolutions.PowerShell.Ffi.LiveObjects;
+using BrokerMembers = Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectBrokerWire.PowerShellLiveObjectBrokerMembers;
 
 namespace Devolutions.MultiPwsh.LiveObject.TestPack;
 
@@ -30,7 +31,13 @@ public static unsafe class LiveObjectTestPack
         *proxyHandle = IntPtr.Zero;
         try
         {
-            var proxy = TestCountProxy.Create(comObject);
+            object projected = ComWrappers.GetOrCreateObjectForComInstance(comObject, CreateObjectFlags.UniqueInstance);
+            IDisposable proxy = projected switch
+            {
+                IPowerShellLiveObjectTestBroker broker => TestBrokerProxy.Create(broker, (ComObject)projected),
+                IPowerShellLiveObjectTestCount count => new TestCountProxy(count, (ComObject)projected),
+                _ => throw new InvalidOperationException("Live object has an unexpected COM contract."),
+            };
             *proxyHandle = GCHandle.ToIntPtr(GCHandle.Alloc(proxy));
             return 0;
         }
@@ -62,8 +69,9 @@ public static unsafe class LiveObjectTestPack
     private static IntPtr CreateApi()
     {
         NativeLiveObjectContractDescriptor* contract =
-            (NativeLiveObjectContractDescriptor*)NativeMemory.Alloc((nuint)sizeof(NativeLiveObjectContractDescriptor));
-        *contract = PowerShellLiveObjectTestContracts.Count.ToNative();
+        (NativeLiveObjectContractDescriptor*)NativeMemory.Alloc((nuint)(2 * sizeof(NativeLiveObjectContractDescriptor)));
+        contract[0] = PowerShellLiveObjectTestContracts.Count.ToNative();
+        contract[1] = PowerShellLiveObjectTestContracts.SessionCreatorBroker.ToNative();
 
         NativeLiveObjectContractPackApi* api =
             (NativeLiveObjectContractPackApi*)NativeMemory.Alloc((nuint)sizeof(NativeLiveObjectContractPackApi));
@@ -71,12 +79,207 @@ public static unsafe class LiveObjectTestPack
         {
             Size = (nuint)sizeof(NativeLiveObjectContractPackApi),
             AbiVersion = 1,
-            ContractCount = 1,
+            ContractCount = 2,
             Contracts = contract,
             CreatePayloadProxy = (IntPtr)(delegate* unmanaged<IntPtr, IntPtr*, int>)&CreatePayloadProxy,
             ReleasePayloadProxy = (IntPtr)(delegate* unmanaged<IntPtr, void>)&ReleasePayloadProxy,
         };
         return (IntPtr)api;
+    }
+
+    public sealed class TestBrokerProxy : IDisposable
+    {
+        private readonly BrokerClient client;
+        private readonly Dictionary<ulong, TestBrokerChildProxy> children = [];
+        private TestBrokerChildrenProxy? collection;
+
+        private TestBrokerProxy(BrokerClient client)
+        {
+            this.client = client;
+        }
+
+        public TestBrokerChildProxy Add(string name)
+        {
+            return GetOrAddChild(client.InvokeHandle(BrokerMembers.RootObjectId, BrokerMembers.RootAdd, PowerShellLiveObjectBrokerWire.EncodeString(name)));
+        }
+
+        public TestBrokerChildrenProxy Children => collection ??= new TestBrokerChildrenProxy(this);
+
+        internal TestBrokerChildProxy GetOrAddChild(ulong handle)
+        {
+            if (!children.TryGetValue(handle, out TestBrokerChildProxy? child))
+            {
+                child = new TestBrokerChildProxy(client, handle);
+                children.Add(handle, child);
+            }
+
+            return child;
+        }
+
+        internal int GetChildCount()
+        {
+            return client.InvokeInt32(BrokerMembers.ChildrenObjectId, BrokerMembers.ChildrenCount, PowerShellLiveObjectBrokerWire.Encode(PowerShellLiveObjectBrokerWire.Null, []));
+        }
+
+        internal TestBrokerChildProxy GetChildAt(int index)
+        {
+            return GetOrAddChild(client.InvokeHandle(BrokerMembers.ChildrenObjectId, BrokerMembers.ChildrenGetAt, PowerShellLiveObjectBrokerWire.EncodeInt32(index)));
+        }
+
+        public static TestBrokerProxy Create(IPowerShellLiveObjectTestBroker value, ComObject comObject)
+        {
+            return new TestBrokerProxy(new BrokerClient(value, comObject));
+        }
+
+        public void Dispose()
+        {
+            client.Dispose();
+        }
+    }
+
+    public sealed class TestBrokerChildProxy
+    {
+        private readonly BrokerClient client;
+        private readonly ulong handle;
+
+        internal TestBrokerChildProxy(BrokerClient client, ulong handle)
+        {
+            this.client = client;
+            this.handle = handle;
+        }
+
+        public string Name { get => Get(BrokerMembers.ChildGetName); set => Set(BrokerMembers.ChildSetName, value); }
+        public string Host { get => Get(BrokerMembers.ChildGetHost); set => Set(BrokerMembers.ChildSetHost, value); }
+        public string Description { get => Get(BrokerMembers.ChildGetDescription); set => Set(BrokerMembers.ChildSetDescription, value); }
+        public string Group { get => Get(BrokerMembers.ChildGetGroup); set => Set(BrokerMembers.ChildSetGroup, value); }
+
+        private string Get(uint member) => client.InvokeString(handle, member, PowerShellLiveObjectBrokerWire.Encode(PowerShellLiveObjectBrokerWire.Null, []));
+        private void Set(uint member, string value) => client.InvokeVoid(handle, member, PowerShellLiveObjectBrokerWire.EncodeString(value));
+    }
+
+    public sealed class TestBrokerChildrenProxy : IReadOnlyList<TestBrokerChildProxy>
+    {
+        private readonly TestBrokerProxy root;
+        internal TestBrokerChildrenProxy(TestBrokerProxy root) { this.root = root; }
+        public int Count => root.GetChildCount();
+        public TestBrokerChildProxy this[int index] => root.GetChildAt(index);
+        public IEnumerator<TestBrokerChildProxy> GetEnumerator()
+        {
+            for (int index = 0; index < Count; index++) yield return this[index];
+        }
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    internal sealed class BrokerClient : IDisposable
+    {
+        private const int EBufferTooSmall = unchecked((int)0x8007007A);
+        private readonly object gate = new();
+        private IPowerShellLiveObjectTestBroker? value;
+        private ComObject? comObject;
+        private readonly ulong leaseId;
+        private readonly uint generation;
+
+        internal BrokerClient(IPowerShellLiveObjectTestBroker value, ComObject comObject)
+        {
+            this.value = value;
+            this.comObject = comObject;
+            (leaseId, generation) = OpenLease(value);
+        }
+
+        internal ulong InvokeHandle(ulong objectId, uint memberId, byte[] input)
+        {
+            byte[] output = Invoke(objectId, memberId, input);
+            if (!PowerShellLiveObjectBrokerWire.TryDecode(output, out byte tag, out ReadOnlySpan<byte> value) ||
+                tag != PowerShellLiveObjectBrokerWire.ObjectHandle || value.Length != sizeof(ulong))
+                throw new InvalidOperationException("Broker returned an invalid object handle.");
+            return System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(value);
+        }
+
+        internal int InvokeInt32(ulong objectId, uint memberId, byte[] input)
+        {
+            byte[] output = Invoke(objectId, memberId, input);
+            if (!PowerShellLiveObjectBrokerWire.TryDecode(output, out byte tag, out ReadOnlySpan<byte> value) ||
+                tag != PowerShellLiveObjectBrokerWire.Int32 || value.Length != sizeof(int))
+                throw new InvalidOperationException("Broker returned an invalid integer.");
+            return System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(value);
+        }
+
+        internal string InvokeString(ulong objectId, uint memberId, byte[] input)
+        {
+            byte[] output = Invoke(objectId, memberId, input);
+            if (!PowerShellLiveObjectBrokerWire.TryDecode(output, out byte tag, out ReadOnlySpan<byte> value) ||
+                tag != PowerShellLiveObjectBrokerWire.Utf8String)
+                throw new InvalidOperationException("Broker returned an invalid string.");
+            return System.Text.Encoding.UTF8.GetString(value);
+        }
+
+        internal void InvokeVoid(ulong objectId, uint memberId, byte[] input)
+        {
+            _ = Invoke(objectId, memberId, input);
+        }
+
+        private byte[] Invoke(ulong objectId, uint memberId, byte[] input)
+        {
+            lock (gate)
+            {
+                IPowerShellLiveObjectTestBroker broker = value ?? throw new ObjectDisposedException(nameof(TestBrokerProxy));
+                IntPtr inputBuffer = Marshal.AllocHGlobal(input.Length);
+                IntPtr outputBuffer = Marshal.AllocHGlobal(PowerShellLiveObjectBrokerWire.HeaderSize + PowerShellLiveObjectBrokerWire.MaximumValueBytes);
+                try
+                {
+                    Marshal.Copy(input, 0, inputBuffer, input.Length);
+                    int status = broker.Invoke(leaseId, generation, objectId, memberId, inputBuffer, input.Length, outputBuffer, 264, out int outputLength);
+                    if (status == EBufferTooSmall || outputLength < 0 || outputLength > 264)
+                        throw new InvalidOperationException("Broker output exceeds the fixed payload buffer.");
+                    if (status != 0) throw new COMException("Broker invocation failed.", status);
+                    byte[] output = new byte[outputLength];
+                    Marshal.Copy(outputBuffer, output, 0, outputLength);
+                    return output;
+                }
+                finally { Marshal.FreeHGlobal(inputBuffer); Marshal.FreeHGlobal(outputBuffer); }
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (gate)
+            {
+                IPowerShellLiveObjectTestBroker? broker = value;
+                if (broker is not null)
+                {
+                    _ = broker.CloseLease(leaseId, generation);
+                }
+
+                value = null;
+                ComObject? release = comObject;
+                comObject = null;
+                release?.FinalRelease();
+            }
+        }
+
+        private static (ulong LeaseId, uint Generation) OpenLease(IPowerShellLiveObjectTestBroker broker)
+        {
+            byte[] input = PowerShellLiveObjectBrokerWire.Encode(PowerShellLiveObjectBrokerWire.Null, []);
+            IntPtr inputBuffer = Marshal.AllocHGlobal(input.Length);
+            IntPtr outputBuffer = Marshal.AllocHGlobal(264);
+            try
+            {
+                Marshal.Copy(input, 0, inputBuffer, input.Length);
+                int status = broker.Invoke(0, 0, 0, 0, inputBuffer, input.Length, outputBuffer, 264, out int outputLength);
+                if (status != 0 || outputLength < PowerShellLiveObjectBrokerWire.HeaderSize || outputLength > 264)
+                    throw new COMException("Broker lease initialization failed.", status);
+                byte[] output = new byte[outputLength];
+                Marshal.Copy(outputBuffer, output, 0, outputLength);
+                if (!PowerShellLiveObjectBrokerWire.TryDecode(output, out byte tag, out ReadOnlySpan<byte> payload) ||
+                    tag != PowerShellLiveObjectBrokerWire.Utf8String)
+                    throw new InvalidOperationException("Broker returned an invalid lease.");
+                string[] parts = System.Text.Encoding.UTF8.GetString(payload).Split(':');
+                if (parts.Length != 2 || !ulong.TryParse(parts[0], out ulong leaseId) || !uint.TryParse(parts[1], out uint generation))
+                    throw new InvalidOperationException("Broker returned an invalid lease.");
+                return (leaseId, generation);
+            }
+            finally { Marshal.FreeHGlobal(inputBuffer); Marshal.FreeHGlobal(outputBuffer); }
+        }
     }
 
     public sealed class TestCountProxy : IDisposable
@@ -87,7 +290,7 @@ public static unsafe class LiveObjectTestPack
         private readonly Dictionary<long, TestChildProxy> childProxies = [];
         private TestChildCollectionProxy? children;
 
-        private TestCountProxy(IPowerShellLiveObjectTestCount value, ComObject comObject)
+        internal TestCountProxy(IPowerShellLiveObjectTestCount value, ComObject comObject)
         {
             this.value = value;
             this.comObject = comObject;
