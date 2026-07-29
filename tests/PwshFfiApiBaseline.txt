@@ -539,7 +539,24 @@ facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirectio
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection None
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection PayloadToConsumer
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectTestContracts::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract Count
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectTestContracts::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract SessionCreatorBroker
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild::Int32 GetDescription(System.String ByRef)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild::Int32 GetGroup(System.String ByRef)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild::Int32 GetHost(System.String ByRef)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild::Int32 GetIdentity(Int64 ByRef)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild::Int32 GetName(System.String ByRef)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild::Int32 GetValue(Int64 ByRef)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild::Int32 SetDescription(System.String)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild::Int32 SetGroup(System.String)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild::Int32 SetHost(System.String)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild::Int32 SetName(System.String)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild::Int32 SetValue(Int64)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChildCollection::Int32 GetAt(Int32, Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild ByRef)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChildCollection::Int32 GetCount(Int32 ByRef)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount::Int32 Add(System.String, Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild ByRef)
 facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount::Int32 GetCount(Int64 ByRef)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount::Int32 GetChildren(Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChildCollection ByRef)
+facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount::Int32 GetPrimary(Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild ByRef)
 facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount::Int32 Increment(Int64 ByRef)
 facade:method:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract::Boolean Equals(Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract)
 facade:method:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract::Boolean Equals(System.Object)
@@ -567,6 +584,8 @@ facade:property:Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPack::Sys
 facade:property:Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe::Int64 Count
 facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionObjectProbe::Int64 Count
 facade:type:Devolutions.PowerShell.Ffi.IPowerShellLiveObjectBroker
+facade:type:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild
+facade:type:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChildCollection
 facade:type:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount
 facade:type:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor
 facade:type:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi

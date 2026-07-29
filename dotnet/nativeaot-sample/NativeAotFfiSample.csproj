@@ -10,7 +10,19 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\live-contracts\Devolutions.MultiPwsh.LiveContracts.csproj" />
     <ProjectReference Include="..\sdk-ffi\Devolutions.MultiPwsh.Sdk.csproj" />
+    <ProjectReference Include="..\live-contract-generator\Devolutions.MultiPwsh.LiveContract.Generator.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+    <Compile Include="..\interop\SessionCreatorLiveContract.cs"
+             Link="SessionCreatorLiveContract.cs" />
+  </ItemGroup>
+  <PropertyGroup>
+    <LiveContractMode>Host</LiveContractMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <CompilerVisibleProperty Include="LiveContractMode" />
   </ItemGroup>
 
   <PropertyGroup>

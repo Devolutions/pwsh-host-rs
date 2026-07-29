@@ -16,6 +16,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
     <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RepositoryRoot>$(MSBuildThisFileDirectory)..\..</RepositoryRoot>
@@ -28,6 +29,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\live-contracts\Devolutions.MultiPwsh.LiveContracts.csproj"
+                      PrivateAssets="all" />
+    <ProjectReference Include="..\live-contract-generator\Devolutions.MultiPwsh.LiveContract.Generator.csproj"
+                      ReferenceOutputAssembly="false" />
     <Compile Include="..\interop\PowerShellLiveObjectProbeContract.cs"
              Link="PowerShellLiveObjectProbeContract.cs" />
     <Compile Include="..\interop\PowerShellLiveObjectContract.cs"
@@ -38,6 +43,28 @@
     <None Include="buildTransitive\Devolutions.MultiPwsh.Sdk.targets"
           Pack="true"
           PackagePath="buildTransitive\" />
+    <None Include="..\live-contracts\LiveContractAttributes.cs"
+          BuildAction="None"
+          Pack="true"
+          PackagePath="buildTransitive\Devolutions.MultiPwsh.LiveContracts\"
+          Visible="false" />
+    <None Include="..\live-contracts\LiveContractBroker.cs"
+          BuildAction="None"
+          Pack="true"
+          PackagePath="buildTransitive\Devolutions.MultiPwsh.LiveContracts\"
+          Visible="false" />
+    <None Include="..\live-contract-generator\bin\$(Configuration)\netstandard2.0\Devolutions.MultiPwsh.LiveContract.Generator.dll"
+          Pack="true"
+          PackagePath="analyzers\dotnet\cs\"
+          Visible="false" />
+    <None Include="..\live-contracts\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.LiveContracts.dll"
+          Pack="true"
+          PackagePath="lib\net8.0\"
+          Visible="false" />
+    <None Include="..\live-contracts\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.LiveContracts.dll"
+          Pack="true"
+          PackagePath="lib\net10.0\"
+          Visible="false" />
     <None Include="$(PwshFfiNativeLibrary)"
           Condition="'$(PwshFfiNativeStagingRoot)' == ''"
           Pack="true"

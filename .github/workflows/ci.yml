@@ -51,6 +51,10 @@ jobs:
         shell: pwsh
         run: ./tests/Verify-PwshFfiApiBaseline.ps1
 
+      - name: Run live-contract generator tests
+        shell: pwsh
+        run: dotnet run --project dotnet/live-contract-generator-tests/Devolutions.MultiPwsh.LiveContract.Generator.Tests.csproj -c Release
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
