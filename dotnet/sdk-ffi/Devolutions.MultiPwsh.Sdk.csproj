@@ -46,12 +46,12 @@
     <None Include="..\live-contracts\LiveContractAttributes.cs"
           BuildAction="None"
           Pack="true"
-          PackagePath="contentFiles\any\any\Devolutions.MultiPwsh.LiveContracts\"
+          PackagePath="buildTransitive\Devolutions.MultiPwsh.LiveContracts\"
           Visible="false" />
     <None Include="..\live-contracts\LiveContractBroker.cs"
           BuildAction="None"
           Pack="true"
-          PackagePath="contentFiles\any\any\Devolutions.MultiPwsh.LiveContracts\"
+          PackagePath="buildTransitive\Devolutions.MultiPwsh.LiveContracts\"
           Visible="false" />
     <None Include="..\live-contract-generator\bin\$(Configuration)\netstandard2.0\Devolutions.MultiPwsh.LiveContract.Generator.dll"
           Pack="true"
