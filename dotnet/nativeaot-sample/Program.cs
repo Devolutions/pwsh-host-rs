@@ -363,10 +363,12 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
         PowerShellLiveObjectTestContracts.SessionCreatorBroker,
         broker))
     {
-        session.SetLiveObjectVariable("brokerRdm", brokerLiveObject);
-        using PowerShell brokerScript = session.CreatePowerShell();
-        PowerShellInvocationResult brokerOutput = brokerScript
-            .AddScript(@"
+        try
+        {
+            session.SetLiveObjectVariable("brokerRdm", brokerLiveObject);
+            using PowerShell brokerScript = session.CreatePowerShell();
+            PowerShellInvocationResult brokerOutput = brokerScript
+                .AddScript(@"
                 $child = $brokerRdm.Add(""na$([char]0x00EF)ve-$([char]0x6771)$([char]0x4EAC)"")
                 $child.Host = ""host-$([char]0x6771)$([char]0x4EAC)""
                 $brokerRdm.Children[0].Description = ""description""
@@ -375,45 +377,65 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
                 $names = @($brokerRdm.Children | ForEach-Object Name) -join ','
                 ""$($child.Name)|$($child.Host)|$($brokerRdm.Children[0].Description)|$($brokerRdm.Children[0].Group)|$same|$names""
             ")
-            .Invoke();
-        if (brokerOutput.Output.Records.Count != 1 ||
-            brokerOutput.Output.Records[0].DisplayText != "na\u00EFve-\u6771\u4EAC|host-\u6771\u4EAC|description|group|True|na\u00EFve-\u6771\u4EAC" ||
-            brokerOutput.HadErrors)
-        {
-            Console.Error.WriteLine("NativeAOT facade did not preserve the single-interface SessionCreator broker contract.");
-            return 1;
-        }
+                .Invoke();
+            if (brokerOutput.Output.Records.Count != 1 ||
+                brokerOutput.Output.Records[0].DisplayText != "na\u00EFve-\u6771\u4EAC|host-\u6771\u4EAC|description|group|True|na\u00EFve-\u6771\u4EAC" ||
+                brokerOutput.HadErrors)
+            {
+                Console.Error.WriteLine("NativeAOT facade did not preserve the single-interface SessionCreator broker contract.");
+                return 1;
+            }
 
-        using PowerShell leakBrokerChild = session.CreatePowerShell();
-        _ = leakBrokerChild
-            .AddScript("$global:MultiPwshBrokerLeakedChild = $brokerRdm.Children[0]")
-            .Invoke();
-        if (!session.RemoveVariable("brokerRdm"))
-        {
-            Console.Error.WriteLine("NativeAOT facade could not remove the broker root wrapper.");
-            return 1;
-        }
+            using PowerShell invalidBrokerInput = session.CreatePowerShell();
+            PowerShellInvocationResult invalidBrokerOutput = invalidBrokerInput
+                .AddScript(@"
+                    $oversize = try { $brokerRdm.Add(('x' * 129)); $false } catch { $true }
+                    $invalidIndex = try { $brokerRdm.Children.get_Item(1); $false } catch { $true }
+                    ""$oversize|$invalidIndex""
+                ")
+                .Invoke();
+            if (invalidBrokerOutput.Output.Records.Count != 1 ||
+                invalidBrokerOutput.Output.Records[0].DisplayText != "True|True")
+            {
+                Console.Error.WriteLine("NativeAOT facade did not reject bounded broker inputs.");
+                return 1;
+            }
 
-        broker.EndLease();
-        using PowerShell readBrokerLeakedChild = session.CreatePowerShell();
-        PowerShellInvocationResult tombstoneOutput = readBrokerLeakedChild
-            .AddScript(@"
+            using PowerShell leakBrokerChild = session.CreatePowerShell();
+            _ = leakBrokerChild
+                .AddScript("$global:MultiPwshBrokerLeakedChild = $brokerRdm.Children[0]")
+                .Invoke();
+            if (!session.RemoveVariable("brokerRdm"))
+            {
+                Console.Error.WriteLine("NativeAOT facade could not remove the broker root wrapper.");
+                return 1;
+            }
+
+            broker.EndLease();
+            using PowerShell readBrokerLeakedChild = session.CreatePowerShell();
+            PowerShellInvocationResult tombstoneOutput = readBrokerLeakedChild
+                .AddScript(@"
                 try { $global:MultiPwshBrokerLeakedChild.ReadHost() }
                 catch {
                     if ($_.Exception.InnerException) { $_.Exception.InnerException.GetType().FullName }
                     else { $_.Exception.GetType().FullName }
                 }
             ")
-            .Invoke();
-        using PowerShell clearBrokerLeakedChild = session.CreatePowerShell();
-        _ = clearBrokerLeakedChild
-            .AddScript("Remove-Variable -Scope Global -Name MultiPwshBrokerLeakedChild -ErrorAction SilentlyContinue")
-            .Invoke();
-        if (tombstoneOutput.Output.Records.Count != 1 ||
-            tombstoneOutput.Output.Records[0].DisplayText != "System.ObjectDisposedException")
+                .Invoke();
+            using PowerShell clearBrokerLeakedChild = session.CreatePowerShell();
+            _ = clearBrokerLeakedChild
+                .AddScript("Remove-Variable -Scope Global -Name MultiPwshBrokerLeakedChild -ErrorAction SilentlyContinue")
+                .Invoke();
+            if (tombstoneOutput.Output.Records.Count != 1 ||
+                tombstoneOutput.Output.Records[0].DisplayText != "System.ObjectDisposedException")
+            {
+                Console.Error.WriteLine("NativeAOT facade did not tombstone a leaked broker child.");
+                return 1;
+            }
+        }
+        finally
         {
-            Console.Error.WriteLine("NativeAOT facade did not tombstone a leaked broker child.");
-            return 1;
+            broker.EndLease();
         }
     }
 }
