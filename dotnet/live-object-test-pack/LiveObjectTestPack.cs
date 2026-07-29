@@ -189,7 +189,14 @@ public static unsafe class LiveObjectTestPack
 
         ~BrokerClient()
         {
-            ReleaseComObject();
+            try
+            {
+                ReleaseComObject();
+            }
+            catch
+            {
+                // Finalizers must not allow RCW cleanup failures to escape.
+            }
         }
 
         internal ulong InvokeHandle(ulong objectId, uint memberId, byte[] input)
