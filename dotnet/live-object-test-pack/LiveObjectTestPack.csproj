@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\live-contracts\Devolutions.MultiPwsh.LiveContracts.csproj" />
     <Compile Include="..\interop\PowerShellLiveObjectContract.cs"
              Link="PowerShellLiveObjectContract.cs" />
     <Compile Include="..\interop\PowerShellLiveObjectTestContract.cs"

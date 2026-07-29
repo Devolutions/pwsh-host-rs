@@ -6,6 +6,10 @@
     <DevolutionsMultiPwshSdkNativeAsset>$(MSBuildThisFileDirectory)..\runtimes\$(RuntimeIdentifier)\native\$(DevolutionsMultiPwshSdkNativeFileName)</DevolutionsMultiPwshSdkNativeAsset>
   </PropertyGroup>
 
+  <ItemGroup>
+    <CompilerVisibleProperty Include="LiveContractMode" />
+  </ItemGroup>
+
   <Target Name="RemoveDevolutionsMultiPwshSdkNativeCopyLocalAsset"
           AfterTargets="ResolveLockFileCopyLocalFiles"
           Condition="'$(DevolutionsMultiPwshSdkEnabled)' != 'true'">

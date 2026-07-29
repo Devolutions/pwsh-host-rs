@@ -16,6 +16,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
     <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RepositoryRoot>$(MSBuildThisFileDirectory)..\..</RepositoryRoot>
@@ -28,6 +29,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\live-contracts\Devolutions.MultiPwsh.LiveContracts.csproj"
+                      PrivateAssets="all" />
     <ProjectReference Include="..\live-contract-generator\Devolutions.MultiPwsh.LiveContract.Generator.csproj"
                       ReferenceOutputAssembly="false" />
     <Compile Include="..\interop\PowerShellLiveObjectProbeContract.cs"
@@ -44,9 +47,10 @@
           Pack="true"
           PackagePath="analyzers\dotnet\cs\"
           Visible="false" />
-    <None Include="buildTransitive\Devolutions.MultiPwsh.LiveContract.Generator.targets"
+    <None Include="..\live-contracts\bin\$(Configuration)\netstandard2.0\Devolutions.MultiPwsh.LiveContracts.dll"
           Pack="true"
-          PackagePath="buildTransitive\" />
+          PackagePath="lib\netstandard2.0\"
+          Visible="false" />
     <None Include="$(PwshFfiNativeLibrary)"
           Condition="'$(PwshFfiNativeStagingRoot)' == ''"
           Pack="true"

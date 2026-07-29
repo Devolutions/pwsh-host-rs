@@ -47,6 +47,31 @@ containment remains effective at the ABI boundary.
 The SDK NuGet version and the native DLL `FileVersion`/`ProductVersion` match
 the `multi-pwsh` CLI release version.
 
+## Live-contract generator preview
+
+The package carries a `netstandard2.0` compile surface for
+`LiveContractAttribute`, `LiveObjectAttribute`, and `LiveMemberAttribute`, plus
+the incremental generator under `analyzers/`. This lets a trusted `net8.0`
+payload-pack project compile the same explicitly annotated contract declaration
+as the `net10.0` NativeAOT host without referencing the NativeAOT facade
+assembly. NuGet auto-loads the analyzer; the package's transitive target makes
+the project `LiveContractMode` visible to it:
+
+```xml
+<PropertyGroup>
+  <LiveContractMode>Payload</LiveContractMode>
+</PropertyGroup>
+```
+
+Compile the host declaration with `LiveContractMode=Host` and the trusted
+payload declaration with `LiveContractMode=Payload`. Both sides must use the
+same source-declared IDs and contract version. This remains a restricted
+preview: it does not expose a generic object bridge, reflection dispatch,
+callbacks, credentials, `PSHost`, remoting, or arbitrary CLR values. The
+consumer still supplies the explicitly bounded broker and payload wrapper
+implementation; the current generator emits the shared static wire map and
+contract metadata only.
+
 The facade requires native ABI v2. `ReadStreamBatch` is independently gated by
 the `LIVE_STREAM_POLLING` feature bit, so a native asset that lacks polling
 returns `UnsupportedCapability` before its additive export is called. Use

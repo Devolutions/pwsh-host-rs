@@ -23,6 +23,12 @@ public sealed class LiveContractGenerator : IIncrementalGenerator
 
         context.RegisterSourceOutput(declarations.Collect().Combine(mode), static (production, pair) =>
         {
+            INamedTypeSymbol? root = pair.Left.FirstOrDefault(static type => HasAttribute(type, "LiveContractAttribute"));
+            if (root is null)
+            {
+                return;
+            }
+
             if (pair.Right is not ("Host" or "Payload"))
             {
                 production.ReportDiagnostic(Diagnostic.Create(
@@ -30,12 +36,6 @@ public sealed class LiveContractGenerator : IIncrementalGenerator
                         "Set LiveContractMode to Host or Payload when compiling a [LiveContract] declaration.",
                         "LiveContract", DiagnosticSeverity.Error, true),
                     Location.None));
-                return;
-            }
-
-            INamedTypeSymbol? root = pair.Left.FirstOrDefault(static type => HasAttribute(type, "LiveContractAttribute"));
-            if (root is null)
-            {
                 return;
             }
 
