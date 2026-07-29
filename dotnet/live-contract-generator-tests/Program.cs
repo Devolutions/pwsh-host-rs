@@ -41,11 +41,12 @@ const string ValidContract = """
 
 VerifyGeneratedSurface("Host", "SessionCreatorLiveContractHostAdapter");
 VerifyGeneratedSurface("Payload", "SessionCreatorLiveContractProxy");
+VerifyGeneratedSurface("Payload", "SessionCreatorLiveContractProxy", ValidContract.Replace("namespace Fixture;", string.Empty, StringComparison.Ordinal));
 VerifyDiagnostic(ValidContract.Replace(", MaximumUtf8Bytes = 128", string.Empty, StringComparison.Ordinal), "MPWLC006");
 
-static void VerifyGeneratedSurface(string mode, string requiredText)
+static void VerifyGeneratedSurface(string mode, string requiredText, string? source = null)
 {
-    GeneratorDriverRunResult result = RunGenerator(ValidContract, mode, out Compilation output);
+    GeneratorDriverRunResult result = RunGenerator(source ?? ValidContract, mode, out Compilation output);
     AssertNoErrors(GetGeneratorDiagnostics(result));
     AssertNoErrors(output.GetDiagnostics());
 
