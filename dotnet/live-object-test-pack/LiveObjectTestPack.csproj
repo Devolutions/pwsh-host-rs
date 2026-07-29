@@ -12,5 +12,16 @@
              Link="PowerShellLiveObjectContract.cs" />
     <Compile Include="..\interop\PowerShellLiveObjectTestContract.cs"
              Link="PowerShellLiveObjectTestContract.cs" />
+    <Compile Include="..\interop\SessionCreatorLiveContract.cs"
+             Link="SessionCreatorLiveContract.cs" />
+    <ProjectReference Include="..\live-contract-generator\Devolutions.MultiPwsh.LiveContract.Generator.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+  <PropertyGroup>
+    <LiveContractMode>Payload</LiveContractMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <CompilerVisibleProperty Include="LiveContractMode" />
   </ItemGroup>
 </Project>

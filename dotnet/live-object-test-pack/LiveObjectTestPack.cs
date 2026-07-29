@@ -4,7 +4,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.Marshalling;
 using Devolutions.PowerShell.Ffi.LiveObjects;
-using BrokerMembers = Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectBrokerWire.PowerShellLiveObjectBrokerMembers;
+using GeneratedContract = Devolutions.MultiPwsh.LiveContracts.ISessionCreatorLiveContractGenerated;
 
 namespace Devolutions.MultiPwsh.LiveObject.TestPack;
 
@@ -100,7 +100,7 @@ public static unsafe class LiveObjectTestPack
 
         public TestBrokerChildProxy Add(string name)
         {
-            return GetOrAddChild(client.InvokeHandle(BrokerMembers.RootObjectId, BrokerMembers.RootAdd, PowerShellLiveObjectBrokerWire.EncodeString(name)));
+            return GetOrAddChild(client.InvokeHandle(GeneratedContract.RootObjectId, GeneratedContract.Add, PowerShellLiveObjectBrokerWire.EncodeString(name)));
         }
 
         public TestBrokerChildrenProxy Children => collection ??= new TestBrokerChildrenProxy(this);
@@ -118,12 +118,12 @@ public static unsafe class LiveObjectTestPack
 
         internal int GetChildCount()
         {
-            return client.InvokeInt32(BrokerMembers.ChildrenObjectId, BrokerMembers.ChildrenCount, PowerShellLiveObjectBrokerWire.Encode(PowerShellLiveObjectBrokerWire.Null, []));
+            return client.InvokeInt32(GeneratedContract.ChildrenObjectId, GeneratedContract.CountGet, PowerShellLiveObjectBrokerWire.Encode(PowerShellLiveObjectBrokerWire.Null, []));
         }
 
         internal TestBrokerChildProxy GetChildAt(int index)
         {
-            return GetOrAddChild(client.InvokeHandle(BrokerMembers.ChildrenObjectId, BrokerMembers.ChildrenGetAt, PowerShellLiveObjectBrokerWire.EncodeInt32(index)));
+            return GetOrAddChild(client.InvokeHandle(GeneratedContract.ChildrenObjectId, GeneratedContract.GetAt, PowerShellLiveObjectBrokerWire.EncodeInt32(index)));
         }
 
         public static TestBrokerProxy Create(IPowerShellLiveObjectTestBroker value, ComObject comObject)
@@ -148,10 +148,10 @@ public static unsafe class LiveObjectTestPack
             this.handle = handle;
         }
 
-        public string Name { get => Get(BrokerMembers.ChildGetName); set => Set(BrokerMembers.ChildSetName, value); }
-        public string Host { get => Get(BrokerMembers.ChildGetHost); set => Set(BrokerMembers.ChildSetHost, value); }
-        public string Description { get => Get(BrokerMembers.ChildGetDescription); set => Set(BrokerMembers.ChildSetDescription, value); }
-        public string Group { get => Get(BrokerMembers.ChildGetGroup); set => Set(BrokerMembers.ChildSetGroup, value); }
+        public string Name { get => Get(GeneratedContract.NameGet); set => Set(GeneratedContract.NameSet, value); }
+        public string Host { get => Get(GeneratedContract.HostGet); set => Set(GeneratedContract.HostSet, value); }
+        public string Description { get => Get(GeneratedContract.DescriptionGet); set => Set(GeneratedContract.DescriptionSet, value); }
+        public string Group { get => Get(GeneratedContract.GroupGet); set => Set(GeneratedContract.GroupSet, value); }
         public string ReadHost() => Host;
 
         private string Get(uint member) => client.InvokeString(handle, member, PowerShellLiveObjectBrokerWire.Encode(PowerShellLiveObjectBrokerWire.Null, []));
@@ -289,7 +289,11 @@ public static unsafe class LiveObjectTestPack
                     tag != PowerShellLiveObjectBrokerWire.Utf8String)
                     throw new InvalidOperationException("Broker returned an invalid lease.");
                 string[] parts = System.Text.Encoding.UTF8.GetString(payload).Split(':');
-                if (parts.Length != 2 || !ulong.TryParse(parts[0], out ulong leaseId) || !uint.TryParse(parts[1], out uint generation))
+                if (parts.Length != 3 ||
+                    !ulong.TryParse(parts[0], out ulong leaseId) ||
+                    !uint.TryParse(parts[1], out uint generation) ||
+                    !uint.TryParse(parts[2], out uint contractHash) ||
+                    contractHash != GeneratedContract.ContractHash)
                     throw new InvalidOperationException("Broker returned an invalid lease.");
                 return (leaseId, generation);
             }

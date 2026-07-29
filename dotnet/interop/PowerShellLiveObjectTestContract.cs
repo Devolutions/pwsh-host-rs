@@ -26,6 +26,38 @@ public static class PowerShellLiveObjectTestContracts
         PowerShellLiveObjectDirection.ConsumerToSession);
 }
 
+[AttributeUsage(AttributeTargets.Interface)]
+public sealed class LiveContractAttribute : Attribute
+{
+    public LiveContractAttribute(string id, int majorVersion, int minorVersion)
+    {
+        Id = id;
+        MajorVersion = majorVersion;
+        MinorVersion = minorVersion;
+    }
+
+    public string Id { get; }
+    public int MajorVersion { get; }
+    public int MinorVersion { get; }
+}
+
+[AttributeUsage(AttributeTargets.Interface)]
+public sealed class LiveObjectAttribute : Attribute
+{
+    public LiveObjectAttribute(ulong id) => Id = id;
+    public ulong Id { get; }
+}
+
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Property)]
+public sealed class LiveMemberAttribute : Attribute
+{
+    public LiveMemberAttribute(uint getterOrMethodId) => GetterOrMethodId = getterOrMethodId;
+    public uint GetterOrMethodId { get; }
+    public uint SetterId { get; init; }
+    public int MaximumUtf8Bytes { get; init; }
+    public int MaximumCollectionCount { get; init; }
+}
+
 [GeneratedComInterface]
 [Guid("5BFBF6D7-7BFA-4C15-8D35-02B665F39A18")]
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]

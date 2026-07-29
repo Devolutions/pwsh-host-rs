@@ -6,26 +6,13 @@ using System.Runtime.InteropServices.Marshalling;
 using System.Security.Cryptography;
 using Devolutions.PowerShell.Ffi;
 using Devolutions.PowerShell.Ffi.LiveObjects;
+using GeneratedContract = Devolutions.MultiPwsh.LiveContracts.ISessionCreatorLiveContractGenerated;
 
 namespace NativeAotFfiSample;
 
 [GeneratedComClass]
 internal sealed partial class SessionCreatorBroker : IPowerShellLiveObjectTestBroker, IPowerShellLiveObjectBroker
 {
-    internal const ulong RootObjectId = 1;
-    internal const ulong ChildrenObjectId = 2;
-    internal const uint RootAdd = 1;
-    internal const uint ChildrenCount = 2;
-    internal const uint ChildrenGetAt = 3;
-    internal const uint ChildGetName = 10;
-    internal const uint ChildSetName = 11;
-    internal const uint ChildGetHost = 12;
-    internal const uint ChildSetHost = 13;
-    internal const uint ChildGetDescription = 14;
-    internal const uint ChildSetDescription = 15;
-    internal const uint ChildGetGroup = 16;
-    internal const uint ChildSetGroup = 17;
-
     private const int EInvalidArg = unchecked((int)0x80070057);
     private const int EAccessDenied = unchecked((int)0x80070005);
     private const int EBounds = unchecked((int)0x8000000B);
@@ -62,23 +49,23 @@ internal sealed partial class SessionCreatorBroker : IPowerShellLiveObjectTestBr
             if (requestedLeaseId == 0 && requestedGeneration == 0 && objectId == 0 && memberId == 0 &&
                 inputTag == PowerShellLiveObjectBrokerWire.Null)
             {
-                result = PowerShellLiveObjectBrokerWire.EncodeString($"{leaseId}:{generation}");
+                result = PowerShellLiveObjectBrokerWire.EncodeString($"{leaseId}:{generation}:{GeneratedContract.ContractHash}");
             }
             else if (closed || requestedLeaseId != leaseId || requestedGeneration != generation)
             {
                 return EAccessDenied;
             }
-            else if (objectId == RootObjectId && memberId == RootAdd && inputTag == PowerShellLiveObjectBrokerWire.Utf8String &&
+            else if (objectId == GeneratedContract.RootObjectId && memberId == GeneratedContract.Add && inputTag == PowerShellLiveObjectBrokerWire.Utf8String &&
                 TryReadText(inputValue, out string name))
             {
                 children.Add(new Child((ulong)children.Count + 3, name));
                 result = PowerShellLiveObjectBrokerWire.EncodeObjectHandle(children[^1].Id);
             }
-            else if (objectId == ChildrenObjectId && memberId == ChildrenCount && inputTag == PowerShellLiveObjectBrokerWire.Null)
+            else if (objectId == GeneratedContract.ChildrenObjectId && memberId == GeneratedContract.CountGet && inputTag == PowerShellLiveObjectBrokerWire.Null)
             {
                 result = PowerShellLiveObjectBrokerWire.EncodeInt32(children.Count);
             }
-            else if (objectId == ChildrenObjectId && memberId == ChildrenGetAt && inputTag == PowerShellLiveObjectBrokerWire.Int32 &&
+            else if (objectId == GeneratedContract.ChildrenObjectId && memberId == GeneratedContract.GetAt && inputTag == PowerShellLiveObjectBrokerWire.Int32 &&
                 inputValue.Length == sizeof(int))
             {
                 int index = BinaryPrimitives.ReadInt32LittleEndian(inputValue);
@@ -147,15 +134,15 @@ internal sealed partial class SessionCreatorBroker : IPowerShellLiveObjectTestBr
             lock (gate)
             {
                 int count = children.Count;
-                return CallRaw(leaseId, generation, RootObjectId, 999, nullValue, 264) == EInvalidArg &&
-                    CallRaw(leaseId, generation, ulong.MaxValue, ChildGetName, nullValue, 264) == EInvalidArg &&
-                    CallRaw(leaseId, generation, RootObjectId, RootAdd, malformedUtf8, 264) == EInvalidArg &&
-                    CallRaw(leaseId, generation, RootObjectId, RootAdd, invalidProtocol, 264) == EInvalidArg &&
-                    CallRaw(leaseId, generation, RootObjectId, RootAdd, invalidLength, 264) == EInvalidArg &&
-                    CallRaw(leaseId, generation + 1, RootObjectId, RootAdd, nullValue, 264) == EAccessDenied &&
-                    CallRaw(leaseId + 1, generation, RootObjectId, RootAdd, nullValue, 264) == EAccessDenied &&
-                    CallRaw(leaseId, generation, ChildrenObjectId, ChildrenGetAt, PowerShellLiveObjectBrokerWire.EncodeInt32(0), 264) == EBounds &&
-                    CallRaw(leaseId, generation, ChildrenObjectId, ChildrenCount, nullValue, 0) == EBufferTooSmall &&
+                return CallRaw(leaseId, generation, GeneratedContract.RootObjectId, 999, nullValue, 264) == EInvalidArg &&
+                    CallRaw(leaseId, generation, ulong.MaxValue, GeneratedContract.NameGet, nullValue, 264) == EInvalidArg &&
+                    CallRaw(leaseId, generation, GeneratedContract.RootObjectId, GeneratedContract.Add, malformedUtf8, 264) == EInvalidArg &&
+                    CallRaw(leaseId, generation, GeneratedContract.RootObjectId, GeneratedContract.Add, invalidProtocol, 264) == EInvalidArg &&
+                    CallRaw(leaseId, generation, GeneratedContract.RootObjectId, GeneratedContract.Add, invalidLength, 264) == EInvalidArg &&
+                    CallRaw(leaseId, generation + 1, GeneratedContract.RootObjectId, GeneratedContract.Add, nullValue, 264) == EAccessDenied &&
+                    CallRaw(leaseId + 1, generation, GeneratedContract.RootObjectId, GeneratedContract.Add, nullValue, 264) == EAccessDenied &&
+                    CallRaw(leaseId, generation, GeneratedContract.ChildrenObjectId, GeneratedContract.GetAt, PowerShellLiveObjectBrokerWire.EncodeInt32(0), 264) == EBounds &&
+                    CallRaw(leaseId, generation, GeneratedContract.ChildrenObjectId, GeneratedContract.CountGet, nullValue, 0) == EBufferTooSmall &&
                     children.Count == count;
             }
         }
@@ -232,26 +219,26 @@ internal sealed partial class SessionCreatorBroker : IPowerShellLiveObjectTestBr
     private static bool TryInvokeChild(Child child, uint memberId, byte tag, ReadOnlySpan<byte> value, out byte[] result)
     {
         result = null!;
-        if (memberId is ChildGetName or ChildGetHost or ChildGetDescription or ChildGetGroup && tag == PowerShellLiveObjectBrokerWire.Null)
+        if (memberId is GeneratedContract.NameGet or GeneratedContract.HostGet or GeneratedContract.DescriptionGet or GeneratedContract.GroupGet && tag == PowerShellLiveObjectBrokerWire.Null)
         {
             result = PowerShellLiveObjectBrokerWire.EncodeString(memberId switch
             {
-                ChildGetName => child.Name,
-                ChildGetHost => child.Host,
-                ChildGetDescription => child.Description,
+                GeneratedContract.NameGet => child.Name,
+                GeneratedContract.HostGet => child.Host,
+                GeneratedContract.DescriptionGet => child.Description,
                 _ => child.Group,
             });
             return true;
         }
 
-        if (memberId is ChildSetName or ChildSetHost or ChildSetDescription or ChildSetGroup &&
+        if (memberId is GeneratedContract.NameSet or GeneratedContract.HostSet or GeneratedContract.DescriptionSet or GeneratedContract.GroupSet &&
             tag == PowerShellLiveObjectBrokerWire.Utf8String && TryReadText(value, out string text))
         {
             switch (memberId)
             {
-                case ChildSetName: child.Name = text; break;
-                case ChildSetHost: child.Host = text; break;
-                case ChildSetDescription: child.Description = text; break;
+                case GeneratedContract.NameSet: child.Name = text; break;
+                case GeneratedContract.HostSet: child.Host = text; break;
+                case GeneratedContract.DescriptionSet: child.Description = text; break;
                 default: child.Group = text; break;
             }
 
