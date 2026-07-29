@@ -405,11 +405,6 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
             _ = leakBrokerChild
                 .AddScript("$global:MultiPwshBrokerLeakedChild = $brokerRdm.Children[0]")
                 .Invoke();
-            if (!session.RemoveVariable("brokerRdm"))
-            {
-                Console.Error.WriteLine("NativeAOT facade could not remove the broker root wrapper.");
-                return 1;
-            }
 
             broker.EndLease();
             using PowerShell readBrokerLeakedChild = session.CreatePowerShell();
@@ -430,6 +425,12 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
                 tombstoneOutput.Output.Records[0].DisplayText != "System.ObjectDisposedException")
             {
                 Console.Error.WriteLine("NativeAOT facade did not tombstone a leaked broker child.");
+                return 1;
+            }
+
+            if (!session.RemoveVariable("brokerRdm"))
+            {
+                Console.Error.WriteLine("NativeAOT facade could not remove the broker root wrapper.");
                 return 1;
             }
         }

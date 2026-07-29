@@ -30,6 +30,7 @@ internal sealed partial class SessionCreatorBroker : IPowerShellLiveObjectTestBr
     private const int EAccessDenied = unchecked((int)0x80070005);
     private const int EBounds = unchecked((int)0x8000000B);
     private const int EBufferTooSmall = unchecked((int)0x8007007A);
+    private static readonly System.Text.UTF8Encoding StrictUtf8 = new(false, true);
     private readonly object gate = new();
     private readonly ulong leaseId;
     private readonly List<Child> children = [];
@@ -165,7 +166,7 @@ internal sealed partial class SessionCreatorBroker : IPowerShellLiveObjectTestBr
 
         try
         {
-            text = System.Text.Encoding.UTF8.GetString(value);
+            text = StrictUtf8.GetString(value);
             return text.Length <= 128 && text.AsSpan().IndexOf('\0') < 0;
         }
         catch (ArgumentException)
@@ -176,10 +177,11 @@ internal sealed partial class SessionCreatorBroker : IPowerShellLiveObjectTestBr
 
     private bool TryGetChild(ulong objectId, out Child child)
     {
-        int index = checked((int)objectId - 3);
-        if ((uint)index < (uint)children.Count && children[index].Id == objectId)
+        if (objectId >= 3 &&
+            objectId - 3 < (ulong)children.Count &&
+            children[(int)(objectId - 3)].Id == objectId)
         {
-            child = children[index];
+            child = children[(int)(objectId - 3)];
             return true;
         }
 
