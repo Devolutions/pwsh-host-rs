@@ -44,10 +44,12 @@
           Pack="true"
           PackagePath="buildTransitive\" />
     <None Include="..\live-contracts\LiveContractAttributes.cs"
+          BuildAction="None"
           Pack="true"
           PackagePath="contentFiles\any\any\Devolutions.MultiPwsh.LiveContracts\"
           Visible="false" />
     <None Include="..\live-contracts\LiveContractBroker.cs"
+          BuildAction="None"
           Pack="true"
           PackagePath="contentFiles\any\any\Devolutions.MultiPwsh.LiveContracts\"
           Visible="false" />
