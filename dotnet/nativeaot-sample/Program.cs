@@ -246,6 +246,10 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
         }
 
         using PowerShell graphGenericProbe = session.CreatePowerShell();
+        const string childName = "na\u00EFve-\u6771\u4EAC";
+        const string childHost = "host-\u6771\u4EAC";
+        const string childDescription = "description-\u6771\u4EAC";
+        const string childGroup = "group-\u6771\u4EAC";
         PowerShellInvocationResult graphOutput;
         try
         {
@@ -254,7 +258,15 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
                     $genericAlias.Revision = 64
                     $genericAlias.Primary.Value = 17
                     $genericAlias.Children[1].Value = 29
-                    ""$($genericAlias.Revision)|$($genericAlias.Primary.Value)|$($genericAlias.Children.Count)|$($genericAlias.Children[0].Value)|$($genericAlias.Children[1].Value)""
+                    $child = $genericAlias.Add(""na$([char]0x00EF)ve-$([char]0x6771)$([char]0x4EAC)"")
+                    $child.Host = ""host-$([char]0x6771)$([char]0x4EAC)""
+                    $genericAlias.Children[2].Description = ""description-$([char]0x6771)$([char]0x4EAC)""
+                    $genericAlias.Children[2].Group = ""group-$([char]0x6771)$([char]0x4EAC)""
+                    $collectionChild = $genericAlias.Children[2]
+                    $referenceEquals = [object]::ReferenceEquals($child, $collectionChild)
+                    $equals = $child -eq $collectionChild
+                    $names = @($genericAlias.Children | ForEach-Object Name) -join ','
+                    ""$($genericAlias.Revision)|$($genericAlias.Primary.Value)|$($genericAlias.Children.Count)|$($genericAlias.Children[0].Value)|$($genericAlias.Children[1].Value)|$($child.Name)|$($child.Host)|$($collectionChild.Description)|$($collectionChild.Group)|$referenceEquals|$equals|$names""
                 ")
                 .Invoke();
         }
@@ -268,7 +280,8 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
         }
 
         if (graphOutput.Output.Records.Count != 1 ||
-            graphOutput.Output.Records[0].DisplayText != "64|17|2|17|29" ||
+            graphOutput.Output.Records[0].DisplayText !=
+                $"64|17|3|17|29|{childName}|{childHost}|{childDescription}|{childGroup}|True|True|primary,secondary,{childName}" ||
             genericBroker.GetRevision(out long revision) != 0 ||
             revision != 64 ||
             genericBroker.GetPrimary(out IPowerShellLiveObjectTestChild primary) != 0 ||
@@ -278,9 +291,69 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
             children.GetAt(1, out IPowerShellLiveObjectTestChild secondary) != 0 ||
             secondary.GetValue(out long secondaryValue) != 0 ||
             secondaryValue != 29 ||
-            !session.RemoveVariable("genericAlias"))
+            children.GetAt(2, out IPowerShellLiveObjectTestChild addedChild) != 0 ||
+            addedChild.GetName(out string addedName) != 0 ||
+            addedName != childName ||
+            addedChild.GetHost(out string addedHost) != 0 ||
+            addedHost != childHost ||
+            addedChild.GetDescription(out string addedDescription) != 0 ||
+            addedDescription != childDescription ||
+            addedChild.GetGroup(out string addedGroup) != 0 ||
+            addedGroup != childGroup)
         {
-            Console.Error.WriteLine("NativeAOT facade did not preserve nested or indexed generated-COM live object members.");
+            Console.Error.WriteLine("NativeAOT facade did not preserve SessionCreator-style generated-COM members.");
+            return 1;
+        }
+
+        using PowerShell leakChild = session.CreatePowerShell();
+        PowerShellInvocationResult leakOutput = leakChild
+            .AddScript("$global:MultiPwshLiveObjectLeakedChild = $genericAlias.Children[2]")
+            .Invoke();
+        if (leakOutput.HadErrors || !session.RemoveVariable("genericAlias"))
+        {
+            Console.Error.WriteLine("NativeAOT facade could not remove the generated-COM root lease.");
+            return 1;
+        }
+
+        bool leakedChildWasSilentlyInert = false;
+        string lateAccessDescription = string.Empty;
+        using (PowerShell readLeakedChild = session.CreatePowerShell())
+        {
+            try
+            {
+                PowerShellInvocationResult lateOutput = readLeakedChild
+                    .AddScript(@"
+                        try
+                        {
+                            ""value:$($global:MultiPwshLiveObjectLeakedChild.Host)""
+                        }
+                        catch
+                        {
+                            ""error:$($_.Exception.GetType().FullName):$($_.Exception.Message)""
+                        }
+                    ")
+                    .Invoke();
+                lateAccessDescription = lateOutput.Output.Records.Count == 1
+                    ? lateOutput.Output.Records[0].DisplayText
+                    : $"records={lateOutput.Output.Records.Count}; errors={lateOutput.Errors.Records.Count}";
+                // The current root-only reconciliation disposes the child wrapper, but
+                // PowerShell projects its failed getter as null instead of a tombstone error.
+                leakedChildWasSilentlyInert = lateAccessDescription == "value:";
+            }
+            catch (PowerShellInvocationException exception)
+            {
+                lateAccessDescription = $"errors={exception.InvocationResult.Errors.Records.Count}";
+            }
+        }
+
+        using PowerShell clearLeakedChild = session.CreatePowerShell();
+        _ = clearLeakedChild
+            .AddScript("Remove-Variable -Scope Global -Name MultiPwshLiveObjectLeakedChild -ErrorAction SilentlyContinue")
+            .Invoke();
+        if (!leakedChildWasSilentlyInert)
+        {
+            Console.Error.WriteLine(
+                $"NativeAOT facade did not preserve the expected leaked-child teardown probe behavior: {lateAccessDescription}");
             return 1;
         }
     }

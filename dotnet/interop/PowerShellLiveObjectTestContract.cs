@@ -19,7 +19,7 @@ public static class PowerShellLiveObjectTestContracts
         PowerShellLiveObjectDirection.ConsumerToSession);
 }
 
-[GeneratedComInterface]
+[GeneratedComInterface(StringMarshalling = StringMarshalling.Utf16)]
 [Guid("C9A4FEA0-4EA6-48BE-8B4F-B30BB328CCBD")]
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public partial interface IPowerShellLiveObjectTestCount
@@ -41,9 +41,12 @@ public partial interface IPowerShellLiveObjectTestCount
 
     [PreserveSig]
     int GetChildren(out IPowerShellLiveObjectTestChildCollection children);
+
+    [PreserveSig]
+    int Add(string name, out IPowerShellLiveObjectTestChild child);
 }
 
-[GeneratedComInterface]
+[GeneratedComInterface(StringMarshalling = StringMarshalling.Utf16)]
 [Guid("EDB0F021-1CA0-4A03-829D-D6325A34E642")]
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public partial interface IPowerShellLiveObjectTestChild
@@ -53,6 +56,33 @@ public partial interface IPowerShellLiveObjectTestChild
 
     [PreserveSig]
     int SetValue(long value);
+
+    [PreserveSig]
+    int GetIdentity(out long identity);
+
+    [PreserveSig]
+    int GetName(out string name);
+
+    [PreserveSig]
+    int SetName(string name);
+
+    [PreserveSig]
+    int GetHost(out string host);
+
+    [PreserveSig]
+    int SetHost(string host);
+
+    [PreserveSig]
+    int GetDescription(out string description);
+
+    [PreserveSig]
+    int SetDescription(string description);
+
+    [PreserveSig]
+    int GetGroup(out string group);
+
+    [PreserveSig]
+    int SetGroup(string group);
 }
 
 [GeneratedComInterface]

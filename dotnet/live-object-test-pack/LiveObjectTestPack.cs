@@ -84,7 +84,7 @@ public static unsafe class LiveObjectTestPack
         private readonly object gate = new();
         private IPowerShellLiveObjectTestCount? value;
         private ComObject? comObject;
-        private TestChildProxy? primary;
+        private readonly Dictionary<long, TestChildProxy> childProxies = [];
         private TestChildCollectionProxy? children;
 
         private TestCountProxy(IPowerShellLiveObjectTestCount value, ComObject comObject)
@@ -122,19 +122,13 @@ public static unsafe class LiveObjectTestPack
             {
                 lock (gate)
                 {
-                    if (primary is not null)
-                    {
-                        return primary;
-                    }
-
                     int hresult = GetContract().GetPrimary(out IPowerShellLiveObjectTestChild child);
                     if (hresult != 0)
                     {
                         throw new COMException("The external live object primary lookup failed.", hresult);
                     }
 
-                    primary = TestChildProxy.Create(child);
-                    return primary;
+                    return GetOrAddChild(child);
                 }
             }
         }
@@ -156,9 +150,24 @@ public static unsafe class LiveObjectTestPack
                         throw new COMException("The external live object child collection lookup failed.", hresult);
                     }
 
-                    children = TestChildCollectionProxy.Create(collection);
+                    children = TestChildCollectionProxy.Create(collection, GetOrAddChild);
                     return children;
                 }
+            }
+        }
+
+        public TestChildProxy Add(string name)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(name);
+            lock (gate)
+            {
+                int hresult = GetContract().Add(name, out IPowerShellLiveObjectTestChild child);
+                if (hresult != 0)
+                {
+                    throw new COMException("The external live object child creation failed.", hresult);
+                }
+
+                return GetOrAddChild(child);
             }
         }
 
@@ -182,8 +191,12 @@ public static unsafe class LiveObjectTestPack
         {
             lock (gate)
             {
-                primary?.Dispose();
-                primary = null;
+                foreach (TestChildProxy child in childProxies.Values)
+                {
+                    child.Dispose();
+                }
+
+                childProxies.Clear();
                 children?.Dispose();
                 children = null;
                 ComObject? release = comObject;
@@ -196,6 +209,30 @@ public static unsafe class LiveObjectTestPack
         private IPowerShellLiveObjectTestCount GetContract()
         {
             return value ?? throw new ObjectDisposedException(nameof(TestCountProxy));
+        }
+
+        private TestChildProxy GetOrAddChild(IPowerShellLiveObjectTestChild value)
+        {
+            int hresult = value.GetIdentity(out long identity);
+            if (hresult != 0)
+            {
+                TestChildProxy.ReleaseUnowned(value);
+                throw new COMException("The external live object child identity lookup failed.", hresult);
+            }
+
+            if (childProxies.TryGetValue(identity, out TestChildProxy? existing))
+            {
+                if (!existing.IsContract(value))
+                {
+                    TestChildProxy.ReleaseUnowned(value);
+                }
+
+                return existing;
+            }
+
+            TestChildProxy child = TestChildProxy.Create(value, identity);
+            childProxies.Add(identity, child);
+            return child;
         }
 
         private long Invoke(TestCountOperation operation)
@@ -222,11 +259,14 @@ public static unsafe class LiveObjectTestPack
         private IPowerShellLiveObjectTestChild? value;
         private ComObject? comObject;
 
-        private TestChildProxy(IPowerShellLiveObjectTestChild value, ComObject comObject)
+        private TestChildProxy(IPowerShellLiveObjectTestChild value, ComObject comObject, long identity)
         {
             this.value = value;
             this.comObject = comObject;
+            Identity = identity;
         }
+
+        public long Identity { get; }
 
         public long Value
         {
@@ -246,11 +286,55 @@ public static unsafe class LiveObjectTestPack
             }
         }
 
-        internal static TestChildProxy Create(IPowerShellLiveObjectTestChild value)
+        public string Name
+        {
+            get => GetText(static (IPowerShellLiveObjectTestChild value, out string text) => value.GetName(out text));
+            set => SetText(value, static (IPowerShellLiveObjectTestChild contract, string text) => contract.SetName(text));
+        }
+
+        public string Host
+        {
+            get => GetText(static (IPowerShellLiveObjectTestChild value, out string text) => value.GetHost(out text));
+            set => SetText(value, static (IPowerShellLiveObjectTestChild contract, string text) => contract.SetHost(text));
+        }
+
+        public string Description
+        {
+            get => GetText(static (IPowerShellLiveObjectTestChild value, out string text) => value.GetDescription(out text));
+            set => SetText(value, static (IPowerShellLiveObjectTestChild contract, string text) => contract.SetDescription(text));
+        }
+
+        public string Group
+        {
+            get => GetText(static (IPowerShellLiveObjectTestChild value, out string text) => value.GetGroup(out text));
+            set => SetText(value, static (IPowerShellLiveObjectTestChild contract, string text) => contract.SetGroup(text));
+        }
+
+        internal static TestChildProxy Create(IPowerShellLiveObjectTestChild value, long identity)
         {
             ComObject comObject = (object)value as ComObject
                 ?? throw new InvalidOperationException("Nested live object did not create a source-generated COM wrapper.");
-            return new TestChildProxy(value, comObject);
+            return new TestChildProxy(value, comObject, identity);
+        }
+
+        internal static void ReleaseUnowned(IPowerShellLiveObjectTestChild value)
+        {
+            ((object)value as ComObject)?.FinalRelease();
+        }
+
+        internal bool IsContract(IPowerShellLiveObjectTestChild candidate)
+        {
+            return ReferenceEquals(value, candidate);
+        }
+
+        public override bool Equals(object? obj)
+        {
+            return obj is TestChildProxy other && Identity == other.Identity;
+        }
+
+        public override int GetHashCode()
+        {
+            return Identity.GetHashCode();
         }
 
         public void Dispose()
@@ -280,20 +364,59 @@ public static unsafe class LiveObjectTestPack
             }
         }
 
+        private string GetText(TestChildTextGetter getter)
+        {
+            lock (gate)
+            {
+                IPowerShellLiveObjectTestChild contract = value
+                    ?? throw new ObjectDisposedException(nameof(TestChildProxy));
+                int hresult = getter(contract, out string text);
+                if (hresult != 0)
+                {
+                    throw new COMException("The nested live object text lookup failed.", hresult);
+                }
+
+                return text;
+            }
+        }
+
+        private void SetText(string text, TestChildTextSetter setter)
+        {
+            ArgumentNullException.ThrowIfNull(text);
+            lock (gate)
+            {
+                IPowerShellLiveObjectTestChild contract = value
+                    ?? throw new ObjectDisposedException(nameof(TestChildProxy));
+                int hresult = setter(contract, text);
+                if (hresult != 0)
+                {
+                    throw new COMException("The nested live object text update failed.", hresult);
+                }
+            }
+        }
+
         private delegate int TestChildOperation(IPowerShellLiveObjectTestChild value, out long result);
+
+        private delegate int TestChildTextGetter(IPowerShellLiveObjectTestChild value, out string result);
+
+        private delegate int TestChildTextSetter(IPowerShellLiveObjectTestChild value, string text);
     }
 
-    public sealed class TestChildCollectionProxy : IDisposable
+    public sealed class TestChildCollectionProxy : IReadOnlyList<TestChildProxy>, IDisposable
     {
         private readonly object gate = new();
-        private readonly Dictionary<int, TestChildProxy> items = [];
+        private readonly Func<IPowerShellLiveObjectTestChild, TestChildProxy> childFactory;
         private IPowerShellLiveObjectTestChildCollection? value;
         private ComObject? comObject;
 
-        private TestChildCollectionProxy(IPowerShellLiveObjectTestChildCollection value, ComObject comObject)
+        private TestChildCollectionProxy(
+            IPowerShellLiveObjectTestChildCollection value,
+            ComObject comObject,
+            Func<IPowerShellLiveObjectTestChild, TestChildProxy> childFactory)
         {
             this.value = value;
             this.comObject = comObject;
+            this.childFactory = childFactory;
         }
 
         public int Count => Invoke(static (IPowerShellLiveObjectTestChildCollection value, out int count) => value.GetCount(out count));
@@ -304,11 +427,6 @@ public static unsafe class LiveObjectTestPack
             {
                 lock (gate)
                 {
-                    if (items.TryGetValue(index, out TestChildProxy? item))
-                    {
-                        return item;
-                    }
-
                     IPowerShellLiveObjectTestChildCollection contract = value
                         ?? throw new ObjectDisposedException(nameof(TestChildCollectionProxy));
                     int hresult = contract.GetAt(index, out IPowerShellLiveObjectTestChild child);
@@ -317,30 +435,37 @@ public static unsafe class LiveObjectTestPack
                         throw new COMException("The nested live object collection lookup failed.", hresult);
                     }
 
-                    item = TestChildProxy.Create(child);
-                    items.Add(index, item);
-                    return item;
+                    return childFactory(child);
                 }
             }
         }
 
-        internal static TestChildCollectionProxy Create(IPowerShellLiveObjectTestChildCollection value)
+        public IEnumerator<TestChildProxy> GetEnumerator()
+        {
+            for (int index = 0; index < Count; index++)
+            {
+                yield return this[index];
+            }
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator()
+        {
+            return GetEnumerator();
+        }
+
+        internal static TestChildCollectionProxy Create(
+            IPowerShellLiveObjectTestChildCollection value,
+            Func<IPowerShellLiveObjectTestChild, TestChildProxy> childFactory)
         {
             ComObject comObject = (object)value as ComObject
                 ?? throw new InvalidOperationException("Nested live object collection did not create a source-generated COM wrapper.");
-            return new TestChildCollectionProxy(value, comObject);
+            return new TestChildCollectionProxy(value, comObject, childFactory);
         }
 
         public void Dispose()
         {
             lock (gate)
             {
-                foreach (TestChildProxy item in items.Values)
-                {
-                    item.Dispose();
-                }
-
-                items.Clear();
                 ComObject? release = comObject;
                 value = null;
                 comObject = null;
