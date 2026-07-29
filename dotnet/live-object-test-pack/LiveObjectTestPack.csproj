@@ -8,7 +8,12 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\live-contracts\Devolutions.MultiPwsh.LiveContracts.csproj" />
+    <!-- Contract packs are loaded from native memory, so link the small shared
+         contract source instead of introducing an unresolvable assembly dependency. -->
+    <Compile Include="..\live-contracts\LiveContractAttributes.cs"
+             Link="LiveContractAttributes.cs" />
+    <Compile Include="..\live-contracts\LiveContractBroker.cs"
+             Link="LiveContractBroker.cs" />
     <Compile Include="..\interop\PowerShellLiveObjectContract.cs"
              Link="PowerShellLiveObjectContract.cs" />
     <Compile Include="..\interop\PowerShellLiveObjectTestContract.cs"

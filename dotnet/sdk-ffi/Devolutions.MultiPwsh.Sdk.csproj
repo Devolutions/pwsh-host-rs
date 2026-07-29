@@ -47,11 +47,11 @@
           Pack="true"
           PackagePath="analyzers\dotnet\cs\"
           Visible="false" />
-    <None Include="..\live-contracts\bin\$(Configuration)\netstandard2.0\Devolutions.MultiPwsh.LiveContracts.dll"
+    <None Include="..\live-contracts\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.LiveContracts.dll"
           Pack="true"
-          PackagePath="lib\netstandard2.0\"
+          PackagePath="lib\net8.0\"
           Visible="false" />
-    <None Include="..\live-contracts\bin\$(Configuration)\netstandard2.0\Devolutions.MultiPwsh.LiveContracts.dll"
+    <None Include="..\live-contracts\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.LiveContracts.dll"
           Pack="true"
           PackagePath="lib\net10.0\"
           Visible="false" />

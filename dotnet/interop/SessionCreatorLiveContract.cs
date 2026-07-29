@@ -5,24 +5,24 @@ using Devolutions.PowerShell.Ffi.LiveObjects;
 
 namespace Devolutions.MultiPwsh.LiveContracts;
 
-[LiveContract("A1E95B5C-9E8E-4A3D-B6F2-93F81C51B19E", 1, 0)]
+[LiveContract("A1E95B5C-9E8E-4A3D-B6F2-93F81C51B19E", 1, 0, "5BFBF6D7-7BFA-4C15-8D35-02B665F39A18")]
 [LiveObject(1)]
 public interface ISessionCreatorLiveContract
 {
-    [LiveMember(1, MaximumUtf8Bytes = 128)]
+    [LiveMember(1, ResultObjectId = 3, MaximumUtf8Bytes = 128)]
     ISessionCreatorLiveChild Add(string name);
 
-    [LiveMember(2, MaximumCollectionCount = 32)]
+    [LiveMember(2, ResultObjectId = 2, MaximumCollectionCount = 32)]
     IReadOnlyList<ISessionCreatorLiveChild> Children { get; }
 }
 
 [LiveObject(2)]
 public interface ISessionCreatorLiveChildren
 {
-    [LiveMember(2, MaximumCollectionCount = 32)]
+    [LiveMember(3, MaximumCollectionCount = 32)]
     int Count { get; }
 
-    [LiveMember(3)]
+    [LiveMember(4, ResultObjectId = 3)]
     ISessionCreatorLiveChild GetAt(int index);
 }
 

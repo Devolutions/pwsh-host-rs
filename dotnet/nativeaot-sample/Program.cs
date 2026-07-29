@@ -358,19 +358,22 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
         }
     }
 
+    using (var rawBroker = new SessionCreatorBroker())
+    {
+        if (!rawBroker.VerifyRawRejections())
+        {
+            Console.Error.WriteLine("NativeAOT facade did not reject raw broker inputs without mutation.");
+            return 1;
+        }
+    }
+
     using (var broker = new SessionCreatorBroker())
-    using (var brokerLiveObject = new PowerShellLiveObject<IPowerShellLiveObjectTestBroker>(
+    using (var brokerLiveObject = new PowerShellLiveObject<IPowerShellLiveObjectBrokerContract>(
         PowerShellLiveObjectTestContracts.SessionCreatorBroker,
         broker))
     {
         try
         {
-            if (!broker.VerifyRawRejections())
-            {
-                Console.Error.WriteLine("NativeAOT facade did not reject raw broker inputs without mutation.");
-                return 1;
-            }
-
             session.SetLiveObjectVariable("brokerRdm", brokerLiveObject);
             using PowerShell brokerScript = session.CreatePowerShell();
             PowerShellInvocationResult brokerOutput = brokerScript

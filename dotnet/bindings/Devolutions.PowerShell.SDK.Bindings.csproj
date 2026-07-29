@@ -11,6 +11,7 @@
     <PwshExePath Condition="'$(PwshExePath)' == '' and Exists('C:\Program Files\PowerShell\7.4\pwsh.exe')">C:\Program Files\PowerShell\7.4\pwsh.exe</PwshExePath>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="..\live-contracts\Devolutions.MultiPwsh.LiveContracts.csproj" />
     <Compile Include="$(DiscoveredBindingsWrappersPath)" Visible="false" />
     <Compile Include="..\interop\PowerShellLiveObjectProbeContract.cs"
              Link="PowerShellLiveObjectProbeContract.cs" />
