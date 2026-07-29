@@ -187,6 +187,11 @@ public static unsafe class LiveObjectTestPack
             (leaseId, generation) = OpenLease(value);
         }
 
+        ~BrokerClient()
+        {
+            ReleaseComObject();
+        }
+
         internal ulong InvokeHandle(ulong objectId, uint memberId, byte[] input)
         {
             byte[] output = Invoke(objectId, memberId, input);
@@ -245,8 +250,19 @@ public static unsafe class LiveObjectTestPack
 
         public void Dispose()
         {
-            // Host-owned EndLease is the security boundary. A child retained by
-            // PowerShell must keep this client usable long enough to observe it.
+            // Host-owned EndLease is the security boundary. Child wrappers share
+            // this client, so root disposal cannot release the only RCW.
+        }
+
+        private void ReleaseComObject()
+        {
+            lock (gate)
+            {
+                ComObject? release = comObject;
+                comObject = null;
+                value = null;
+                release?.FinalRelease();
+            }
         }
 
         private static (ulong LeaseId, uint Generation) OpenLease(IPowerShellLiveObjectTestBroker broker)
