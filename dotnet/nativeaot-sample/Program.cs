@@ -365,6 +365,12 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
     {
         try
         {
+            if (!broker.VerifyRawRejections())
+            {
+                Console.Error.WriteLine("NativeAOT facade did not reject raw broker inputs without mutation.");
+                return 1;
+            }
+
             session.SetLiveObjectVariable("brokerRdm", brokerLiveObject);
             using PowerShell brokerScript = session.CreatePowerShell();
             PowerShellInvocationResult brokerOutput = brokerScript

@@ -135,6 +135,46 @@ internal sealed partial class SessionCreatorBroker : IPowerShellLiveObjectTestBr
         }
     }
 
+    internal bool VerifyRawRejections()
+        {
+            byte[] nullValue = PowerShellLiveObjectBrokerWire.Encode(PowerShellLiveObjectBrokerWire.Null, []);
+            byte[] malformedUtf8 = PowerShellLiveObjectBrokerWire.Encode(PowerShellLiveObjectBrokerWire.Utf8String, [0xC3, 0x28]);
+            byte[] invalidProtocol = (byte[])nullValue.Clone();
+            invalidProtocol[0] = 2;
+            byte[] invalidLength = (byte[])nullValue.Clone();
+            invalidLength[4] = 1;
+
+            lock (gate)
+            {
+                int count = children.Count;
+                return CallRaw(leaseId, generation, RootObjectId, 999, nullValue, 264) == EInvalidArg &&
+                    CallRaw(leaseId, generation, ulong.MaxValue, ChildGetName, nullValue, 264) == EInvalidArg &&
+                    CallRaw(leaseId, generation, RootObjectId, RootAdd, malformedUtf8, 264) == EInvalidArg &&
+                    CallRaw(leaseId, generation, RootObjectId, RootAdd, invalidProtocol, 264) == EInvalidArg &&
+                    CallRaw(leaseId, generation, RootObjectId, RootAdd, invalidLength, 264) == EInvalidArg &&
+                    CallRaw(leaseId, generation + 1, RootObjectId, RootAdd, nullValue, 264) == EAccessDenied &&
+                    CallRaw(leaseId + 1, generation, RootObjectId, RootAdd, nullValue, 264) == EAccessDenied &&
+                    CallRaw(leaseId, generation, ChildrenObjectId, ChildrenGetAt, PowerShellLiveObjectBrokerWire.EncodeInt32(0), 264) == EBounds &&
+                    CallRaw(leaseId, generation, ChildrenObjectId, ChildrenCount, nullValue, 0) == EBufferTooSmall &&
+                    children.Count == count;
+            }
+        }
+
+    private int CallRaw(ulong requestedLeaseId, uint requestedGeneration, ulong objectId, uint memberId, byte[] input, int outputCapacity)
+        {
+            IntPtr inputBuffer = Marshal.AllocHGlobal(input.Length);
+            IntPtr outputBuffer = Marshal.AllocHGlobal(Math.Max(outputCapacity, 1));
+            try
+            {
+                Marshal.Copy(input, 0, inputBuffer, input.Length);
+                return Invoke(requestedLeaseId, requestedGeneration, objectId, memberId, inputBuffer, input.Length, outputBuffer, outputCapacity, out _);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(inputBuffer);
+                Marshal.FreeHGlobal(outputBuffer);
+            }
+        }
     public void Dispose()
     {
         EndLease();
