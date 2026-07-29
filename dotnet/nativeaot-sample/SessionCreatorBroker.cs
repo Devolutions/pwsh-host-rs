@@ -122,13 +122,21 @@ internal sealed partial class SessionCreatorBroker : IPowerShellLiveObjectTestBr
         }
     }
 
-    public void Dispose()
+    internal void EndLease()
     {
         lock (gate)
         {
-            closed = true;
-            generation++;
+            if (!closed)
+            {
+                closed = true;
+                generation++;
+            }
         }
+    }
+
+    public void Dispose()
+    {
+        EndLease();
     }
 
     private static bool TryRead(nint input, int inputLength, out byte tag, out ReadOnlySpan<byte> value)

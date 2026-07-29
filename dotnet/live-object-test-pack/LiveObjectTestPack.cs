@@ -152,6 +152,7 @@ public static unsafe class LiveObjectTestPack
         public string Host { get => Get(BrokerMembers.ChildGetHost); set => Set(BrokerMembers.ChildSetHost, value); }
         public string Description { get => Get(BrokerMembers.ChildGetDescription); set => Set(BrokerMembers.ChildSetDescription, value); }
         public string Group { get => Get(BrokerMembers.ChildGetGroup); set => Set(BrokerMembers.ChildSetGroup, value); }
+        public string ReadHost() => Host;
 
         private string Get(uint member) => client.InvokeString(handle, member, PowerShellLiveObjectBrokerWire.Encode(PowerShellLiveObjectBrokerWire.Null, []));
         private void Set(uint member, string value) => client.InvokeVoid(handle, member, PowerShellLiveObjectBrokerWire.EncodeString(value));
@@ -231,6 +232,8 @@ public static unsafe class LiveObjectTestPack
                     int status = broker.Invoke(leaseId, generation, objectId, memberId, inputBuffer, input.Length, outputBuffer, 264, out int outputLength);
                     if (status == EBufferTooSmall || outputLength < 0 || outputLength > 264)
                         throw new InvalidOperationException("Broker output exceeds the fixed payload buffer.");
+                    if (status == unchecked((int)0x80070005))
+                        throw new ObjectDisposedException(nameof(TestBrokerProxy), "The host invocation lease has ended.");
                     if (status != 0) throw new COMException("Broker invocation failed.", status);
                     byte[] output = new byte[outputLength];
                     Marshal.Copy(outputBuffer, output, 0, outputLength);
@@ -242,19 +245,8 @@ public static unsafe class LiveObjectTestPack
 
         public void Dispose()
         {
-            lock (gate)
-            {
-                IPowerShellLiveObjectTestBroker? broker = value;
-                if (broker is not null)
-                {
-                    _ = broker.CloseLease(leaseId, generation);
-                }
-
-                value = null;
-                ComObject? release = comObject;
-                comObject = null;
-                release?.FinalRelease();
-            }
+            // Host-owned EndLease is the security boundary. A child retained by
+            // PowerShell must keep this client usable long enough to observe it.
         }
 
         private static (ulong LeaseId, uint Generation) OpenLease(IPowerShellLiveObjectTestBroker broker)

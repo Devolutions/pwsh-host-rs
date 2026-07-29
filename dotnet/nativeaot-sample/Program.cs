@@ -378,9 +378,41 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
             .Invoke();
         if (brokerOutput.Output.Records.Count != 1 ||
             brokerOutput.Output.Records[0].DisplayText != "na\u00EFve-\u6771\u4EAC|host-\u6771\u4EAC|description|group|True|na\u00EFve-\u6771\u4EAC" ||
-            !session.RemoveVariable("brokerRdm"))
+            brokerOutput.HadErrors)
         {
             Console.Error.WriteLine("NativeAOT facade did not preserve the single-interface SessionCreator broker contract.");
+            return 1;
+        }
+
+        using PowerShell leakBrokerChild = session.CreatePowerShell();
+        _ = leakBrokerChild
+            .AddScript("$global:MultiPwshBrokerLeakedChild = $brokerRdm.Children[0]")
+            .Invoke();
+        if (!session.RemoveVariable("brokerRdm"))
+        {
+            Console.Error.WriteLine("NativeAOT facade could not remove the broker root wrapper.");
+            return 1;
+        }
+
+        broker.EndLease();
+        using PowerShell readBrokerLeakedChild = session.CreatePowerShell();
+        PowerShellInvocationResult tombstoneOutput = readBrokerLeakedChild
+            .AddScript(@"
+                try { $global:MultiPwshBrokerLeakedChild.ReadHost() }
+                catch {
+                    if ($_.Exception.InnerException) { $_.Exception.InnerException.GetType().FullName }
+                    else { $_.Exception.GetType().FullName }
+                }
+            ")
+            .Invoke();
+        using PowerShell clearBrokerLeakedChild = session.CreatePowerShell();
+        _ = clearBrokerLeakedChild
+            .AddScript("Remove-Variable -Scope Global -Name MultiPwshBrokerLeakedChild -ErrorAction SilentlyContinue")
+            .Invoke();
+        if (tombstoneOutput.Output.Records.Count != 1 ||
+            tombstoneOutput.Output.Records[0].DisplayText != "System.ObjectDisposedException")
+        {
+            Console.Error.WriteLine("NativeAOT facade did not tombstone a leaked broker child.");
             return 1;
         }
     }
