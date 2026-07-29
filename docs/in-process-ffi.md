@@ -667,6 +667,18 @@ copied input and result data in session variables. Promote only a reviewed
 operation, such as the example `app.get-label`, to an enumerated capability.
 Scripts cannot call arbitrary proxy methods or obtain original managed objects.
 
+For a connection-edit flow, the NativeAOT sample sets a copied `connection`
+property bag (`Id`, `Name`, and `Host`) and attaches the declared
+`rdm.stage-connection-patch` capability only to the invocation that uses it.
+The capability accepts exactly one bounded property bag with `ConnectionId`
+and `DisplayName`, validates both fields, records a consumer-owned patch
+intent, and returns only `{ Accepted = true }`. This replaces a narrowly
+reviewed operation, not an injected `$RDM` object: scripts cannot discover
+other members, obtain the original connection, or invoke another application
+operation. The sample's two-second deadline, 256-byte input limit, and
+64-byte response limit are application-contract choices that production
+callers must set for their own reviewed intent DTO.
+
 ### One-shot administrative command example
 
 A local, no-credential `Stop-Computer` or `Restart-Computer` command is a

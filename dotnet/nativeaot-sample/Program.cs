@@ -122,6 +122,50 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
         return 1;
     }
 
+    var patchHandler = new ConnectionPatchIntentHandler();
+    var stagePatch = new PowerShellCapabilityDefinition(
+        "rdm.stage-connection-patch",
+        [new PowerShellCapabilityArgumentSchema([PowerShellValueKind.PropertyBag])],
+        [PowerShellValueKind.PropertyBag],
+        PowerShellCapabilityPermission.Write,
+        maximumInputBytes: 256,
+        maximumOutputBytes: 64,
+        deadline: TimeSpan.FromSeconds(2));
+    using (PowerShellCapabilitySet capabilities = runtime.RegisterCapabilities(
+        [new PowerShellCapabilityBinding(stagePatch, patchHandler)]))
+    {
+        session.SetPropertyBag(
+            "connection",
+            [
+                new("Id", PowerShellValue.String("connection-42")),
+                new("Name", PowerShellValue.String("Production")),
+                new("Host", PowerShellValue.String("rdp.example.test")),
+            ]);
+        using PowerShell stageConnectionPatch = session.CreatePowerShell();
+        PowerShellInvocationResult stagedPatchOutput = stageConnectionPatch
+            .AddScript(@"
+                $intent = [pscustomobject]@{
+                    ConnectionId = $connection.Id
+                    DisplayName = ""$($connection.Name)-reviewed""
+                }
+                $DpsCapabilities.Invoke('rdm.stage-connection-patch', $intent).Accepted
+            ")
+            .WithCapabilities(capabilities)
+            .Invoke();
+        if (stagedPatchOutput.Output.Records.Count != 1 ||
+            stagedPatchOutput.Output.Records[0].DisplayText != "True" ||
+            patchHandler.Intent is not
+            {
+                ConnectionId: "connection-42",
+                DisplayName: "Production-reviewed",
+            } ||
+            !session.RemoveVariable("connection"))
+        {
+            Console.Error.WriteLine("NativeAOT facade did not stage the bounded connection patch intent.");
+            return 1;
+        }
+    }
+
     using (var reverseProbe = new PowerShellSessionObjectProbe(64))
     {
         session.SetLiveObjectVariable("reverseProbe", reverseProbe);
