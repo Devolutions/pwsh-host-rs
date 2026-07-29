@@ -98,15 +98,30 @@ an `IUnknown`.
 The `dotnet/live-object-test-pack` project is an acceptance fixture, not a
 shipping application contract. It proves that a separately compiled net8
 adapter can project a .NET 10 broker into a `PowerShellSession`, expose
-ordinary `Count` and `Increment` script members, retain its live state across
-invocations, and preserve a session-variable alias.
+ordinary scalar members, nested broker members, and a C# indexer as
+PowerShell-visible properties and `Children[index]` access. The acceptance
+broker mutates a nested child through both `Primary` and `Children[0]` to
+verify that separately projected RCWs retain the same consumer-owned child
+identity. It retains live state across invocations and preserves a
+session-variable alias.
 
 Contract packs are deliberately explicit and trusted application code. They
 cannot expose raw pointers through PowerShell or turn arbitrary CLR objects
 into contracts. The current external-pack registry supports only the proven
 consumer-to-session direction. Payload-to-consumer object contracts,
-cross-session identity, compatibility relaxation, source generation, and
-application-specific schemas remain future work.
+cross-session identity, compatibility relaxation, and SDK-owned
+application-specific schema generation remain future work.
+
+The transfer is `IUnknown` only: the NativeAOT consumer creates a
+source-generated CCW, Rust retains no object graph and forwards its transfer
+reference, and the trusted payload adapter creates source-generated RCWs before
+wrapping them in ordinary fixed managed proxy classes. PowerShell binds those
+managed proxy members; it does not bind a raw COM object and requires neither
+`IDispatch` nor a dynamic proxy. This proves direct in-process generated-COM
+calls on the serialized local-pipeline path, not apartment marshalling. Contract
+brokers must therefore be thread-safe and treated as MTA/agile-only until an
+application supplies and validates an explicit apartment dispatcher or free
+threaded marshaler strategy.
 
 ### Live-object execution policy
 
@@ -114,6 +129,16 @@ Direct calls from a PowerShell-visible payload proxy to a consumer broker are
 allowed only when the broker records bounded consumer-owned intent. Such a
 call must not invoke the native FFI, start another pipeline, access payload
 session state, call capability RPC, or mutate UI/runspace-affine state.
+
+Contract packs must treat the source-generated interface as the complete
+allowlist: interface IIDs, member ordinals, parameter/return types, numeric
+ranges, collection bounds, HRESULTs, and any authorization decision are
+application-owned static contract data. The SDK does not inspect a COM vtable
+for a per-member schema, redact secrets, or supply a cancellation token to a
+direct COM call. Do not include `SecureString`, credential, arbitrary object,
+or secret-bearing string members. Reads must complete synchronously within
+application-defined bounds; writes should only stage validated intent and
+commit it after the PowerShell invocation reaches a successful terminal state.
 
 The native bridge tracks active pipeline execution process-wide. General FFI
 calls fail with `Backpressure` while any pipeline is active, including calls

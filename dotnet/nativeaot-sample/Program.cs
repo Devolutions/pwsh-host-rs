@@ -239,10 +239,48 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
             .AddScript("$genericAlias.Increment()")
             .Invoke();
         if (genericReadOutput.Output.Records.Count != 1 ||
-            genericReadOutput.Output.Records[0].DisplayText != "98" ||
-            !session.RemoveVariable("genericAlias"))
+            genericReadOutput.Output.Records[0].DisplayText != "98")
         {
             Console.Error.WriteLine("NativeAOT facade did not retain the external contract-pack live object.");
+            return 1;
+        }
+
+        using PowerShell graphGenericProbe = session.CreatePowerShell();
+        PowerShellInvocationResult graphOutput;
+        try
+        {
+            graphOutput = graphGenericProbe
+                .AddScript(@"
+                    $genericAlias.Revision = 64
+                    $genericAlias.Primary.Value = 17
+                    $genericAlias.Children[1].Value = 29
+                    ""$($genericAlias.Revision)|$($genericAlias.Primary.Value)|$($genericAlias.Children.Count)|$($genericAlias.Children[0].Value)|$($genericAlias.Children[1].Value)""
+                ")
+                .Invoke();
+        }
+        catch (PowerShellInvocationException exception)
+        {
+            Console.Error.WriteLine(
+                exception.InvocationResult.Errors.Records.Count == 0
+                    ? "NativeAOT facade terminated the generated-COM graph invocation without an error record."
+                    : exception.InvocationResult.Errors.Records[0].Message);
+            return 1;
+        }
+
+        if (graphOutput.Output.Records.Count != 1 ||
+            graphOutput.Output.Records[0].DisplayText != "64|17|2|17|29" ||
+            genericBroker.GetRevision(out long revision) != 0 ||
+            revision != 64 ||
+            genericBroker.GetPrimary(out IPowerShellLiveObjectTestChild primary) != 0 ||
+            primary.GetValue(out long primaryValue) != 0 ||
+            primaryValue != 17 ||
+            genericBroker.GetChildren(out IPowerShellLiveObjectTestChildCollection children) != 0 ||
+            children.GetAt(1, out IPowerShellLiveObjectTestChild secondary) != 0 ||
+            secondary.GetValue(out long secondaryValue) != 0 ||
+            secondaryValue != 29 ||
+            !session.RemoveVariable("genericAlias"))
+        {
+            Console.Error.WriteLine("NativeAOT facade did not preserve nested or indexed generated-COM live object members.");
             return 1;
         }
     }
