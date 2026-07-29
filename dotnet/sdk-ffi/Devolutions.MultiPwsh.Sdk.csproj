@@ -28,6 +28,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\live-contract-generator\Devolutions.MultiPwsh.LiveContract.Generator.csproj"
+                      ReferenceOutputAssembly="false" />
     <Compile Include="..\interop\PowerShellLiveObjectProbeContract.cs"
              Link="PowerShellLiveObjectProbeContract.cs" />
     <Compile Include="..\interop\PowerShellLiveObjectContract.cs"
@@ -36,6 +38,13 @@
              Link="PowerShellLiveObjectTestContract.cs" />
     <None Include="README.md" Pack="true" PackagePath="\" />
     <None Include="buildTransitive\Devolutions.MultiPwsh.Sdk.targets"
+          Pack="true"
+          PackagePath="buildTransitive\" />
+    <None Include="..\live-contract-generator\bin\$(Configuration)\netstandard2.0\Devolutions.MultiPwsh.LiveContract.Generator.dll"
+          Pack="true"
+          PackagePath="analyzers\dotnet\cs\"
+          Visible="false" />
+    <None Include="buildTransitive\Devolutions.MultiPwsh.LiveContract.Generator.targets"
           Pack="true"
           PackagePath="buildTransitive\" />
     <None Include="$(PwshFfiNativeLibrary)"

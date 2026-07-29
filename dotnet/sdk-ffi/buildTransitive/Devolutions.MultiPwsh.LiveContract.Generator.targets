@@ -1,0 +1,6 @@
+<Project>
+  <ItemGroup>
+    <Analyzer Include="$(MSBuildThisFileDirectory)..\analyzers\dotnet\cs\Devolutions.MultiPwsh.LiveContract.Generator.dll" />
+    <CompilerVisibleProperty Include="LiveContractMode" />
+  </ItemGroup>
+</Project>
