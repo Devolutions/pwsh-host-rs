@@ -17,7 +17,6 @@ internal sealed partial class GenericCountBroker :
     private readonly GenericChildBroker primary = new(1, 11, "primary");
     private readonly List<GenericChildBroker> children;
     private long count;
-    private long revision;
     private long nextChildIdentity = 3;
     private bool disposed;
 
@@ -57,35 +56,6 @@ internal sealed partial class GenericCountBroker :
             }
 
             value = ++count;
-            return 0;
-        }
-    }
-
-    public int GetRevision(out long value)
-    {
-        lock (gate)
-        {
-            if (disposed)
-            {
-                value = default;
-                return EFail;
-            }
-
-            value = revision;
-            return 0;
-        }
-    }
-
-    public int SetRevision(long value)
-    {
-        lock (gate)
-        {
-            if (disposed)
-            {
-                return EFail;
-            }
-
-            revision = value;
             return 0;
         }
     }

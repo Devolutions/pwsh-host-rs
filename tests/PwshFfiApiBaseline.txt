@@ -558,8 +558,6 @@ facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCo
 facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount::Int32 GetChildren(Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChildCollection ByRef)
 facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount::Int32 GetPrimary(Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestChild ByRef)
 facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount::Int32 Increment(Int64 ByRef)
-facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount::Int32 GetRevision(Int64 ByRef)
-facade:method:Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellLiveObjectTestCount::Int32 SetRevision(Int64)
 facade:method:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract::Boolean Equals(Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract)
 facade:method:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract::Boolean Equals(System.Object)
 facade:method:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract::Int32 GetHashCode()

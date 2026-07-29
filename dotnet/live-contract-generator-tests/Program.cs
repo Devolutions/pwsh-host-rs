@@ -43,6 +43,11 @@ VerifyGeneratedSurface("Host", "SessionCreatorLiveContractHostAdapter");
 VerifyGeneratedSurface("Payload", "SessionCreatorLiveContractProxy");
 VerifyGeneratedSurface("Payload", "SessionCreatorLiveContractProxy", ValidContract.Replace("namespace Fixture;", string.Empty, StringComparison.Ordinal));
 VerifyDiagnostic(ValidContract.Replace(", MaximumUtf8Bytes = 128", string.Empty, StringComparison.Ordinal), "MPWLC006");
+VerifyDiagnostic(ValidContract.Replace("public interface ISessionCreatorLiveContract", "public interface ISessionCreatorLiveContract : System.IDisposable", StringComparison.Ordinal), "MPWLC009");
+VerifyNoDiagnostics("""
+    namespace Fixture { [Unrelated.LiveContract] public interface UnrelatedContract { } }
+    namespace Unrelated { public sealed class LiveContractAttribute : System.Attribute { } }
+    """);
 
 static void VerifyGeneratedSurface(string mode, string requiredText, string? source = null)
 {
@@ -73,6 +78,13 @@ static void VerifyDiagnostic(string source, string expectedDiagnostic)
     {
         throw new InvalidOperationException($"Expected {expectedDiagnostic} was not reported.");
     }
+}
+
+static void VerifyNoDiagnostics(string source)
+{
+    GeneratorDriverRunResult result = RunGenerator(source, "Host", out Compilation output);
+    AssertNoErrors(GetGeneratorDiagnostics(result));
+    AssertNoErrors(output.GetDiagnostics());
 }
 
 static GeneratorDriverRunResult RunGenerator(string source, string mode, out Compilation output)

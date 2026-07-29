@@ -108,22 +108,6 @@ public static unsafe class LiveObjectTestPack
             return Invoke(static (IPowerShellLiveObjectTestCount value, out long count) => value.Increment(out count));
         }
 
-        public long Revision
-        {
-            get => Invoke(static (IPowerShellLiveObjectTestCount value, out long revision) => value.GetRevision(out revision));
-            set
-            {
-                lock (gate)
-                {
-                    int hresult = GetContract().SetRevision(value);
-                    if (hresult != 0)
-                    {
-                        throw new COMException("The external live object revision update failed.", hresult);
-                    }
-                }
-            }
-        }
-
         public TestChildProxy Primary
         {
             get

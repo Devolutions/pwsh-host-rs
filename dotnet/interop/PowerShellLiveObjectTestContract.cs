@@ -37,12 +37,6 @@ public partial interface IPowerShellLiveObjectTestCount
     int Increment(out long count);
 
     [PreserveSig]
-    int GetRevision(out long revision);
-
-    [PreserveSig]
-    int SetRevision(long revision);
-
-    [PreserveSig]
     int GetPrimary(out IPowerShellLiveObjectTestChild child);
 
     [PreserveSig]

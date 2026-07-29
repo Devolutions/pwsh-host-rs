@@ -255,7 +255,6 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
         {
             graphOutput = graphGenericProbe
                 .AddScript(@"
-                    $genericAlias.Revision = 64
                     $genericAlias.Primary.Value = 17
                     $genericAlias.Children[1].Value = 29
                     $child = $genericAlias.Add(""na$([char]0x00EF)ve-$([char]0x6771)$([char]0x4EAC)"")
@@ -266,7 +265,7 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
                     $referenceEquals = [object]::ReferenceEquals($child, $collectionChild)
                     $equals = $child -eq $collectionChild
                     $names = @($genericAlias.Children | ForEach-Object Name) -join ','
-                    ""$($genericAlias.Revision)|$($genericAlias.Primary.Value)|$($genericAlias.Children.Count)|$($genericAlias.Children[0].Value)|$($genericAlias.Children[1].Value)|$($child.Name)|$($child.Host)|$($collectionChild.Description)|$($collectionChild.Group)|$referenceEquals|$equals|$names""
+                    ""$($genericAlias.Primary.Value)|$($genericAlias.Children.Count)|$($genericAlias.Children[0].Value)|$($genericAlias.Children[1].Value)|$($child.Name)|$($child.Host)|$($collectionChild.Description)|$($collectionChild.Group)|$referenceEquals|$equals|$names""
                 ")
                 .Invoke();
         }
@@ -281,9 +280,7 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
 
         if (graphOutput.Output.Records.Count != 1 ||
             graphOutput.Output.Records[0].DisplayText !=
-                $"64|17|3|17|29|{childName}|{childHost}|{childDescription}|{childGroup}|True|True|primary,secondary,{childName}" ||
-            genericBroker.GetRevision(out long revision) != 0 ||
-            revision != 64 ||
+                $"17|3|17|29|{childName}|{childHost}|{childDescription}|{childGroup}|True|True|primary,secondary,{childName}" ||
             genericBroker.GetPrimary(out IPowerShellLiveObjectTestChild primary) != 0 ||
             primary.GetValue(out long primaryValue) != 0 ||
             primaryValue != 17 ||

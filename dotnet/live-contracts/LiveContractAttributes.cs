@@ -7,11 +7,6 @@ namespace Devolutions.PowerShell.Ffi.LiveObjects;
 [AttributeUsage(AttributeTargets.Interface)]
 public sealed class LiveContractAttribute : Attribute
 {
-    public LiveContractAttribute(string id, int majorVersion, int minorVersion)
-        : this(id, majorVersion, minorVersion, string.Empty)
-    {
-    }
-
     public LiveContractAttribute(string id, int majorVersion, int minorVersion, string interfaceId)
     {
         Id = id;

@@ -15,6 +15,9 @@ namespace Devolutions.MultiPwsh.LiveContract.Generator;
 public sealed class LiveContractGenerator : IIncrementalGenerator
 {
     private const int MaximumWireBytes = 256;
+    private const string LiveContractAttributeMetadataName = "Devolutions.PowerShell.Ffi.LiveObjects.LiveContractAttribute";
+    private const string LiveObjectAttributeMetadataName = "Devolutions.PowerShell.Ffi.LiveObjects.LiveObjectAttribute";
+    private const string LiveMemberAttributeMetadataName = "Devolutions.PowerShell.Ffi.LiveObjects.LiveMemberAttribute";
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
@@ -22,7 +25,7 @@ public sealed class LiveContractGenerator : IIncrementalGenerator
             .CreateSyntaxProvider(
                 static (node, _) => node is Microsoft.CodeAnalysis.CSharp.Syntax.InterfaceDeclarationSyntax { AttributeLists.Count: > 0 },
                 static (syntax, _) => (INamedTypeSymbol)syntax.SemanticModel.GetDeclaredSymbol(syntax.Node)!)
-            .Where(static type => HasAttribute(type, "LiveContractAttribute") || HasAttribute(type, "LiveObjectAttribute"));
+            .Where(static type => HasAttribute(type, LiveContractAttributeMetadataName) || HasAttribute(type, LiveObjectAttributeMetadataName));
 
         IncrementalValueProvider<string> mode = context.AnalyzerConfigOptionsProvider
             .Select(static (options, _) => options.GlobalOptions.TryGetValue("build_property.LiveContractMode", out string? value) ? value : string.Empty);
@@ -33,7 +36,7 @@ public sealed class LiveContractGenerator : IIncrementalGenerator
                 .GroupBy(static type => type, SymbolEqualityComparer.Default)
                 .Select(static group => group.First())
                 .ToList();
-            List<INamedTypeSymbol> roots = types.Where(static type => HasAttribute(type, "LiveContractAttribute")).ToList();
+            List<INamedTypeSymbol> roots = types.Where(static type => HasAttribute(type, LiveContractAttributeMetadataName)).ToList();
 
             // A reference to the SDK attributes must not turn ordinary consumers into
             // diagnostics merely because they do not declare a generated contract.
@@ -96,7 +99,7 @@ public sealed class LiveContractGenerator : IIncrementalGenerator
     private static ContractInfo? Analyze(INamedTypeSymbol root, List<INamedTypeSymbol> types, List<Diagnostic> diagnostics)
     {
         bool valid = true;
-        AttributeData? contractAttribute = GetAttribute(root, "LiveContractAttribute");
+        AttributeData? contractAttribute = GetAttribute(root, LiveContractAttributeMetadataName);
         if (contractAttribute is null ||
             contractAttribute.ConstructorArguments.Length != 4 ||
             contractAttribute.ConstructorArguments[0].Value is not string contractId ||
@@ -122,12 +125,17 @@ public sealed class LiveContractGenerator : IIncrementalGenerator
 
         List<ObjectInfo> objects = new();
         var objectIds = new HashSet<ulong>();
-        foreach (INamedTypeSymbol type in types.Where(static type => HasAttribute(type, "LiveObjectAttribute")))
+        foreach (INamedTypeSymbol type in types.Where(static type => HasAttribute(type, LiveObjectAttributeMetadataName)))
         {
-            AttributeData? objectAttribute = GetAttribute(type, "LiveObjectAttribute");
+            AttributeData? objectAttribute = GetAttribute(type, LiveObjectAttributeMetadataName);
             if (type.ContainingType is not null)
             {
                 diagnostics.Add(Diagnostic.Create(UnsupportedSurface, GetLocation(type), type.Name, "nested interfaces are not supported"));
+                valid = false;
+            }
+            if (type.Interfaces.Length != 0)
+            {
+                diagnostics.Add(Diagnostic.Create(UnsupportedSurface, GetLocation(type), type.Name, "inherited interfaces are not supported"));
                 valid = false;
             }
 
@@ -175,7 +183,7 @@ public sealed class LiveContractGenerator : IIncrementalGenerator
                     continue;
                 }
 
-                AttributeData? memberAttribute = GetAttribute(member, "LiveMemberAttribute");
+                AttributeData? memberAttribute = GetAttribute(member, LiveMemberAttributeMetadataName);
                 if (memberAttribute is null)
                 {
                     diagnostics.Add(Diagnostic.Create(UnsupportedSurface, GetLocation(member), member.Name, "every declared method and property must have [LiveMember]"));
@@ -994,10 +1002,11 @@ public sealed class LiveContractGenerator : IIncrementalGenerator
 
     private static Location GetLocation(ISymbol symbol) => symbol.Locations.FirstOrDefault() ?? Location.None;
 
-    private static bool HasAttribute(ISymbol symbol, string name) => GetAttribute(symbol, name) is not null;
+    private static bool HasAttribute(ISymbol symbol, string metadataName) => GetAttribute(symbol, metadataName) is not null;
 
-    private static AttributeData? GetAttribute(ISymbol symbol, string name) =>
-        symbol.GetAttributes().FirstOrDefault(attribute => attribute.AttributeClass?.Name == name);
+    private static AttributeData? GetAttribute(ISymbol symbol, string metadataName) =>
+        symbol.GetAttributes().FirstOrDefault(attribute =>
+            string.Equals(attribute.AttributeClass?.ToDisplayString(), metadataName, StringComparison.Ordinal));
 
     private static uint GetNamedUInt(AttributeData attribute, string name) =>
         attribute.NamedArguments.FirstOrDefault(pair => pair.Key == name).Value.Value is uint value ? value : 0;
