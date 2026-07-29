@@ -10,6 +10,27 @@
     <CompilerVisibleProperty Include="LiveContractMode" />
   </ItemGroup>
 
+  <PropertyGroup Condition="'$(LiveContractMode)' == 'Payload'">
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <Target Name="InjectDevolutionsMultiPwshPayloadContractSources"
+          BeforeTargets="CoreCompile"
+          Condition="'$(LiveContractMode)' == 'Payload'">
+    <ItemGroup>
+      <Compile Include="$(MSBuildThisFileDirectory)..\contentFiles\any\any\Devolutions.MultiPwsh.LiveContracts\LiveContractAttributes.cs"
+               Link="Devolutions.MultiPwsh.LiveContracts\LiveContractAttributes.cs"
+               Visible="false" />
+      <Compile Include="$(MSBuildThisFileDirectory)..\contentFiles\any\any\Devolutions.MultiPwsh.LiveContracts\LiveContractBroker.cs"
+               Link="Devolutions.MultiPwsh.LiveContracts\LiveContractBroker.cs"
+               Visible="false" />
+      <ReferencePath Remove="@(ReferencePath)"
+                     Condition="'%(ReferencePath.Filename)%(ReferencePath.Extension)' == 'Devolutions.MultiPwsh.LiveContracts.dll'" />
+      <ReferencePathWithRefAssemblies Remove="@(ReferencePathWithRefAssemblies)"
+                                      Condition="'%(ReferencePathWithRefAssemblies.Filename)%(ReferencePathWithRefAssemblies.Extension)' == 'Devolutions.MultiPwsh.LiveContracts.dll'" />
+    </ItemGroup>
+  </Target>
+
   <Target Name="RemoveDevolutionsMultiPwshSdkNativeCopyLocalAsset"
           AfterTargets="ResolveLockFileCopyLocalFiles"
           Condition="'$(DevolutionsMultiPwshSdkEnabled)' != 'true'">

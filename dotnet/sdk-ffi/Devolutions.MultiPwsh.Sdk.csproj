@@ -43,6 +43,14 @@
     <None Include="buildTransitive\Devolutions.MultiPwsh.Sdk.targets"
           Pack="true"
           PackagePath="buildTransitive\" />
+    <None Include="..\live-contracts\LiveContractAttributes.cs"
+          Pack="true"
+          PackagePath="contentFiles\any\any\Devolutions.MultiPwsh.LiveContracts\"
+          Visible="false" />
+    <None Include="..\live-contracts\LiveContractBroker.cs"
+          Pack="true"
+          PackagePath="contentFiles\any\any\Devolutions.MultiPwsh.LiveContracts\"
+          Visible="false" />
     <None Include="..\live-contract-generator\bin\$(Configuration)\netstandard2.0\Devolutions.MultiPwsh.LiveContract.Generator.dll"
           Pack="true"
           PackagePath="analyzers\dotnet\cs\"

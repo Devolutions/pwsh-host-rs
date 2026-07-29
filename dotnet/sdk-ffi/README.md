@@ -54,8 +54,13 @@ The package carries a `net8.0` compile surface for
 the incremental generator under `analyzers/`. This lets a trusted `net8.0`
 payload-pack project compile the same explicitly annotated contract declaration
 as the `net10.0` NativeAOT host without referencing the NativeAOT facade
-assembly. NuGet auto-loads the analyzer; the package's transitive target makes
-the project `LiveContractMode` visible to it:
+assembly. In `Payload` mode the package injects its small contract source files
+into the payload compilation and removes the contracts DLL from the compiler
+reference set. This is required because trusted packs are loaded from bytes and
+cannot resolve a normal external contracts assembly. Do not manually link a
+second copy of those contract source files in a Payload project. NuGet
+auto-loads the analyzer; the package's transitive target makes the project
+`LiveContractMode` visible to it:
 
 ```xml
 <PropertyGroup>
