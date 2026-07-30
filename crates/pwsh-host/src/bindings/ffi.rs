@@ -13,6 +13,7 @@ use super::bindings_generated::PowerShellHandle;
 
 const FFI_BINDINGS_ABI_VERSION: u32 = 2;
 const FFI_BINDINGS_LIVE_STREAM_ABI_VERSION: u32 = 3;
+const FFI_BINDINGS_TYPED_RESULT_PAGING_ABI_VERSION: u32 = 4;
 const FFI_CALL_DIAGNOSTIC_CAPACITY: usize = 4096;
 const FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES: u64 = 1 << 8;
 const FFI_FEATURE_SESSION_PRIMITIVES: u64 = 1 << 10;
@@ -25,6 +26,7 @@ const FFI_FEATURE_LIVE_OBJECT_PROBE: u64 = 1 << 17;
 const FFI_FEATURE_LIVE_SESSION_OBJECT_PROBE: u64 = 1 << 18;
 const FFI_FEATURE_LIVE_OBJECT_CONTRACTS: u64 = 1 << 19;
 const FFI_FEATURE_LIVE_STREAM_POLLING: u64 = 1 << 20;
+const FFI_FEATURE_TYPED_RESULT_PAGING: u64 = 1 << 21;
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_BUFFER_TOO_SMALL: i32 = 1;
 
@@ -127,8 +129,27 @@ struct FfiApiV3 {
     live_invocation_release_fn: *const libc::c_void,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FfiApiV4 {
+    size: usize,
+    abi_version: u32,
+    feature_flags: u64,
+    power_shell_begin_typed_result_invocation_fn: *const libc::c_void,
+    typed_result_invocation_poll_fn: *const libc::c_void,
+    typed_result_invocation_read_page_fn: *const libc::c_void,
+    typed_result_invocation_complete_fn: *const libc::c_void,
+    typed_result_invocation_stop_fn: *const libc::c_void,
+    typed_result_invocation_release_fn: *const libc::c_void,
+    typed_result_page_get_info_fn: *const libc::c_void,
+    typed_result_page_get_record_info_fn: *const libc::c_void,
+    typed_result_page_copy_record_value_fn: *const libc::c_void,
+    typed_result_page_release_fn: *const libc::c_void,
+}
+
 type FnBindingsGetFfiApiV2 = unsafe extern "system" fn() -> *const FfiApiV2;
 type FnBindingsGetFfiApiV3 = unsafe extern "system" fn() -> *const FfiApiV3;
+type FnBindingsGetFfiApiV4 = unsafe extern "system" fn() -> *const FfiApiV4;
 type FnFfiPowerShellCreate = unsafe extern "system" fn(*mut PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiPowerShellRelease = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiPowerShellAddUtf8 = unsafe extern "system" fn(PowerShellHandle, *const u8, i32, *mut FfiCallResult) -> i32;
@@ -161,6 +182,27 @@ type FnFfiLiveInvocationBatchCopyRecordTextToUtf8 =
 type FnFfiLiveInvocationRelease = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiLiveInvocationComplete =
     unsafe extern "system" fn(PowerShellHandle, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellBeginTypedResultInvocation =
+    unsafe extern "system" fn(PowerShellHandle, i32, i32, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiTypedResultInvocationPoll = unsafe extern "system" fn(PowerShellHandle, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiTypedResultInvocationReadPage =
+    unsafe extern "system" fn(PowerShellHandle, i64, i32, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiTypedResultInvocationComplete = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiTypedResultPageGetInfo = unsafe extern "system" fn(
+    PowerShellHandle,
+    *mut i64,
+    *mut i64,
+    *mut i64,
+    *mut i64,
+    *mut i32,
+    *mut u32,
+    *mut i32,
+    *mut FfiCallResult,
+) -> i32;
+type FnFfiTypedResultPageGetRecordInfo =
+    unsafe extern "system" fn(PowerShellHandle, i32, *mut i64, *mut u32, *mut FfiCallResult) -> i32;
+type FnFfiTypedResultPageCopyRecordValue =
+    unsafe extern "system" fn(PowerShellHandle, i32, *mut u32, *mut u8, i32, *mut i32, *mut FfiCallResult) -> i32;
 type FnFfiInvocationResultRelease = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiInvocationResultGetInfo =
     unsafe extern "system" fn(PowerShellHandle, *mut u32, *mut i32, *mut FfiCallResult) -> i32;
@@ -346,6 +388,7 @@ pub(crate) struct FfiBindings {
     power_shell_session_set_live_object_contract_variable_fn: FnFfiPowerShellSessionSetLiveObjectContractVariable,
     live_object_contract_pack_register_many_fn: FnFfiLiveObjectContractPackRegisterMany,
     live_stream: Option<FfiLiveStreamBindings>,
+    typed_result_paging: Option<FfiTypedResultPagingBindings>,
 }
 
 #[derive(Clone, Copy)]
@@ -360,6 +403,20 @@ struct FfiLiveStreamBindings {
     live_invocation_complete_fn: FnFfiLiveInvocationComplete,
     live_invocation_stop_fn: FnFfiLiveInvocationRelease,
     live_invocation_release_fn: FnFfiLiveInvocationRelease,
+}
+
+#[derive(Clone, Copy)]
+struct FfiTypedResultPagingBindings {
+    power_shell_begin_typed_result_invocation_fn: FnFfiPowerShellBeginTypedResultInvocation,
+    typed_result_invocation_poll_fn: FnFfiTypedResultInvocationPoll,
+    typed_result_invocation_read_page_fn: FnFfiTypedResultInvocationReadPage,
+    typed_result_invocation_complete_fn: FnFfiTypedResultInvocationComplete,
+    typed_result_invocation_stop_fn: FnFfiTypedResultInvocationComplete,
+    typed_result_invocation_release_fn: FnFfiTypedResultInvocationComplete,
+    typed_result_page_get_info_fn: FnFfiTypedResultPageGetInfo,
+    typed_result_page_get_record_info_fn: FnFfiTypedResultPageGetRecordInfo,
+    typed_result_page_copy_record_value_fn: FnFfiTypedResultPageCopyRecordValue,
+    typed_result_page_release_fn: FnFfiTypedResultInvocationComplete,
 }
 
 #[derive(Debug)]
@@ -600,6 +657,100 @@ impl FfiBindings {
             Err(_) => None,
         };
 
+        let typed_result_paging = match get_function_pointer(
+            fn_loader,
+            pdcstr!("NativeHost.Bindings, Devolutions.PowerShell.SDK.Bindings"),
+            pdcstr!("Bindings_GetFfiApiV4"),
+        ) {
+            Ok(pointer) => {
+                let get_api_fn: FnBindingsGetFfiApiV4 = unsafe { mem::transmute(pointer) };
+                let api_ptr = unsafe { get_api_fn() };
+                if api_ptr.is_null() {
+                    return Err(Error::IO(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "managed typed result paging binding table is null",
+                    )));
+                }
+                let api = unsafe { *api_ptr };
+                let fields = [
+                    api.power_shell_begin_typed_result_invocation_fn,
+                    api.typed_result_invocation_poll_fn,
+                    api.typed_result_invocation_read_page_fn,
+                    api.typed_result_invocation_complete_fn,
+                    api.typed_result_invocation_stop_fn,
+                    api.typed_result_invocation_release_fn,
+                    api.typed_result_page_get_info_fn,
+                    api.typed_result_page_get_record_info_fn,
+                    api.typed_result_page_copy_record_value_fn,
+                    api.typed_result_page_release_fn,
+                ];
+                if api.abi_version != FFI_BINDINGS_TYPED_RESULT_PAGING_ABI_VERSION
+                    || api.size < mem::size_of::<FfiApiV4>()
+                    || api.feature_flags & FFI_FEATURE_TYPED_RESULT_PAGING == 0
+                    || fields.iter().any(|field| field.is_null())
+                {
+                    return Err(Error::IO(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "managed typed result paging bindings are incompatible",
+                    )));
+                }
+
+                Some(FfiTypedResultPagingBindings {
+                    power_shell_begin_typed_result_invocation_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiPowerShellBeginTypedResultInvocation>(
+                            api.power_shell_begin_typed_result_invocation_fn,
+                        )
+                    },
+                    typed_result_invocation_poll_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationPoll>(
+                            api.typed_result_invocation_poll_fn,
+                        )
+                    },
+                    typed_result_invocation_read_page_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationReadPage>(
+                            api.typed_result_invocation_read_page_fn,
+                        )
+                    },
+                    typed_result_invocation_complete_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationComplete>(
+                            api.typed_result_invocation_complete_fn,
+                        )
+                    },
+                    typed_result_invocation_stop_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationComplete>(
+                            api.typed_result_invocation_stop_fn,
+                        )
+                    },
+                    typed_result_invocation_release_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationComplete>(
+                            api.typed_result_invocation_release_fn,
+                        )
+                    },
+                    typed_result_page_get_info_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiTypedResultPageGetInfo>(
+                            api.typed_result_page_get_info_fn,
+                        )
+                    },
+                    typed_result_page_get_record_info_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiTypedResultPageGetRecordInfo>(
+                            api.typed_result_page_get_record_info_fn,
+                        )
+                    },
+                    typed_result_page_copy_record_value_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiTypedResultPageCopyRecordValue>(
+                            api.typed_result_page_copy_record_value_fn,
+                        )
+                    },
+                    typed_result_page_release_fn: unsafe {
+                        mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationComplete>(
+                            api.typed_result_page_release_fn,
+                        )
+                    },
+                })
+            }
+            Err(_) => None,
+        };
+
         Ok(Self {
             create_fn: unsafe { mem::transmute::<*const libc::c_void, FnFfiPowerShellCreate>(api.create_fn) },
             release_fn: unsafe { mem::transmute::<*const libc::c_void, FnFfiPowerShellRelease>(api.release_fn) },
@@ -788,6 +939,7 @@ impl FfiBindings {
                 )
             },
             live_stream,
+            typed_result_paging,
         })
     }
 
@@ -1092,6 +1244,52 @@ impl FfiPowerShell {
 
     pub fn supports_live_stream_polling(&self) -> bool {
         self.bindings.live_stream.is_some()
+    }
+
+    pub fn supports_typed_result_paging(&self) -> bool {
+        self.bindings.typed_result_paging.is_some()
+    }
+
+    pub fn begin_typed_result_invocation(
+        &self,
+        maximum_buffered_records: u32,
+        maximum_page_records: u32,
+    ) -> Result<FfiTypedResultInvocation, FfiBindingError> {
+        if maximum_buffered_records == 0
+            || maximum_buffered_records > 64
+            || maximum_page_records == 0
+            || maximum_page_records > maximum_buffered_records
+        {
+            return Err(FfiBindingError::from_status(
+                -1,
+                "typed result invocation bounds are invalid".to_owned(),
+            ));
+        }
+        let typed_result_paging = self.bindings.typed_result_paging.ok_or_else(|| {
+            FfiBindingError::from_status(-17, "managed bindings do not support typed result paging".to_owned())
+        })?;
+        let mut typed_result_handle = std::ptr::null_mut();
+        self.call(|handle, result| unsafe {
+            (typed_result_paging.power_shell_begin_typed_result_invocation_fn)(
+                handle,
+                maximum_buffered_records as i32,
+                maximum_page_records as i32,
+                &mut typed_result_handle,
+                result,
+            )
+        })?;
+        if typed_result_handle.is_null() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed typed result invocation returned a null handle".to_owned(),
+            ));
+        }
+
+        Ok(FfiTypedResultInvocation {
+            _runtime: Arc::clone(&self._runtime),
+            bindings: self.bindings,
+            handle: Some(typed_result_handle),
+        })
     }
 
     pub fn begin_live_invocation(&self) -> Result<FfiLiveInvocation, FfiBindingError> {
@@ -1511,6 +1709,299 @@ impl Drop for FfiLiveInvocation {
         let mut call_result = new_call_result(&mut diagnostic);
         unsafe {
             (live_stream.live_invocation_release_fn)(handle, &mut call_result);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FfiTypedResultRecord {
+    pub sequence: u64,
+    pub kind: u32,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FfiTypedResultPage {
+    pub acknowledged_sequence: u64,
+    pub next_sequence: u64,
+    pub total_record_count: u64,
+    pub dropped_record_count: u64,
+    pub terminal_status: i32,
+    pub is_terminal: bool,
+    pub is_truncated: bool,
+    pub is_complete: bool,
+    pub records: Vec<FfiTypedResultRecord>,
+}
+
+pub struct FfiTypedResultInvocation {
+    _runtime: Arc<HostedRuntime>,
+    bindings: FfiBindings,
+    handle: Option<PowerShellHandle>,
+}
+
+impl FfiTypedResultInvocation {
+    pub fn poll(&self) -> Result<bool, FfiBindingError> {
+        let typed_result_paging = self.typed_result_paging()?;
+        let mut completed = 0_i32;
+        self.call(|handle, result| unsafe {
+            (typed_result_paging.typed_result_invocation_poll_fn)(handle, &mut completed, result)
+        })?;
+        match completed {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(FfiBindingError::from_status(
+                -6,
+                "managed typed result invocation returned invalid completion metadata".to_owned(),
+            )),
+        }
+    }
+
+    pub fn read_page(
+        &self,
+        acknowledged_through: u64,
+        maximum_records: u32,
+    ) -> Result<FfiTypedResultPage, FfiBindingError> {
+        if acknowledged_through > i64::MAX as u64 || maximum_records == 0 || maximum_records > 64 {
+            return Err(FfiBindingError::from_status(
+                -1,
+                "typed result page cursor or limit is invalid".to_owned(),
+            ));
+        }
+
+        let typed_result_paging = self.typed_result_paging()?;
+        let mut page_handle = std::ptr::null_mut();
+        self.call(|handle, result| unsafe {
+            (typed_result_paging.typed_result_invocation_read_page_fn)(
+                handle,
+                acknowledged_through as i64,
+                maximum_records as i32,
+                &mut page_handle,
+                result,
+            )
+        })?;
+        if page_handle.is_null() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed typed result invocation returned a null page handle".to_owned(),
+            ));
+        }
+
+        let page = (|| {
+            let mut acknowledged_sequence = 0_i64;
+            let mut next_sequence = 0_i64;
+            let mut total_record_count = 0_i64;
+            let mut dropped_record_count = 0_i64;
+            let mut terminal_status = 0_i32;
+            let mut flags = 0_u32;
+            let mut record_count = 0_i32;
+            let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+            let mut call_result = new_call_result(&mut diagnostic);
+            let status = unsafe {
+                (typed_result_paging.typed_result_page_get_info_fn)(
+                    page_handle,
+                    &mut acknowledged_sequence,
+                    &mut next_sequence,
+                    &mut total_record_count,
+                    &mut dropped_record_count,
+                    &mut terminal_status,
+                    &mut flags,
+                    &mut record_count,
+                    &mut call_result,
+                )
+            };
+            check_status(status, &call_result, &diagnostic)?;
+            let acknowledged_sequence = u64::try_from(acknowledged_sequence).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed typed result acknowledgement is invalid".to_owned())
+            })?;
+            let next_sequence = u64::try_from(next_sequence)
+                .map_err(|_| FfiBindingError::from_status(-6, "managed typed result cursor is invalid".to_owned()))?;
+            let total_record_count = u64::try_from(total_record_count)
+                .map_err(|_| FfiBindingError::from_status(-6, "managed typed result total is invalid".to_owned()))?;
+            let dropped_record_count = u64::try_from(dropped_record_count).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed typed result drop count is invalid".to_owned())
+            })?;
+            if acknowledged_sequence != acknowledged_through
+                || next_sequence < acknowledged_sequence
+                || next_sequence > total_record_count
+                || dropped_record_count > total_record_count
+                || record_count < 0
+                || record_count > maximum_records as i32
+                || flags & !0x7 != 0
+            {
+                return Err(FfiBindingError::from_status(
+                    -6,
+                    "managed typed result page metadata is invalid".to_owned(),
+                ));
+            }
+
+            let is_terminal = flags & 1 != 0;
+            let is_truncated = flags & (1 << 1) != 0;
+            let is_complete = flags & (1 << 2) != 0;
+            if (!is_terminal && terminal_status != 0)
+                || (is_complete && (!is_terminal || terminal_status != 0 || is_truncated))
+            {
+                return Err(FfiBindingError::from_status(
+                    -6,
+                    "managed typed result terminal metadata is inconsistent".to_owned(),
+                ));
+            }
+
+            let mut records = Vec::with_capacity(record_count as usize);
+            let mut previous_sequence = acknowledged_sequence;
+            for index in 0..record_count {
+                let mut sequence = 0_i64;
+                let mut kind = 0_u32;
+                call_result = new_call_result(&mut diagnostic);
+                let status = unsafe {
+                    (typed_result_paging.typed_result_page_get_record_info_fn)(
+                        page_handle,
+                        index,
+                        &mut sequence,
+                        &mut kind,
+                        &mut call_result,
+                    )
+                };
+                check_status(status, &call_result, &diagnostic)?;
+                let sequence = u64::try_from(sequence).map_err(|_| {
+                    FfiBindingError::from_status(-6, "managed typed result record sequence is invalid".to_owned())
+                })?;
+                if kind > 14 || sequence <= previous_sequence || sequence > next_sequence {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed typed result records are unordered or unsupported".to_owned(),
+                    ));
+                }
+                previous_sequence = sequence;
+
+                let mut required_length = 0_i32;
+                call_result = new_call_result(&mut diagnostic);
+                let status = unsafe {
+                    (typed_result_paging.typed_result_page_copy_record_value_fn)(
+                        page_handle,
+                        index,
+                        &mut kind,
+                        std::ptr::null_mut(),
+                        0,
+                        &mut required_length,
+                        &mut call_result,
+                    )
+                };
+                if status != STATUS_SUCCESS && status != STATUS_BUFFER_TOO_SMALL {
+                    check_status(status, &call_result, &diagnostic)?;
+                }
+                if kind > 14 || required_length < 0 || required_length as usize > 64 * 1024 {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed typed result value exceeds its fixed bound".to_owned(),
+                    ));
+                }
+                let mut payload = vec![0_u8; required_length as usize];
+                call_result = new_call_result(&mut diagnostic);
+                let status = unsafe {
+                    (typed_result_paging.typed_result_page_copy_record_value_fn)(
+                        page_handle,
+                        index,
+                        &mut kind,
+                        payload.as_mut_ptr(),
+                        required_length,
+                        &mut required_length,
+                        &mut call_result,
+                    )
+                };
+                check_status(status, &call_result, &diagnostic)?;
+                if kind > 14 || required_length as usize != payload.len() {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed typed result value changed during copy".to_owned(),
+                    ));
+                }
+                records.push(FfiTypedResultRecord {
+                    sequence,
+                    kind,
+                    payload,
+                });
+            }
+
+            if records.is_empty() {
+                if next_sequence != acknowledged_sequence {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed typed result page cursor is inconsistent".to_owned(),
+                    ));
+                }
+            } else if next_sequence != previous_sequence {
+                return Err(FfiBindingError::from_status(
+                    -6,
+                    "managed typed result page cursor is inconsistent".to_owned(),
+                ));
+            }
+
+            Ok(FfiTypedResultPage {
+                acknowledged_sequence,
+                next_sequence,
+                total_record_count,
+                dropped_record_count,
+                terminal_status,
+                is_terminal,
+                is_truncated,
+                is_complete,
+                records,
+            })
+        })();
+
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let release_status =
+            unsafe { (typed_result_paging.typed_result_page_release_fn)(page_handle, &mut call_result) };
+        match (page, check_status(release_status, &call_result, &diagnostic)) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    pub fn complete(&self) -> Result<(), FfiBindingError> {
+        let typed_result_paging = self.typed_result_paging()?;
+        self.call(|handle, result| unsafe { (typed_result_paging.typed_result_invocation_complete_fn)(handle, result) })
+    }
+
+    pub fn stop(&self) -> Result<(), FfiBindingError> {
+        let typed_result_paging = self.typed_result_paging()?;
+        self.call(|handle, result| unsafe { (typed_result_paging.typed_result_invocation_stop_fn)(handle, result) })
+    }
+
+    fn typed_result_paging(&self) -> Result<FfiTypedResultPagingBindings, FfiBindingError> {
+        self.bindings.typed_result_paging.ok_or_else(|| {
+            FfiBindingError::from_status(-17, "managed bindings do not support typed result paging".to_owned())
+        })
+    }
+
+    fn call<F>(&self, operation: F) -> Result<(), FfiBindingError>
+    where
+        F: FnOnce(PowerShellHandle, *mut FfiCallResult) -> i32,
+    {
+        let handle = self.handle.ok_or_else(|| {
+            FfiBindingError::from_status(-4, "Typed result invocation handle has been released".to_owned())
+        })?;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = operation(handle, &mut call_result);
+        check_status(status, &call_result, &diagnostic)
+    }
+}
+
+impl Drop for FfiTypedResultInvocation {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let Some(typed_result_paging) = self.bindings.typed_result_paging else {
+            return;
+        };
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        unsafe {
+            (typed_result_paging.typed_result_invocation_release_fn)(handle, &mut call_result);
         }
     }
 }

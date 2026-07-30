@@ -31,6 +31,7 @@ public sealed unsafe class PowerShell : IDisposable
     private const ulong LiveSessionObjectProbeFeature = 1UL << 18;
     private const ulong LiveObjectContractsFeature = 1UL << 19;
     private const ulong LiveStreamPollingFeature = 1UL << 20;
+    private const ulong TypedResultPagingFeature = 1UL << 21;
     private const ulong RequiredFeatures =
         StructuredInvocationErrorsFeature | PerCallDiagnosticsFeature | Utf8SpansFeature |
         ImmutableResultsFeature | TaggedValuesFeature | CommandOptionsFeature | BoundedInputFeature |
@@ -544,6 +545,36 @@ public sealed unsafe class PowerShell : IDisposable
         return new PowerShellInvocationOperation(new PowerShellOperationHandle(nativeOperationHandle));
     }
 
+    /// <summary>
+    /// Starts a bounded invocation whose output can be read as copied tagged
+    /// values with an explicit acknowledgement cursor.
+    /// </summary>
+    public PowerShellTypedResultInvocation BeginTypedResultInvocation(
+        PowerShellValuePagerOptions? options = null)
+    {
+        EnsureTypedResultPagingSupported();
+        options ??= new PowerShellValuePagerOptions();
+        using PowerShellHandle.HandleLease lease = handle.Borrow();
+        byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+        NativeCallResult result = NativeCall.CreateResult(diagnostic);
+        ulong nativeTypedResultHandle = 0;
+        int status = NativeMethods.BeginTypedResultInvocation(
+            lease.Value,
+            checked((uint)options.MaximumBufferedRecords),
+            checked((uint)options.MaximumPageRecords),
+            &nativeTypedResultHandle,
+            &result);
+        NativeCall.ThrowIfFailed(status, result, diagnostic);
+        if (nativeTypedResultHandle == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned an invalid typed result invocation handle.");
+        }
+
+        return new PowerShellTypedResultInvocation(nativeTypedResultHandle, options);
+    }
+
     public Task<PowerShellInvocationResult> InvokeAsync(CancellationToken cancellationToken = default)
     {
         return PowerShellAsyncOperationAwaiter.GetResultAsync(BeginInvoke(), cancellationToken, releaseWhenComplete: true);
@@ -641,6 +672,22 @@ public sealed unsafe class PowerShell : IDisposable
             throw new PowerShellFfiException(
                 PowerShellFfiStatus.UnsupportedCapability,
                 "The selected PowerShell native asset does not support live stream polling.");
+        }
+    }
+
+    internal static void EnsureTypedResultPagingSupported()
+    {
+        EnsureTypedResultPagingSupported(GetAbiInfo());
+    }
+
+    internal static void EnsureTypedResultPagingSupported(NativeAbiInfo info)
+    {
+        EnsureSupportedAbi(info);
+        if ((info.FeatureFlags & TypedResultPagingFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell native asset does not support typed result paging.");
         }
     }
 

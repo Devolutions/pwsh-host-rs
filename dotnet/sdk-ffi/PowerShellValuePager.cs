@@ -49,7 +49,10 @@ public sealed class PowerShellValuePage
         ulong nextSequence,
         ulong totalRecordCount,
         PowerShellFfiStatus terminalStatus,
-        bool isTerminal)
+        bool isTerminal,
+        ulong droppedRecordCount = 0,
+        bool isTruncated = false,
+        bool isComplete = false)
     {
         Records = records;
         AcknowledgedSequence = acknowledgedSequence;
@@ -57,6 +60,9 @@ public sealed class PowerShellValuePage
         TotalRecordCount = totalRecordCount;
         TerminalStatus = terminalStatus;
         IsTerminal = isTerminal;
+        DroppedRecordCount = droppedRecordCount;
+        IsTruncated = isTruncated;
+        IsComplete = isComplete;
     }
 
     public IReadOnlyList<PowerShellValuePageRecord> Records { get; }
@@ -73,9 +79,15 @@ public sealed class PowerShellValuePage
 
     public ulong TotalRecordCount { get; }
 
+    public ulong DroppedRecordCount { get; }
+
     public PowerShellFfiStatus TerminalStatus { get; }
 
     public bool IsTerminal { get; }
+
+    public bool IsTruncated { get; }
+
+    public bool IsComplete { get; }
 }
 
 public sealed class PowerShellValuePagerCompletion
@@ -84,12 +96,16 @@ public sealed class PowerShellValuePagerCompletion
         PowerShellFfiStatus terminalStatus,
         string diagnostic,
         ulong totalRecordCount,
-        ulong acknowledgedRecordCount)
+        ulong acknowledgedRecordCount,
+        ulong droppedRecordCount = 0,
+        bool isTruncated = false)
     {
         TerminalStatus = terminalStatus;
         Diagnostic = diagnostic;
         TotalRecordCount = totalRecordCount;
         AcknowledgedRecordCount = acknowledgedRecordCount;
+        DroppedRecordCount = droppedRecordCount;
+        IsTruncated = isTruncated;
     }
 
     public PowerShellFfiStatus TerminalStatus { get; }
@@ -100,8 +116,14 @@ public sealed class PowerShellValuePagerCompletion
 
     public ulong AcknowledgedRecordCount { get; }
 
+    public ulong DroppedRecordCount { get; }
+
+    public bool IsTruncated { get; }
+
     public bool IsComplete =>
         TerminalStatus == PowerShellFfiStatus.Success &&
+        !IsTruncated &&
+        DroppedRecordCount == 0 &&
         TotalRecordCount == AcknowledgedRecordCount;
 }
 
@@ -175,13 +197,17 @@ public sealed class PowerShellValuePager : IDisposable
             PowerShellValuePageRecord[] page = records.Take(limit).ToArray();
             ulong next = page.Length == 0 ? acknowledgedSequence : page[^1].Sequence;
             maximumAcknowledgableSequence = next;
+            bool isComplete = terminal &&
+                terminalStatus == PowerShellFfiStatus.Success &&
+                totalRecordCount == acknowledgedSequence;
             return new PowerShellValuePage(
                 Array.AsReadOnly(page),
                 acknowledgedSequence,
                 next,
                 totalRecordCount,
                 terminalStatus,
-                terminal);
+                terminal,
+                isComplete: isComplete);
         }
     }
 

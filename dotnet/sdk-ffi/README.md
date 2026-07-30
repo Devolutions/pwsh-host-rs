@@ -167,6 +167,19 @@ are never silently complete. This primitive is deliberately distinct from
 `ReadStreamBatch`: it does not turn the existing lossy display stream into a
 typed data feed, and it never exposes SMA values or unbounded retention.
 
+`BeginTypedResultInvocation(options)` connects that acknowledgement model to
+an invocation's output through the additive `TYPED_RESULT_PAGING` native
+feature. `Read(acknowledgedThrough, maximumRecords)` acknowledges the prior
+page and returns only copied `PowerShellValue` records (including bounded
+arrays and property bags), never SMA objects, `PSObject`, or display text.
+The configured buffer is a hard producer backpressure limit; values are not
+dropped to make room. Each page reports total, dropped, truncation, terminal,
+and completeness metadata. Outputs that cannot be represented losslessly as a
+documented tagged value terminate the typed operation with `UnsupportedValue`
+rather than being converted to text or silently omitted. Older native assets
+are rejected with `UnsupportedCapability` before the additive exports are
+called.
+
 `PowerShellRuntime.CreateSession(PowerShellSessionOptions)` creates a separate,
 reusable local-runspace session. `PowerShellSessionConfiguration` supplies
 copied tagged initial variables, module imports/paths, a working directory,

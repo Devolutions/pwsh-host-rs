@@ -154,6 +154,7 @@ $expectedManagedStructs = [ordered]@{
     'NativeSessionSnapshot' = @{ Size = 40; Fields = @('Size|0|System.UInt32', 'State|4|System.UInt32', 'RunspaceState|8|System.UInt32', 'Flags|12|System.UInt32', 'ActivePipelineCount|16|System.UInt32', 'EventCount|20|System.UInt32', 'InvocationCount|24|System.UInt64', 'HistoryCount|32|System.UInt64') }
     'NativeSessionPoolOptions' = @{ Size = 20; Fields = @('Size|0|System.UInt32', 'MinimumSessions|4|System.UInt32', 'MaximumSessions|8|System.UInt32', 'Flags|12|System.UInt32', 'Reserved|16|System.UInt32') }
     'NativeOperationStreamBatchInfo' = @{ Size = 64; Fields = @('Size|0|System.UInt32', 'OperationState|4|System.UInt32', 'TerminalStatus|8|System.Int32', 'Flags|12|System.UInt32', 'NextSequence|16|System.UInt64', 'TotalRecordCount|24|System.UInt64', 'DroppedRecordCount|32|System.UInt64', 'SourceDroppedRecordCount|40|System.UInt64', 'LostRecordCount|48|System.UInt64', 'RecordCount|56|System.UInt32', 'Reserved|60|System.UInt32') }
+    'NativeTypedResultPageInfo' = @{ Size = 56; Fields = @('Size|0|System.UInt32', 'Flags|4|System.UInt32', 'TerminalStatus|8|System.Int32', 'Reserved|12|System.UInt32', 'AcknowledgedSequence|16|System.UInt64', 'NextSequence|24|System.UInt64', 'TotalRecordCount|32|System.UInt64', 'DroppedRecordCount|40|System.UInt64', 'RecordCount|48|System.UInt32', 'Reserved2|52|System.UInt32') }
     'NativeLiveObjectContractDescriptor' = @{ Size = 32; Fields = @('Size|0|System.UInt32', 'Directions|4|System.UInt32', 'InterfaceIdLow|8|System.UInt64', 'InterfaceIdHigh|16|System.UInt64', 'MajorVersion|24|System.UInt16', 'MinorVersion|26|System.UInt16', 'Reserved|28|System.UInt32') }
     'NativeLiveObjectContractPackApi' = @{ Size = 40; Fields = @('Size|0|System.UIntPtr', 'AbiVersion|8|System.UInt32', 'ContractCount|12|System.UInt32', 'Contracts|16|Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor*', 'CreatePayloadProxy|24|System.IntPtr', 'ReleasePayloadProxy|32|System.IntPtr') }
 }
@@ -320,6 +321,18 @@ $expectedLiveTableSlots = @(
     @{ Field = 'LiveInvocation_Stop'; Method = 'FfiLiveInvocation_Stop'; Signature = 'IntPtr,FfiCallResult*,int' }
     @{ Field = 'LiveInvocation_Release'; Method = 'FfiLiveInvocation_Release'; Signature = 'IntPtr,FfiCallResult*,int' }
 )
+$expectedTypedResultTableSlots = @(
+    @{ Field = 'PowerShell_BeginTypedResultInvocation'; Rust = 'power_shell_begin_typed_result_invocation_fn'; Alias = 'FnFfiPowerShellBeginTypedResultInvocation'; Method = 'FfiPowerShell_BeginTypedResultInvocation'; Signature = 'IntPtr,int,int,IntPtr*,FfiCallResult*,int' }
+    @{ Field = 'TypedResultInvocation_Poll'; Rust = 'typed_result_invocation_poll_fn'; Alias = 'FnFfiTypedResultInvocationPoll'; Method = 'FfiTypedResultInvocation_Poll'; Signature = 'IntPtr,int*,FfiCallResult*,int' }
+    @{ Field = 'TypedResultInvocation_ReadPage'; Rust = 'typed_result_invocation_read_page_fn'; Alias = 'FnFfiTypedResultInvocationReadPage'; Method = 'FfiTypedResultInvocation_ReadPage'; Signature = 'IntPtr,long,int,IntPtr*,FfiCallResult*,int' }
+    @{ Field = 'TypedResultInvocation_Complete'; Rust = 'typed_result_invocation_complete_fn'; Alias = 'FnFfiTypedResultInvocationComplete'; Method = 'FfiTypedResultInvocation_Complete'; Signature = 'IntPtr,FfiCallResult*,int' }
+    @{ Field = 'TypedResultInvocation_Stop'; Rust = 'typed_result_invocation_stop_fn'; Alias = 'FnFfiTypedResultInvocationComplete'; Method = 'FfiTypedResultInvocation_Stop'; Signature = 'IntPtr,FfiCallResult*,int' }
+    @{ Field = 'TypedResultInvocation_Release'; Rust = 'typed_result_invocation_release_fn'; Alias = 'FnFfiTypedResultInvocationComplete'; Method = 'FfiTypedResultInvocation_Release'; Signature = 'IntPtr,FfiCallResult*,int' }
+    @{ Field = 'TypedResultPage_GetInfo'; Rust = 'typed_result_page_get_info_fn'; Alias = 'FnFfiTypedResultPageGetInfo'; Method = 'FfiTypedResultPage_GetInfo'; Signature = 'IntPtr,long*,long*,long*,long*,int*,uint*,int*,FfiCallResult*,int' }
+    @{ Field = 'TypedResultPage_GetRecordInfo'; Rust = 'typed_result_page_get_record_info_fn'; Alias = 'FnFfiTypedResultPageGetRecordInfo'; Method = 'FfiTypedResultPage_GetRecordInfo'; Signature = 'IntPtr,int,long*,uint*,FfiCallResult*,int' }
+    @{ Field = 'TypedResultPage_CopyRecordValue'; Rust = 'typed_result_page_copy_record_value_fn'; Alias = 'FnFfiTypedResultPageCopyRecordValue'; Method = 'FfiTypedResultPage_CopyRecordValue'; Signature = 'IntPtr,int,uint*,byte*,int,int*,FfiCallResult*,int' }
+    @{ Field = 'TypedResultPage_Release'; Rust = 'typed_result_page_release_fn'; Alias = 'FnFfiTypedResultInvocationComplete'; Method = 'FfiTypedResultPage_Release'; Signature = 'IntPtr,FfiCallResult*,int' }
+)
 $ffiApiV3Type = $bindingsAssemblyObject.GetType('NativeHost.Bindings+FfiApiV3', $true)
 Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::SizeOf([Type]$ffiApiV3Type)) -Expected 104 -Description 'Managed FfiApiV3 size'
 $ffiApiV3Fields = @($ffiApiV3Type.GetFields($instanceFields) | Sort-Object MetadataToken)
@@ -331,6 +344,19 @@ for ($index = 0; $index -lt $ffiApiV3Fields.Count; $index++) {
     $expectedType = if ($index -eq 0) { 'System.UIntPtr' } elseif ($index -eq 1) { 'System.UInt32' } elseif ($index -eq 2) { 'System.UInt64' } else { 'System.IntPtr' }
     Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::OffsetOf($ffiApiV3Type, $field.Name).ToInt64()) -Expected ([Int64]$expectedOffset) -Description "Managed FfiApiV3 '$($field.Name)' offset"
     Assert-Equal -Actual (Get-ManagedTypeName $field.FieldType) -Expected $expectedType -Description "Managed FfiApiV3 '$($field.Name)' type"
+}
+
+$ffiApiV4Type = $bindingsAssemblyObject.GetType('NativeHost.Bindings+FfiApiV4', $true)
+Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::SizeOf([Type]$ffiApiV4Type)) -Expected 104 -Description 'Managed FfiApiV4 size'
+$ffiApiV4Fields = @($ffiApiV4Type.GetFields($instanceFields) | Sort-Object MetadataToken)
+$expectedFfiApiV4FieldNames = @('Size', 'AbiVersion', 'FeatureFlags') + @($expectedTypedResultTableSlots | ForEach-Object { $_.Field })
+Assert-Sequence -Actual @($ffiApiV4Fields | ForEach-Object Name) -Expected $expectedFfiApiV4FieldNames -Description 'Managed FfiApiV4 slot order'
+for ($index = 0; $index -lt $ffiApiV4Fields.Count; $index++) {
+    $field = $ffiApiV4Fields[$index]
+    $expectedOffset = if ($index -eq 0) { 0 } elseif ($index -eq 1) { 8 } elseif ($index -eq 2) { 16 } else { 24 + (($index - 3) * 8) }
+    $expectedType = if ($index -eq 0) { 'System.UIntPtr' } elseif ($index -eq 1) { 'System.UInt32' } elseif ($index -eq 2) { 'System.UInt64' } else { 'System.IntPtr' }
+    Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::OffsetOf($ffiApiV4Type, $field.Name).ToInt64()) -Expected ([Int64]$expectedOffset) -Description "Managed FfiApiV4 '$($field.Name)' offset"
+    Assert-Equal -Actual (Get-ManagedTypeName $field.FieldType) -Expected $expectedType -Description "Managed FfiApiV4 '$($field.Name)' type"
 }
 
 $compactFfiBindingsSource = $ffiBindingsSource -replace '\s+', ''
@@ -351,6 +377,15 @@ foreach ($slot in $expectedLiveTableSlots) {
     $assignment = "$($slot.Field)=(IntPtr)(delegate*unmanaged<$($slot.Signature)>)&$($slot.Method)"
     if ($compactFfiBindingsSource.IndexOf($assignment, [StringComparison]::Ordinal) -lt 0) {
         throw "Managed FfiApiV3 slot '$($slot.Field)' does not have its checked target and signature '$($slot.Signature)'."
+    }
+}
+if (-not $compactFfiBindingsSource.Contains('FeatureFlags=FfiFeatureTypedResultPaging')) {
+    throw 'Managed FfiApiV4 does not advertise typed result paging.'
+}
+foreach ($slot in $expectedTypedResultTableSlots) {
+    $assignment = "$($slot.Field)=(IntPtr)(delegate*unmanaged<$($slot.Signature)>)&$($slot.Method)"
+    if ($compactFfiBindingsSource.IndexOf($assignment, [StringComparison]::Ordinal) -lt 0) {
+        throw "Managed FfiApiV4 slot '$($slot.Field)' does not have its checked target and signature '$($slot.Signature)'."
     }
 }
 
@@ -388,8 +423,22 @@ Assert-Sequence -Actual $rustLiveApiTableFields -Expected @(
     'live_invocation_stop_fn',
     'live_invocation_release_fn'
 ) -Description 'Rust FfiApiV3 slot order'
-if (-not $rustBindingsSource.Contains('Err(_) => None')) {
-    throw 'Rust bindings must treat the live-stream managed table as optional for payload compatibility.'
+
+$rustTypedResultApiTableMatch = [regex]::Match($rustBindingsSource, '(?s)struct\s+FfiApiV4\s*\{(?<body>.*?)\n\s*\}')
+if (-not $rustTypedResultApiTableMatch.Success) {
+    throw 'Rust FfiApiV4 table declaration is missing.'
+}
+$rustTypedResultApiTableFields = @(
+    [regex]::Matches($rustTypedResultApiTableMatch.Groups['body'].Value, '(?m)^\s*(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*[^,]+,') |
+        ForEach-Object { $_.Groups['name'].Value }
+)
+Assert-Sequence -Actual $rustTypedResultApiTableFields -Expected (@(
+        'size',
+        'abi_version',
+        'feature_flags'
+    ) + @($expectedTypedResultTableSlots | ForEach-Object Rust)) -Description 'Rust FfiApiV4 slot order'
+if (-not [regex]::IsMatch($rustBindingsSource, '(?s)Bindings_GetFfiApiV4.*?Err\(_\)\s*=>\s*None')) {
+    throw 'Rust bindings must treat the typed result paging managed table as optional for payload compatibility.'
 }
 
 $rustBindingsTableMatch = [regex]::Match($rustBindingsSource, '(?s)pub\(crate\)\s+struct\s+FfiBindings\s*\{(?<body>.*?)\n\s*\}')
@@ -401,6 +450,15 @@ $rustBindingsFields = @(
         ForEach-Object { "$($_.Groups['name'].Value)|$($_.Groups['type'].Value)" }
 )
 Assert-Sequence -Actual $rustBindingsFields -Expected @($expectedTableSlots | ForEach-Object { "$($_.Rust)|$($_.Alias)" }) -Description 'Rust FfiBindings slot order and aliases'
+if (-not [regex]::IsMatch(
+        $rustBindingsTableMatch.Groups['body'].Value,
+        '(?m)^\s*typed_result_paging\s*:\s*Option<FfiTypedResultPagingBindings>,'
+    )) {
+    throw 'Rust FfiBindings must retain an optional typed result paging binding table.'
+}
+if (-not $rustFfiSource.Contains('const FEATURE_TYPED_RESULT_PAGING: u64 = 1 << 21;')) {
+    throw 'Rust native ABI must advertise typed result paging feature bit 21.'
+}
 
 $expectedRustFunctionAliases = @'
 FnBindingsGetFfiApiV2|unsafeextern"system"fn()->*constFfiApiV2

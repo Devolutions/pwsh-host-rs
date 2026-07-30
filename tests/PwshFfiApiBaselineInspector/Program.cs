@@ -76,6 +76,7 @@ NativeImportInspection[] nativeImports = nativeMethodsType.GetMethods(StaticNonP
     .ToArray();
 
 ValidateAbiCompatibility(facadeAssembly, StaticNonPublic);
+ValidatePowerShellValuePager();
 
 var inspection = new FacadeInspection(
     facadeAssembly.GetReferencedAssemblies().Select(reference => reference.Name!).OrderBy(name => name, StringComparer.Ordinal).ToArray(),
@@ -142,6 +143,32 @@ static void ValidateAbiCompatibility(Assembly facadeAssembly, BindingFlags stati
     {
         throw new InvalidOperationException("Facade ABI validation accepted an incompatible minimum ABI version.");
     }
+
+    MethodInfo? ensureTypedResultPagingSupported = powerShellType.GetMethod(
+        "EnsureTypedResultPagingSupported",
+        staticNonPublic,
+        binder: null,
+        types: [abiInfoType],
+        modifiers: null);
+    if (ensureTypedResultPagingSupported is null)
+    {
+        throw new InvalidOperationException("The facade must retain a typed result paging feature gate.");
+    }
+
+    const ulong typedResultPagingFeature = 1UL << 21;
+    ensureTypedResultPagingSupported.Invoke(
+        null,
+        [CreateAbiInfo(
+            abiInfoType,
+            allRequiredFeatures | typedResultPagingFeature,
+            abiVersion: 2,
+            minimumCompatibleAbiVersion: 2)]);
+    if (!IsUnsupportedCapability(
+            ensureTypedResultPagingSupported,
+            CreateAbiInfo(abiInfoType, allRequiredFeatures, abiVersion: 2, minimumCompatibleAbiVersion: 2)))
+    {
+        throw new InvalidOperationException("Facade typed result paging feature gate accepted an absent feature bit.");
+    }
 }
 
 static object CreateAbiInfo(Type abiInfoType, ulong featureFlags, uint abiVersion, uint minimumCompatibleAbiVersion)
@@ -166,6 +193,41 @@ static bool IsRejected(MethodInfo ensureSupportedAbi, object abiInfo)
     catch (TargetInvocationException exception) when (exception.InnerException is NotSupportedException)
     {
         return true;
+    }
+}
+
+static bool IsUnsupportedCapability(MethodInfo featureGate, object abiInfo)
+{
+    try
+    {
+        featureGate.Invoke(null, [abiInfo]);
+        return false;
+    }
+    catch (TargetInvocationException exception)
+        when (exception.InnerException is PowerShellFfiException ffiException &&
+              ffiException.Status == PowerShellFfiStatus.UnsupportedCapability)
+    {
+        return true;
+    }
+}
+
+static void ValidatePowerShellValuePager()
+{
+    using var pager = new PowerShellValuePager(new PowerShellValuePagerOptions(1, 1));
+    pager.Write(PowerShellValue.String("value"));
+    pager.Complete();
+
+    PowerShellValuePage page = pager.Read(0);
+    if (!page.IsTerminal || page.IsComplete || page.NextSequence != 1 || page.Records.Count != 1)
+    {
+        throw new InvalidOperationException("PowerShellValuePager did not return the expected terminal page.");
+    }
+
+    pager.Acknowledge(page.NextSequence);
+    page = pager.Read(page.NextSequence);
+    if (!page.IsComplete || page.Records.Count != 0 || !pager.GetCompletion().IsComplete)
+    {
+        throw new InvalidOperationException("PowerShellValuePager did not require acknowledgement before completion.");
     }
 }
 

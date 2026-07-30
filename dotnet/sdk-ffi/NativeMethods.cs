@@ -127,6 +127,21 @@ internal struct NativeOperationStreamBatchInfo
     internal uint Reserved;
 }
 
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeTypedResultPageInfo
+{
+    internal uint Size;
+    internal uint Flags;
+    internal int TerminalStatus;
+    internal uint Reserved;
+    internal ulong AcknowledgedSequence;
+    internal ulong NextSequence;
+    internal ulong TotalRecordCount;
+    internal ulong DroppedRecordCount;
+    internal uint RecordCount;
+    internal uint Reserved2;
+}
+
 internal static unsafe partial class NativeMethods
 {
     internal const string LibraryName = "multi-pwsh-sdk";
@@ -495,6 +510,63 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_operation_stream_batch_release")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int ReleaseOperationStreamBatch(ulong batchHandle, NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_begin_typed_result_invocation")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BeginTypedResultInvocation(
+        ulong handle,
+        uint maximumBufferedRecords,
+        uint maximumPageRecords,
+        ulong* typedResultHandle,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_typed_result_invocation_read_page")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int ReadTypedResultPage(
+        ulong typedResultHandle,
+        ulong acknowledgedThrough,
+        uint maximumRecords,
+        ulong* pageHandle,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_typed_result_invocation_stop")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int StopTypedResultInvocation(ulong typedResultHandle, NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_typed_result_invocation_release")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int ReleaseTypedResultInvocation(ulong typedResultHandle, NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_typed_result_page_get_info")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int GetTypedResultPageInfo(
+        ulong pageHandle,
+        NativeTypedResultPageInfo* info,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_typed_result_page_get_record_info")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int GetTypedResultPageRecordInfo(
+        ulong pageHandle,
+        uint recordIndex,
+        ulong* sequence,
+        uint* kind,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_typed_result_page_copy_record_value")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CopyTypedResultPageRecordValue(
+        ulong pageHandle,
+        uint recordIndex,
+        uint* kind,
+        byte* buffer,
+        nuint bufferLength,
+        nuint* requiredLength,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_typed_result_page_release")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int ReleaseTypedResultPage(ulong pageHandle, NativeCallResult* result);
 
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_session_create")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

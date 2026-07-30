@@ -19,7 +19,7 @@ use pwsh_host::FfiLiveStreamRecord;
 use pwsh_host::{
     find_pwsh_dir, FfiBindingError, FfiInvocationResult, FfiLiveInvocation, FfiLiveObjectContractDescriptor,
     FfiLiveStreamBatch, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue,
-    HostedRuntime, LiveObjectContractPack,
+    FfiTypedResultInvocation, FfiTypedResultPage, FfiTypedResultRecord, HostedRuntime, LiveObjectContractPack,
 };
 
 const ABI_VERSION: u32 = 2;
@@ -44,6 +44,7 @@ const FEATURE_LIVE_OBJECT_PROBE: u64 = 1 << 17;
 const FEATURE_LIVE_SESSION_OBJECT_PROBE: u64 = 1 << 18;
 const FEATURE_LIVE_OBJECT_CONTRACTS: u64 = 1 << 19;
 const FEATURE_LIVE_STREAM_POLLING: u64 = 1 << 20;
+const FEATURE_TYPED_RESULT_PAGING: u64 = 1 << 21;
 const CALL_RESULT_DIAGNOSTIC_TRUNCATED: u32 = 1;
 #[cfg(test)]
 const RESULT_RECORD_SCALAR_VALUE_PRESENT: u32 = 1 << 1;
@@ -57,6 +58,8 @@ const MAX_VALUE_DEPTH: u8 = 8;
 const MAX_OPERATION_DIAGNOSTIC_BYTES: usize = 4096;
 const MAX_OPERATION_STREAM_RECORDS: usize = 32;
 const MAX_OPERATION_STREAM_RECORD_BYTES: usize = 4096;
+const MAX_TYPED_RESULT_RECORDS: usize = 64;
+const MAX_TYPED_RESULT_PAYLOAD_BYTES: usize = 64 * 1024;
 const OPERATION_STREAM_RECORD_TEXT_TRUNCATED: u32 = 1;
 const MAX_SESSION_CONFIGURATION_ENTRIES: usize = 32;
 const MAX_SESSION_PATH_BYTES: usize = 16 * 1024;
@@ -122,6 +125,20 @@ pub struct OperationStreamBatchInfo {
     lost_record_count: u64,
     record_count: u32,
     _reserved: u32,
+}
+
+#[repr(C)]
+pub struct TypedResultPageInfo {
+    size: u32,
+    flags: u32,
+    terminal_status: i32,
+    _reserved: u32,
+    acknowledged_sequence: u64,
+    next_sequence: u64,
+    total_record_count: u64,
+    dropped_record_count: u64,
+    record_count: u32,
+    _reserved2: u32,
 }
 
 #[repr(C)]
@@ -259,11 +276,15 @@ struct State {
     results: HashMap<u64, Arc<InvocationResult>>,
     operations: HashMap<u64, Arc<Operation>>,
     operation_stream_batches: HashMap<u64, Arc<OperationStreamBatch>>,
+    typed_result_operations: HashMap<u64, Arc<TypedResultOperation>>,
+    typed_result_pages: HashMap<u64, Arc<FfiTypedResultPage>>,
     capabilities: HashMap<u64, Arc<CapabilityRegistrationState>>,
     next_handle: u64,
     next_result_handle: u64,
     next_operation_handle: u64,
     next_operation_stream_batch_handle: u64,
+    next_typed_result_operation_handle: u64,
+    next_typed_result_page_handle: u64,
     next_runspace_session_handle: u64,
     next_capability_handle: u64,
 }
@@ -368,6 +389,16 @@ struct OperationStreamBatch {
     source_dropped_record_count: u64,
     lost_record_count: u64,
     records: Vec<OperationStreamRecord>,
+}
+
+struct TypedResultOperation {
+    session: Arc<Session>,
+    capability: Option<CapabilityInvocation>,
+    invocation: Mutex<Option<FfiTypedResultInvocation>>,
+    pipeline_completed: AtomicBool,
+    cancellation_requested: AtomicBool,
+    finalized: AtomicBool,
+    worker_error: Mutex<Option<(Status, String)>>,
 }
 
 impl OperationStreamState {
@@ -488,6 +519,8 @@ unsafe impl Send for InvocationResult {}
 unsafe impl Sync for InvocationResult {}
 unsafe impl Send for Operation {}
 unsafe impl Sync for Operation {}
+unsafe impl Send for TypedResultOperation {}
+unsafe impl Sync for TypedResultOperation {}
 
 impl Operation {
     fn new(builder_handle: u64, session: Arc<Session>, capability: Option<CapabilityInvocation>) -> Self {
@@ -719,6 +752,135 @@ impl Operation {
     }
 }
 
+impl TypedResultOperation {
+    fn new(
+        session: Arc<Session>,
+        capability: Option<CapabilityInvocation>,
+        invocation: FfiTypedResultInvocation,
+    ) -> Self {
+        Self {
+            session,
+            capability,
+            invocation: Mutex::new(Some(invocation)),
+            pipeline_completed: AtomicBool::new(false),
+            cancellation_requested: AtomicBool::new(false),
+            finalized: AtomicBool::new(false),
+            worker_error: Mutex::new(None),
+        }
+    }
+
+    fn request_stop(&self) {
+        if !self.cancellation_requested.swap(true, Ordering::AcqRel) {
+            self.cancel_capability();
+            if let Some(invocation) = self
+                .invocation
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+            {
+                let _ = invocation.stop();
+            }
+        }
+    }
+
+    fn read_page(
+        &self,
+        acknowledged_through: u64,
+        maximum_records: u32,
+    ) -> Result<FfiTypedResultPage, (Status, String)> {
+        if let Some(error) = self
+            .worker_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            return Err(error);
+        }
+
+        let invocation = self.invocation.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let invocation = invocation.as_ref().ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "typed result invocation has been released".to_owned(),
+            )
+        })?;
+        let mut page = invocation
+            .read_page(acknowledged_through, maximum_records)
+            .map_err(managed_failure)?;
+        if page.records.is_empty() && self.pipeline_completed.load(Ordering::Acquire) {
+            invocation.complete().map_err(managed_failure)?;
+            page = invocation
+                .read_page(acknowledged_through, maximum_records)
+                .map_err(managed_failure)?;
+            self.finalize();
+        }
+        Ok(page)
+    }
+
+    fn poll_pipeline(&self) -> Result<bool, (Status, String)> {
+        let invocation = self.invocation.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let invocation = invocation.as_ref().ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "typed result invocation has been released".to_owned(),
+            )
+        })?;
+        invocation.poll().map_err(managed_failure)
+    }
+
+    fn record_worker_error(&self, error: (Status, String)) {
+        *self
+            .worker_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
+        self.request_stop();
+    }
+
+    fn abort(&self) {
+        self.request_stop();
+        self.invocation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        self.finalize();
+    }
+
+    fn finalize(&self) {
+        if self.finalized.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        if self.capability.is_some() {
+            let _ = unsafe { self.session.power_shell.set_capability_context(0, 0, std::ptr::null()) };
+        }
+        set_active_capability(&self.session, None);
+        finish_capability(self.capability.as_ref());
+        self.clear_session_operation();
+    }
+
+    fn clear_session_operation(&self) {
+        let mut active = self
+            .session
+            .operation_active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *active = false;
+        if let Some(runspace_session) = &self.session.runspace_session {
+            let mut active = runspace_session
+                .operation_active
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *active = false;
+        }
+    }
+
+    fn cancel_capability(&self) {
+        if let Some(capability) = &self.capability {
+            capability.cancel();
+        }
+    }
+}
+
 impl Default for State {
     fn default() -> Self {
         Self {
@@ -730,11 +892,15 @@ impl Default for State {
             results: HashMap::new(),
             operations: HashMap::new(),
             operation_stream_batches: HashMap::new(),
+            typed_result_operations: HashMap::new(),
+            typed_result_pages: HashMap::new(),
             capabilities: HashMap::new(),
             next_handle: 1,
             next_result_handle: 1_u64 << 63,
             next_operation_handle: 1_u64 << 62,
             next_operation_stream_batch_handle: 1_u64 << 59,
+            next_typed_result_operation_handle: 1_u64 << 58,
+            next_typed_result_page_handle: 1_u64 << 57,
             next_runspace_session_handle: 1_u64 << 61,
             next_capability_handle: 1_u64 << 60,
         }
@@ -1612,6 +1778,42 @@ fn begin_live_invocation_with_capability(
     }
 }
 
+fn begin_typed_result_invocation_with_capability(
+    session: &Session,
+    capability: Option<CapabilityInvocation>,
+    maximum_buffered_records: u32,
+    maximum_page_records: u32,
+) -> Result<FfiTypedResultInvocation, FfiBindingError> {
+    if let Some(capability) = capability {
+        set_active_capability(session, Some(capability.clone()));
+        let configured = unsafe {
+            session.power_shell.set_capability_context(
+                capability.registration.handle,
+                capability.invocation_id,
+                capability_dispatch as *const () as *const _,
+            )
+        };
+        if let Err(error) = configured {
+            set_active_capability(session, None);
+            capability.registration.end_invocation(capability.invocation_id);
+            return Err(error);
+        }
+        let invocation = session
+            .power_shell
+            .begin_typed_result_invocation(maximum_buffered_records, maximum_page_records);
+        if invocation.is_err() {
+            let _ = unsafe { session.power_shell.set_capability_context(0, 0, std::ptr::null()) };
+            set_active_capability(session, None);
+            capability.registration.end_invocation(capability.invocation_id);
+        }
+        invocation
+    } else {
+        session
+            .power_shell
+            .begin_typed_result_invocation(maximum_buffered_records, maximum_page_records)
+    }
+}
+
 fn status_from_callback(value: i32) -> Status {
     match value {
         0 => Status::Success,
@@ -2316,6 +2518,245 @@ fn start_operation(handle: u64) -> Result<u64, (Status, String)> {
     Ok(operation_handle)
 }
 
+fn start_typed_result_operation(
+    handle: u64,
+    maximum_buffered_records: u32,
+    maximum_page_records: u32,
+) -> Result<u64, (Status, String)> {
+    if maximum_buffered_records == 0
+        || maximum_buffered_records as usize > MAX_TYPED_RESULT_RECORDS
+        || maximum_page_records == 0
+        || maximum_page_records > maximum_buffered_records
+    {
+        return Err((
+            Status::InvalidArgument,
+            "typed result invocation bounds are invalid".to_owned(),
+        ));
+    }
+
+    let _operation_lock = SESSION_OPERATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (session, capability) = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let session = state
+            .sessions
+            .get(&handle)
+            .cloned()
+            .ok_or_else(|| (Status::InvalidHandle, "PowerShell handle is invalid".to_owned()))?;
+        if !session.power_shell.supports_typed_result_paging() {
+            return Err((
+                Status::UnsupportedCapability,
+                "The selected PowerShell payload does not support typed result paging.".to_owned(),
+            ));
+        }
+        {
+            let mut active = session
+                .operation_active
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *active {
+                return Err((
+                    Status::Backpressure,
+                    "PowerShell builder already has an active async operation.".to_owned(),
+                ));
+            }
+            *active = true;
+        }
+        if let Some(runspace_session) = &session.runspace_session {
+            let parent_active = {
+                let mut active = runspace_session
+                    .operation_active
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *active {
+                    true
+                } else {
+                    *active = true;
+                    false
+                }
+            };
+            if parent_active {
+                let mut builder_active = session
+                    .operation_active
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *builder_active = false;
+                return Err((
+                    Status::Backpressure,
+                    "PowerShell session already has a pending or running async operation.".to_owned(),
+                ));
+            }
+        }
+        let capability = take_session_capability(&session)?;
+        (session, capability)
+    };
+
+    let invocation = begin_typed_result_invocation_with_capability(
+        &session,
+        capability.clone(),
+        maximum_buffered_records,
+        maximum_page_records,
+    );
+    let invocation = match invocation {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            let operation = TypedResultOperation {
+                session,
+                capability: None,
+                invocation: Mutex::new(None),
+                pipeline_completed: AtomicBool::new(false),
+                cancellation_requested: AtomicBool::new(false),
+                finalized: AtomicBool::new(false),
+                worker_error: Mutex::new(None),
+            };
+            operation.clear_session_operation();
+            return Err(managed_failure(error));
+        }
+    };
+
+    let operation = Arc::new(TypedResultOperation::new(session, capability, invocation));
+    let operation_handle = {
+        let mut state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let operation_handle = state.next_typed_result_operation_handle;
+        state.next_typed_result_operation_handle = state
+            .next_typed_result_operation_handle
+            .checked_add(1)
+            .filter(|value| *value != 0)
+            .unwrap_or(1_u64 << 58);
+        state
+            .typed_result_operations
+            .insert(operation_handle, Arc::clone(&operation));
+        operation_handle
+    };
+
+    if std::thread::Builder::new()
+        .name("pwsh-sdk-ffi-typed-result".to_owned())
+        .spawn({
+            let operation = Arc::clone(&operation);
+            move || run_typed_result_operation(operation)
+        })
+        .is_err()
+    {
+        state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .typed_result_operations
+            .remove(&operation_handle);
+        operation.abort();
+        return Err((
+            Status::HostFailure,
+            "failed to create the native typed result operation thread".to_owned(),
+        ));
+    }
+
+    Ok(operation_handle)
+}
+
+fn run_typed_result_operation(operation: Arc<TypedResultOperation>) {
+    let _operation_lock = SESSION_OPERATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _execution_scope = InvocationExecutionScope::enter();
+    loop {
+        if operation.cancellation_requested.load(Ordering::Acquire) {
+            operation.request_stop();
+        }
+
+        match operation.poll_pipeline() {
+            Ok(true) => {
+                operation.pipeline_completed.store(true, Ordering::Release);
+                break;
+            }
+            Ok(false) => std::thread::sleep(Duration::from_millis(5)),
+            Err(error) => {
+                operation.record_worker_error(error);
+                break;
+            }
+        }
+    }
+}
+
+fn with_typed_result_operation<F>(handle: u64, operation: F) -> Result<Status, (Status, String)>
+where
+    F: FnOnce(&Arc<TypedResultOperation>) -> Result<Status, (Status, String)>,
+{
+    let operation_handle = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.typed_result_operations.get(&handle).cloned().ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "typed result invocation handle is invalid".to_owned(),
+            )
+        })?
+    };
+    operation(&operation_handle)
+}
+
+fn read_typed_result_page(
+    handle: u64,
+    acknowledged_through: u64,
+    maximum_records: u32,
+) -> Result<u64, (Status, String)> {
+    let operation = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.typed_result_operations.get(&handle).cloned().ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "typed result invocation handle is invalid".to_owned(),
+            )
+        })?
+    };
+    let page = Arc::new(operation.read_page(acknowledged_through, maximum_records)?);
+    let mut state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let page_handle = state.next_typed_result_page_handle;
+    state.next_typed_result_page_handle = state
+        .next_typed_result_page_handle
+        .checked_add(1)
+        .filter(|value| *value != 0)
+        .unwrap_or(1_u64 << 57);
+    state.typed_result_pages.insert(page_handle, page);
+    Ok(page_handle)
+}
+
+fn release_typed_result_operation(handle: u64) -> Result<Status, (Status, String)> {
+    let operation = {
+        let mut state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.typed_result_operations.remove(&handle).ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "typed result invocation handle is invalid".to_owned(),
+            )
+        })?
+    };
+    operation.abort();
+    Ok(Status::Success)
+}
+
+fn with_typed_result_page<F>(handle: u64, operation: F) -> Result<Status, (Status, String)>
+where
+    F: FnOnce(&FfiTypedResultPage) -> Result<Status, (Status, String)>,
+{
+    let page = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .typed_result_pages
+            .get(&handle)
+            .cloned()
+            .ok_or_else(|| (Status::InvalidHandle, "typed result page handle is invalid".to_owned()))?
+    };
+    operation(&page)
+}
+
+fn release_typed_result_page(handle: u64) -> Result<Status, (Status, String)> {
+    let mut state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    state
+        .typed_result_pages
+        .remove(&handle)
+        .map(|_| Status::Success)
+        .ok_or_else(|| (Status::InvalidHandle, "typed result page handle is invalid".to_owned()))
+}
+
 fn with_operation<F>(handle: u64, operation: F) -> Result<Status, (Status, String)>
 where
     F: FnOnce(&Arc<Operation>) -> Result<Status, (Status, String)>,
@@ -2559,6 +3000,18 @@ fn operation_stream_batch_record(
         (
             Status::InvalidArgument,
             "PowerShell operation stream batch record index is invalid".to_owned(),
+        )
+    })
+}
+
+fn typed_result_page_record(
+    page: &FfiTypedResultPage,
+    record_index: u32,
+) -> Result<&FfiTypedResultRecord, (Status, String)> {
+    page.records.get(record_index as usize).ok_or_else(|| {
+        (
+            Status::InvalidArgument,
+            "typed result page record index is invalid".to_owned(),
         )
     })
 }
@@ -3608,6 +4061,7 @@ fn feature_flags() -> u64 {
         | FEATURE_LIVE_SESSION_OBJECT_PROBE
         | FEATURE_LIVE_OBJECT_CONTRACTS
         | FEATURE_LIVE_STREAM_POLLING
+        | FEATURE_TYPED_RESULT_PAGING
 }
 
 fn create_live_object_probe(initial_count: i64) -> Result<*mut std::ffi::c_void, (Status, String)> {
@@ -4754,6 +5208,172 @@ pub unsafe extern "C" fn multi_pwsh_operation_stream_batch_release(batch_handle:
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_begin_typed_result_invocation(
+    handle: u64,
+    maximum_buffered_records: u32,
+    maximum_page_records: u32,
+    typed_result_handle: *mut u64,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        if typed_result_handle.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "typed result invocation handle output pointer is null".to_owned(),
+            ));
+        }
+        *typed_result_handle = start_typed_result_operation(handle, maximum_buffered_records, maximum_page_records)?;
+        Ok(Status::Success)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_typed_result_invocation_read_page(
+    handle: u64,
+    acknowledged_through: u64,
+    maximum_records: u32,
+    page_handle: *mut u64,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        if page_handle.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "typed result page handle output pointer is null".to_owned(),
+            ));
+        }
+        *page_handle = read_typed_result_page(handle, acknowledged_through, maximum_records)?;
+        Ok(Status::Success)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_typed_result_invocation_stop(handle: u64, result: *mut CallResult) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        with_typed_result_operation(handle, |operation| {
+            operation.request_stop();
+            Ok(Status::Success)
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_typed_result_invocation_release(handle: u64, result: *mut CallResult) -> i32 {
+    v2_call_allow_active_pipeline(result, || release_typed_result_operation(handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_typed_result_page_get_info(
+    page_handle: u64,
+    info: *mut TypedResultPageInfo,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        if info.is_null() || (*info).size < mem::size_of::<TypedResultPageInfo>() as u32 {
+            return Err((
+                Status::InvalidArgument,
+                "typed result page info output is null or too small".to_owned(),
+            ));
+        }
+        with_typed_result_page(page_handle, |page| {
+            let mut flags = 0_u32;
+            if page.is_terminal {
+                flags |= 1;
+            }
+            if page.is_truncated {
+                flags |= 1 << 1;
+            }
+            if page.is_complete {
+                flags |= 1 << 2;
+            }
+            (*info).flags = flags;
+            (*info).terminal_status = page.terminal_status;
+            (*info)._reserved = 0;
+            (*info).acknowledged_sequence = page.acknowledged_sequence;
+            (*info).next_sequence = page.next_sequence;
+            (*info).total_record_count = page.total_record_count;
+            (*info).dropped_record_count = page.dropped_record_count;
+            (*info).record_count = u32::try_from(page.records.len()).map_err(|_| {
+                (
+                    Status::ManagedFailure,
+                    "typed result page record count exceeds its bound".to_owned(),
+                )
+            })?;
+            (*info)._reserved2 = 0;
+            Ok(Status::Success)
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_typed_result_page_get_record_info(
+    page_handle: u64,
+    record_index: u32,
+    sequence: *mut u64,
+    kind: *mut u32,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        if sequence.is_null() || kind.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "typed result page record output pointer is null".to_owned(),
+            ));
+        }
+        with_typed_result_page(page_handle, |page| {
+            let record = typed_result_page_record(page, record_index)?;
+            *sequence = record.sequence;
+            *kind = record.kind;
+            Ok(Status::Success)
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_typed_result_page_copy_record_value(
+    page_handle: u64,
+    record_index: u32,
+    kind: *mut u32,
+    buffer: *mut u8,
+    buffer_len: usize,
+    required_len: *mut usize,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        if kind.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "typed result value kind output pointer is null".to_owned(),
+            ));
+        }
+        with_typed_result_page(page_handle, |page| {
+            let record = typed_result_page_record(page, record_index)?;
+            if record.payload.len() > MAX_TYPED_RESULT_PAYLOAD_BYTES {
+                return Err((
+                    Status::ManagedFailure,
+                    "typed result value exceeds its fixed payload bound".to_owned(),
+                ));
+            }
+            *kind = record.kind;
+            match write_bytes(buffer, buffer_len, required_len, &record.payload) {
+                Status::Success => Ok(Status::Success),
+                Status::BufferTooSmall => Ok(Status::BufferTooSmall),
+                Status::InvalidArgument => Err((
+                    Status::InvalidArgument,
+                    "typed result value buffer arguments are invalid".to_owned(),
+                )),
+                _ => unreachable!(),
+            }
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_typed_result_page_release(page_handle: u64, result: *mut CallResult) -> i32 {
+    v2_call_allow_active_pipeline(result, || release_typed_result_page(page_handle))
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_session_create(
     options: *const SessionOptions,
     session_handle: *mut u64,
@@ -5164,6 +5784,105 @@ mod tests {
         assert_ne!(flags & OPERATION_STREAM_RECORD_TEXT_TRUNCATED, 0);
     }
 
+    #[test]
+    fn typed_result_page_exports_preserve_metadata_and_release_handles() {
+        let _scope = TEST_PIPELINE_SCOPE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let handle = u64::MAX - 92;
+        let page = FfiTypedResultPage {
+            acknowledged_sequence: 3,
+            next_sequence: 5,
+            total_record_count: 5,
+            dropped_record_count: 0,
+            terminal_status: 0,
+            is_terminal: true,
+            is_truncated: false,
+            is_complete: true,
+            records: vec![
+                FfiTypedResultRecord {
+                    sequence: 4,
+                    kind: 4,
+                    payload: 42_i32.to_le_bytes().to_vec(),
+                },
+                FfiTypedResultRecord {
+                    sequence: 5,
+                    kind: 3,
+                    payload: vec![1],
+                },
+            ],
+        };
+        state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .typed_result_pages
+            .insert(handle, Arc::new(page));
+
+        let mut diagnostic = [0_u8; 256];
+        let mut result = v2_call_result(&mut diagnostic);
+        let mut info = TypedResultPageInfo {
+            size: mem::size_of::<TypedResultPageInfo>() as u32,
+            flags: 0,
+            terminal_status: 0,
+            _reserved: 0,
+            acknowledged_sequence: 0,
+            next_sequence: 0,
+            total_record_count: 0,
+            dropped_record_count: 0,
+            record_count: 0,
+            _reserved2: 0,
+        };
+        assert_eq!(
+            unsafe { multi_pwsh_typed_result_page_get_info(handle, &mut info, &mut result) },
+            Status::Success.value()
+        );
+        assert_eq!(info.flags, 0b101);
+        assert_eq!(info.acknowledged_sequence, 3);
+        assert_eq!(info.next_sequence, 5);
+        assert_eq!(info.total_record_count, 5);
+        assert_eq!(info.dropped_record_count, 0);
+        assert_eq!(info.record_count, 2);
+
+        let mut sequence = 0;
+        let mut kind = 0;
+        result = v2_call_result(&mut diagnostic);
+        assert_eq!(
+            unsafe { multi_pwsh_typed_result_page_get_record_info(handle, 0, &mut sequence, &mut kind, &mut result) },
+            Status::Success.value()
+        );
+        assert_eq!(sequence, 4);
+        assert_eq!(kind, 4);
+
+        let mut required_len = 0;
+        result = v2_call_result(&mut diagnostic);
+        assert_eq!(
+            unsafe {
+                multi_pwsh_typed_result_page_copy_record_value(
+                    handle,
+                    0,
+                    &mut kind,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut required_len,
+                    &mut result,
+                )
+            },
+            Status::BufferTooSmall.value()
+        );
+        assert_eq!(required_len, mem::size_of::<i32>());
+
+        result = v2_call_result(&mut diagnostic);
+        assert_eq!(
+            unsafe { multi_pwsh_typed_result_page_release(handle, &mut result) },
+            Status::Success.value()
+        );
+        result = v2_call_result(&mut diagnostic);
+        assert_eq!(
+            unsafe { multi_pwsh_typed_result_page_release(handle, &mut result) },
+            Status::InvalidHandle.value()
+        );
+    }
+
     fn append_u32(output: &mut Vec<u8>, value: u32) {
         output.extend_from_slice(&value.to_le_bytes());
     }
@@ -5432,7 +6151,8 @@ mod tests {
             | FEATURE_LIVE_OBJECT_PROBE
             | FEATURE_LIVE_SESSION_OBJECT_PROBE
             | FEATURE_LIVE_OBJECT_CONTRACTS
-            | FEATURE_LIVE_STREAM_POLLING;
+            | FEATURE_LIVE_STREAM_POLLING
+            | FEATURE_TYPED_RESULT_PAGING;
 
         assert_eq!(ABI_VERSION, 2);
         assert_eq!(MINIMUM_COMPATIBLE_ABI_VERSION, 2);
