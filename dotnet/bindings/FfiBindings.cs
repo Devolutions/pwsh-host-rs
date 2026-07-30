@@ -22,6 +22,7 @@ namespace NativeHost
     {
         private const uint FfiBindingsAbiVersion = 2;
         private const uint FfiBindingsLiveStreamAbiVersion = 3;
+        private const uint FfiBindingsTypedResultPagingAbiVersion = 4;
         private const uint FfiCallResultTruncatedDiagnostic = 1;
         private const int FfiStatusSuccess = 0;
         private const int FfiStatusInvalidArgument = -1;
@@ -30,6 +31,7 @@ namespace NativeHost
         private const int FfiStatusInputNotCompleted = -8;
         private const int FfiStatusBackpressure = -9;
         private const int FfiStatusUnsupportedValue = -10;
+        private const int FfiStatusOperationCancelled = -11;
         private const int FfiMaxStreamRecords = 32;
         private const int FfiMaxStreamFieldLength = 4096;
         private const int FfiStreamCount = 7;
@@ -62,6 +64,10 @@ namespace NativeHost
         private const ulong FfiFeatureLiveSessionObjectProbe = 1UL << 18;
         private const ulong FfiFeatureLiveObjectContracts = 1UL << 19;
         private const ulong FfiFeatureLiveStreamPolling = 1UL << 20;
+        private const ulong FfiFeatureTypedResultPaging = 1UL << 21;
+        private const uint FfiTypedResultPageTerminal = 1;
+        private const uint FfiTypedResultPageTruncated = 1 << 1;
+        private const uint FfiTypedResultPageComplete = 1 << 2;
         private const int FfiMaxSessionEvents = 32;
 
         [StructLayout(LayoutKind.Sequential)]
@@ -179,6 +185,24 @@ namespace NativeHost
             public IntPtr LiveInvocation_Release;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FfiApiV4
+        {
+            public nuint Size;
+            public uint AbiVersion;
+            public ulong FeatureFlags;
+            public IntPtr PowerShell_BeginTypedResultInvocation;
+            public IntPtr TypedResultInvocation_Poll;
+            public IntPtr TypedResultInvocation_ReadPage;
+            public IntPtr TypedResultInvocation_Complete;
+            public IntPtr TypedResultInvocation_Stop;
+            public IntPtr TypedResultInvocation_Release;
+            public IntPtr TypedResultPage_GetInfo;
+            public IntPtr TypedResultPage_GetRecordInfo;
+            public IntPtr TypedResultPage_CopyRecordValue;
+            public IntPtr TypedResultPage_Release;
+        }
+
         private static string[] NormalizeDirectories(string[] directories, string description)
         {
             if (directories.Length > FfiMaxSessionEvents)
@@ -265,6 +289,7 @@ namespace NativeHost
         private static long FfiNextInvocationId;
         private static IntPtr FfiApiV2Ptr = IntPtr.Zero;
         private static IntPtr FfiApiV3Ptr = IntPtr.Zero;
+        private static IntPtr FfiApiV4Ptr = IntPtr.Zero;
 
         [UnmanagedCallersOnly]
         public static IntPtr Bindings_GetFfiApiV2()
@@ -304,6 +329,29 @@ namespace NativeHost
                     }
 
                     return FfiApiV3Ptr;
+                }
+            }
+            catch
+            {
+                return IntPtr.Zero;
+            }
+        }
+
+        [UnmanagedCallersOnly]
+        public static IntPtr Bindings_GetFfiApiV4()
+        {
+            try
+            {
+                lock (FfiApiV2Lock)
+                {
+                    if (FfiApiV4Ptr == IntPtr.Zero)
+                    {
+                        FfiApiV4 api = CreateFfiApiV4();
+                        FfiApiV4Ptr = Marshal.AllocCoTaskMem(Marshal.SizeOf<FfiApiV4>());
+                        Marshal.StructureToPtr(api, FfiApiV4Ptr, false);
+                    }
+
+                    return FfiApiV4Ptr;
                 }
             }
             catch
@@ -392,6 +440,26 @@ namespace NativeHost
                 LiveInvocation_Complete = (IntPtr)(delegate* unmanaged<IntPtr, IntPtr*, FfiCallResult*, int>)&FfiLiveInvocation_Complete,
                 LiveInvocation_Stop = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiLiveInvocation_Stop,
                 LiveInvocation_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiLiveInvocation_Release,
+            };
+        }
+
+        private static unsafe FfiApiV4 CreateFfiApiV4()
+        {
+            return new FfiApiV4
+            {
+                Size = (nuint)Marshal.SizeOf<FfiApiV4>(),
+                AbiVersion = FfiBindingsTypedResultPagingAbiVersion,
+                FeatureFlags = FfiFeatureTypedResultPaging,
+                PowerShell_BeginTypedResultInvocation = (IntPtr)(delegate* unmanaged<IntPtr, int, int, IntPtr*, FfiCallResult*, int>)&FfiPowerShell_BeginTypedResultInvocation,
+                TypedResultInvocation_Poll = (IntPtr)(delegate* unmanaged<IntPtr, int*, FfiCallResult*, int>)&FfiTypedResultInvocation_Poll,
+                TypedResultInvocation_ReadPage = (IntPtr)(delegate* unmanaged<IntPtr, long, int, IntPtr*, FfiCallResult*, int>)&FfiTypedResultInvocation_ReadPage,
+                TypedResultInvocation_Complete = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiTypedResultInvocation_Complete,
+                TypedResultInvocation_Stop = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiTypedResultInvocation_Stop,
+                TypedResultInvocation_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiTypedResultInvocation_Release,
+                TypedResultPage_GetInfo = (IntPtr)(delegate* unmanaged<IntPtr, long*, long*, long*, long*, int*, uint*, int*, FfiCallResult*, int>)&FfiTypedResultPage_GetInfo,
+                TypedResultPage_GetRecordInfo = (IntPtr)(delegate* unmanaged<IntPtr, int, long*, uint*, FfiCallResult*, int>)&FfiTypedResultPage_GetRecordInfo,
+                TypedResultPage_CopyRecordValue = (IntPtr)(delegate* unmanaged<IntPtr, int, uint*, byte*, int, int*, FfiCallResult*, int>)&FfiTypedResultPage_CopyRecordValue,
+                TypedResultPage_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiTypedResultPage_Release,
             };
         }
 
@@ -1383,6 +1451,231 @@ namespace NativeHost
                     throw;
                 }
             });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiPowerShell_BeginTypedResultInvocation(
+            IntPtr ptrHandle,
+            int maximumBufferedRecords,
+            int maximumPageRecords,
+            IntPtr* ptrTypedResultInvocationHandle,
+            FfiCallResult* result)
+        {
+            if (ptrTypedResultInvocationHandle == null ||
+                maximumBufferedRecords < 1 ||
+                maximumBufferedRecords > FfiMaxValueContainerEntries ||
+                maximumPageRecords < 1 ||
+                maximumPageRecords > maximumBufferedRecords)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Typed result invocation bounds or output pointer are invalid.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                FfiInvocationResults.TryRemove(ptrHandle, out _);
+                var typedResults = new FfiTypedResultQueue(maximumBufferedRecords, maximumPageRecords);
+                var liveInvocation = new FfiLiveInvocation(
+                    pipeline.PowerShell,
+                    TakeCompletedInput(ptrHandle),
+                    pipeline.Session,
+                    pipeline.TakeCapabilityContext(),
+                    typedResults);
+                try
+                {
+                    liveInvocation.Start();
+                    GCHandle handle = GCHandle.Alloc(liveInvocation, GCHandleType.Normal);
+                    *ptrTypedResultInvocationHandle = GCHandle.ToIntPtr(handle);
+                }
+                catch
+                {
+                    liveInvocation.Dispose();
+                    throw;
+                }
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiTypedResultInvocation_Poll(
+            IntPtr ptrTypedResultInvocationHandle,
+            int* isCompleted,
+            FfiCallResult* result)
+        {
+            if (isCompleted == null)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Typed result invocation completion output pointer is null.");
+            }
+
+            return Execute(result, () =>
+            {
+                *isCompleted = GetLiveInvocation(ptrTypedResultInvocationHandle).IsCompleted ? 1 : 0;
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiTypedResultInvocation_ReadPage(
+            IntPtr ptrTypedResultInvocationHandle,
+            long acknowledgedThrough,
+            int maximumRecords,
+            IntPtr* ptrPageHandle,
+            FfiCallResult* result)
+        {
+            if (ptrPageHandle == null || acknowledgedThrough < 0 || maximumRecords < 1 || maximumRecords > FfiMaxValueContainerEntries)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Typed result page arguments are invalid.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiTypedResultPage page = GetLiveInvocation(ptrTypedResultInvocationHandle)
+                    .ReadTypedResultPage(acknowledgedThrough, maximumRecords);
+                GCHandle handle = GCHandle.Alloc(page, GCHandleType.Normal);
+                *ptrPageHandle = GCHandle.ToIntPtr(handle);
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiTypedResultInvocation_Complete(
+            IntPtr ptrTypedResultInvocationHandle,
+            FfiCallResult* result)
+        {
+            return Execute(result, () => GetLiveInvocation(ptrTypedResultInvocationHandle).CompleteTypedResults());
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiTypedResultInvocation_Stop(
+            IntPtr ptrTypedResultInvocationHandle,
+            FfiCallResult* result)
+        {
+            return Execute(result, () => GetLiveInvocation(ptrTypedResultInvocationHandle).Stop());
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiTypedResultInvocation_Release(
+            IntPtr ptrTypedResultInvocationHandle,
+            FfiCallResult* result)
+        {
+            if (!TryInitializeResult(result))
+            {
+                return FfiStatusInvalidArgument;
+            }
+
+            try
+            {
+                GCHandle handle = GCHandle.FromIntPtr(ptrTypedResultInvocationHandle);
+                if (!handle.IsAllocated || handle.Target is not FfiLiveInvocation invocation)
+                {
+                    return WriteFailure(result, FfiStatusInvalidHandle, "Typed result invocation handle is invalid.");
+                }
+
+                handle.Free();
+                invocation.Dispose();
+                return WriteSuccess(result);
+            }
+            catch (Exception exception)
+            {
+                return WriteFailure(result, FfiStatusInvalidHandle, exception);
+            }
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiTypedResultPage_GetInfo(
+            IntPtr ptrPageHandle,
+            long* acknowledgedSequence,
+            long* nextSequence,
+            long* totalRecordCount,
+            long* droppedRecordCount,
+            int* terminalStatus,
+            uint* flags,
+            int* recordCount,
+            FfiCallResult* result)
+        {
+            if (acknowledgedSequence == null ||
+                nextSequence == null ||
+                totalRecordCount == null ||
+                droppedRecordCount == null ||
+                terminalStatus == null ||
+                flags == null ||
+                recordCount == null)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Typed result page info output pointer is null.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiTypedResultPage page = GetTypedResultPage(ptrPageHandle);
+                *acknowledgedSequence = page.AcknowledgedSequence;
+                *nextSequence = page.NextSequence;
+                *totalRecordCount = page.TotalRecordCount;
+                *droppedRecordCount = page.DroppedRecordCount;
+                *terminalStatus = page.TerminalStatus;
+                *flags = page.Flags;
+                *recordCount = page.Records.Length;
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiTypedResultPage_GetRecordInfo(
+            IntPtr ptrPageHandle,
+            int recordIndex,
+            long* sequence,
+            uint* kind,
+            FfiCallResult* result)
+        {
+            if (sequence == null || kind == null)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Typed result page record output pointer is null.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiTypedResultRecord record = GetTypedResultPage(ptrPageHandle).GetRecord(recordIndex);
+                *sequence = record.Sequence;
+                *kind = record.Value.Kind;
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiTypedResultPage_CopyRecordValue(
+            IntPtr ptrPageHandle,
+            int recordIndex,
+            uint* kind,
+            byte* buffer,
+            int bufferLength,
+            int* requiredLength,
+            FfiCallResult* result)
+        {
+            if (kind == null || requiredLength == null || bufferLength < 0)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Typed result page value buffer arguments are invalid.");
+            }
+
+            IntPtr outputBuffer = (IntPtr)buffer;
+            IntPtr outputRequiredLength = (IntPtr)requiredLength;
+            return Execute(result, () =>
+            {
+                FfiSnapshotValue value = GetTypedResultPage(ptrPageHandle).GetRecord(recordIndex).Value;
+                *kind = value.Kind;
+                Marshal.WriteInt32(outputRequiredLength, value.Payload.Length);
+                if (bufferLength < value.Payload.Length)
+                {
+                    throw new BufferTooSmallException();
+                }
+
+                if (value.Payload.Length != 0)
+                {
+                    Marshal.Copy(value.Payload, 0, outputBuffer, value.Payload.Length);
+                }
+            }, bufferTooSmallIsSuccess: true);
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiTypedResultPage_Release(IntPtr ptrPageHandle, FfiCallResult* result)
+        {
+            return ReleaseLiveHandle<FfiTypedResultPage>(
+                ptrPageHandle,
+                result,
+                "Typed result page handle is invalid.");
         }
 
         [UnmanagedCallersOnly]
@@ -3400,6 +3693,242 @@ namespace NativeHost
             }
         }
 
+        private sealed class FfiTypedResultRecord
+        {
+            public FfiTypedResultRecord(long sequence, FfiSnapshotValue value)
+            {
+                Sequence = sequence;
+                Value = value;
+            }
+
+            public long Sequence { get; }
+
+            public FfiSnapshotValue Value { get; }
+        }
+
+        private sealed class FfiTypedResultPage
+        {
+            public FfiTypedResultPage(
+                FfiTypedResultRecord[] records,
+                long acknowledgedSequence,
+                long nextSequence,
+                long totalRecordCount,
+                long droppedRecordCount,
+                int terminalStatus,
+                uint flags)
+            {
+                Records = records;
+                AcknowledgedSequence = acknowledgedSequence;
+                NextSequence = nextSequence;
+                TotalRecordCount = totalRecordCount;
+                DroppedRecordCount = droppedRecordCount;
+                TerminalStatus = terminalStatus;
+                Flags = flags;
+            }
+
+            public FfiTypedResultRecord[] Records { get; }
+
+            public long AcknowledgedSequence { get; }
+
+            public long NextSequence { get; }
+
+            public long TotalRecordCount { get; }
+
+            public long DroppedRecordCount { get; }
+
+            public int TerminalStatus { get; }
+
+            public uint Flags { get; }
+
+            public FfiTypedResultRecord GetRecord(int index)
+            {
+                if (index < 0 || index >= Records.Length)
+                {
+                    throw new InvalidOperationException("Typed result page record index is invalid.");
+                }
+
+                return Records[index];
+            }
+        }
+
+        private sealed class FfiTypedResultQueue : IDisposable
+        {
+            private readonly object gate = new object();
+            private readonly Queue<FfiTypedResultRecord> records;
+            private readonly int maximumBufferedRecords;
+            private readonly int maximumPageRecords;
+            private long nextSequence = 1;
+            private long acknowledgedSequence;
+            private long maximumAcknowledgableSequence;
+            private long totalRecordCount;
+            private int terminalStatus = FfiStatusSuccess;
+            private bool terminal;
+            private bool disposed;
+
+            public FfiTypedResultQueue(int maximumBufferedRecords, int maximumPageRecords)
+            {
+                this.maximumBufferedRecords = maximumBufferedRecords;
+                this.maximumPageRecords = maximumPageRecords;
+                records = new Queue<FfiTypedResultRecord>(maximumBufferedRecords);
+            }
+
+            public bool Write(FfiSnapshotValue value)
+            {
+                ArgumentNullException.ThrowIfNull(value);
+                lock (gate)
+                {
+                    while (!terminal && !disposed && records.Count == maximumBufferedRecords)
+                    {
+                        Monitor.Wait(gate, TimeSpan.FromMilliseconds(50));
+                    }
+
+                    if (terminal || disposed)
+                    {
+                        return false;
+                    }
+
+                    if (nextSequence == long.MaxValue || totalRecordCount == long.MaxValue)
+                    {
+                        Fail(FfiStatusManagedFailure);
+                        return false;
+                    }
+
+                    records.Enqueue(new FfiTypedResultRecord(
+                        nextSequence++,
+                        new FfiSnapshotValue(value.Kind, (byte[])value.Payload.Clone())));
+                    totalRecordCount++;
+                    Monitor.PulseAll(gate);
+                    return true;
+                }
+            }
+
+            public void Fail(int status)
+            {
+                lock (gate)
+                {
+                    if (disposed || terminal)
+                    {
+                        return;
+                    }
+
+                    terminal = true;
+                    terminalStatus = status;
+                    Monitor.PulseAll(gate);
+                }
+            }
+
+            public FfiTypedResultPage Read(long acknowledgedThrough, int maximumRecords)
+            {
+                lock (gate)
+                {
+                    ThrowIfDisposed();
+                    if (maximumRecords < 1 || maximumRecords > maximumPageRecords)
+                    {
+                        throw new InvalidOperationException("Typed result page limit exceeds the invocation bound.");
+                    }
+
+                    if (acknowledgedThrough < acknowledgedSequence ||
+                        acknowledgedThrough > maximumAcknowledgableSequence)
+                    {
+                        throw new InvalidOperationException("Typed result acknowledgement is outside the most recently returned page.");
+                    }
+
+                    Acknowledge(acknowledgedThrough);
+                    FfiTypedResultRecord[] page = records.Take(maximumRecords).ToArray();
+                    long next = page.Length == 0 ? acknowledgedSequence : page[^1].Sequence;
+                    maximumAcknowledgableSequence = next;
+                    uint flags = terminal ? FfiTypedResultPageTerminal : 0;
+                    if (terminal &&
+                        terminalStatus == FfiStatusSuccess &&
+                        totalRecordCount == acknowledgedSequence)
+                    {
+                        flags |= FfiTypedResultPageComplete;
+                    }
+
+                    return new FfiTypedResultPage(
+                        page,
+                        acknowledgedSequence,
+                        next,
+                        totalRecordCount,
+                        0,
+                        terminalStatus,
+                        flags);
+                }
+            }
+
+            public void Complete(int status)
+            {
+                lock (gate)
+                {
+                    if (disposed || terminal)
+                    {
+                        return;
+                    }
+
+                    terminal = true;
+                    terminalStatus = status;
+                    Monitor.PulseAll(gate);
+                }
+            }
+
+            public void Cancel()
+            {
+                lock (gate)
+                {
+                    if (disposed || terminal)
+                    {
+                        return;
+                    }
+
+                    terminal = true;
+                    terminalStatus = FfiStatusOperationCancelled;
+                    Monitor.PulseAll(gate);
+                }
+            }
+
+            public void Acknowledge(long sequence)
+            {
+                if (sequence < acknowledgedSequence || sequence > maximumAcknowledgableSequence)
+                {
+                    throw new InvalidOperationException("Typed result acknowledgement is outside the most recently returned page.");
+                }
+
+                while (records.Count != 0 && records.Peek().Sequence <= sequence)
+                {
+                    records.Dequeue();
+                }
+
+                acknowledgedSequence = sequence;
+                maximumAcknowledgableSequence = acknowledgedSequence;
+                Monitor.PulseAll(gate);
+            }
+
+            public void Dispose()
+            {
+                lock (gate)
+                {
+                    if (disposed)
+                    {
+                        return;
+                    }
+
+                    disposed = true;
+                    terminal = true;
+                    terminalStatus = FfiStatusOperationCancelled;
+                    records.Clear();
+                    Monitor.PulseAll(gate);
+                }
+            }
+
+            private void ThrowIfDisposed()
+            {
+                if (disposed)
+                {
+                    throw new ObjectDisposedException(nameof(FfiTypedResultQueue));
+                }
+            }
+        }
+
         private sealed class FfiSnapshotCollector
         {
             private const int FieldCount = 20;
@@ -4015,9 +4544,11 @@ namespace NativeHost
                     return true;
                 }
 
-                if (value is object[] array)
+                if (value is Array array)
                 {
-                    if (array.Length > FfiMaxValueContainerEntries || !ancestors.Add(array))
+                    if (array.Rank != 1 ||
+                        array.Length > FfiMaxValueContainerEntries ||
+                        !ancestors.Add(array))
                     {
                         return false;
                     }
@@ -4026,8 +4557,9 @@ namespace NativeHost
                     {
                         var bytes = new List<byte>(sizeof(uint));
                         WriteUInt32(bytes, checked((uint)array.Length));
-                        foreach (object item in array)
+                        for (int index = 0; index < array.Length; index++)
                         {
+                            object item = array.GetValue(index);
                             if (!TryEncodeCopiedValue(item, depth + 1, ancestors, out FfiSnapshotValue nested) ||
                                 !TryAppendNestedValue(bytes, nested))
                             {
@@ -4282,6 +4814,7 @@ namespace NativeHost
             private readonly FfiPowerShellSession session;
             private readonly FfiCapabilityContext capabilityContext;
             private readonly FfiSnapshotCollector collector = new FfiSnapshotCollector();
+            private readonly FfiTypedResultQueue typedResults;
             private PSDataCollection<PSObject> output;
             private PSDataCollection<object> inputCollection;
             private IAsyncResult asyncResult;
@@ -4305,12 +4838,14 @@ namespace NativeHost
                 PowerShell powerShell,
                 object[] input,
                 FfiPowerShellSession session,
-                FfiCapabilityContext capabilityContext)
+                FfiCapabilityContext capabilityContext,
+                FfiTypedResultQueue typedResults = null)
             {
                 this.powerShell = powerShell ?? throw new ArgumentNullException(nameof(powerShell));
                 this.input = input;
                 this.session = session;
                 this.capabilityContext = capabilityContext;
+                this.typedResults = typedResults;
             }
 
             public bool IsCompleted
@@ -4334,14 +4869,7 @@ namespace NativeHost
                     }
 
                     output = new PSDataCollection<PSObject> { DataAddedCount = 1 };
-                    outputAdded = (_, args) =>
-                    {
-                        lock (gate)
-                        {
-                            collector.AddOutput(output[args.Index]);
-                            output.Clear();
-                        }
-                    };
+                    outputAdded = (_, args) => AddOutput(args.Index);
                     errorAdded = (_, args) => AddError(args.Index);
                     warningAdded = (_, args) => AddText(FfiStreamKind.Warning, powerShell.Streams.Warning, args.Index);
                     verboseAdded = (_, args) => AddText(FfiStreamKind.Verbose, powerShell.Streams.Verbose, args.Index);
@@ -4410,8 +4938,16 @@ namespace NativeHost
                 }
             }
 
+            public FfiTypedResultPage ReadTypedResultPage(long acknowledgedThrough, int maximumRecords)
+            {
+                FfiTypedResultQueue queue = typedResults ?? throw new InvalidOperationException(
+                    "Live invocation does not have a typed result queue.");
+                return queue.Read(acknowledgedThrough, maximumRecords);
+            }
+
             public void Stop()
             {
+                typedResults?.Cancel();
                 powerShell.Stop();
             }
 
@@ -4455,8 +4991,22 @@ namespace NativeHost
                     }
 
                     snapshot = collector.Build();
+                    typedResults?.Complete(
+                        (snapshot.Flags & FfiResultTerminatingFailure) != 0
+                            ? FfiStatusManagedFailure
+                            : FfiStatusSuccess);
                     return snapshot;
                 }
+            }
+
+            public void CompleteTypedResults()
+            {
+                if (typedResults is null)
+                {
+                    throw new InvalidOperationException("Live invocation does not have a typed result queue.");
+                }
+
+                _ = Complete();
             }
 
             public void Dispose()
@@ -4470,6 +5020,7 @@ namespace NativeHost
                     }
 
                     disposed = true;
+                    typedResults?.Dispose();
                     if (asyncResult is null)
                     {
                         Cleanup();
@@ -4497,12 +5048,56 @@ namespace NativeHost
                 }
             }
 
+            private void AddOutput(int index)
+            {
+                FfiSnapshotValue typedValue = null;
+                bool typedValueSupported = typedResults is null;
+                lock (gate)
+                {
+                    PSObject value = output[index];
+                    collector.AddOutput(value);
+                    if (typedResults is not null)
+                    {
+                        typedValueSupported = TryEncodeTypedResultValue(value, out typedValue);
+                    }
+                    output.Clear();
+                }
+
+                if (typedResults is null)
+                {
+                    return;
+                }
+
+                if (!typedValueSupported)
+                {
+                    typedResults.Fail(FfiStatusUnsupportedValue);
+                    return;
+                }
+
+                _ = typedResults.Write(typedValue);
+            }
+
             private void AddText<T>(FfiStreamKind stream, PSDataCollection<T> records, int index)
             {
                 lock (gate)
                 {
                     collector.AddText(stream, records[index]);
                     records.Clear();
+                }
+            }
+
+            private static bool TryEncodeTypedResultValue(PSObject value, out FfiSnapshotValue typedValue)
+            {
+                typedValue = null;
+                try
+                {
+                    return FfiSnapshotCollector.TryEncodeCopiedValue(value?.BaseObject, depth: 0, out typedValue) ||
+                        FfiSnapshotCollector.TryEncodeCopiedValue(value, depth: 0, out typedValue);
+                }
+                catch
+                {
+                    typedValue = null;
+                    return false;
                 }
             }
 
@@ -4786,6 +5381,22 @@ namespace NativeHost
             }
 
             return batch;
+        }
+
+        private static FfiTypedResultPage GetTypedResultPage(IntPtr ptrPageHandle)
+        {
+            if (ptrPageHandle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Typed result page handle is invalid.");
+            }
+
+            GCHandle handle = GCHandle.FromIntPtr(ptrPageHandle);
+            if (!handle.IsAllocated || handle.Target is not FfiTypedResultPage page)
+            {
+                throw new InvalidOperationException("Typed result page handle is invalid.");
+            }
+
+            return page;
         }
 
         private static unsafe int ReleaseLiveHandle<T>(IntPtr ptrHandle, FfiCallResult* result, string invalidMessage)

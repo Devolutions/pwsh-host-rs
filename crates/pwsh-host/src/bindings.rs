@@ -14,6 +14,7 @@ pub(crate) use self::ffi::FfiBindings;
 pub use self::ffi::{
     FfiBindingError, FfiInvocationResult, FfiLiveInvocation, FfiLiveObjectContractDescriptor, FfiLiveStreamBatch,
     FfiLiveStreamRecord, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue,
+    FfiTypedResultInvocation, FfiTypedResultPage, FfiTypedResultRecord,
 };
 use crate::loader::HostedRuntime;
 

@@ -8,9 +8,9 @@ namespace Devolutions.PowerShell.Ffi;
 
 public sealed class PowerShellValue
 {
-    internal const int MaximumPayloadLength = 64 * 1024;
-    internal const int MaximumContainerEntries = 64;
-    internal const int MaximumDepth = 8;
+    public const int MaximumPayloadLength = 64 * 1024;
+    public const int MaximumContainerEntries = 64;
+    public const int MaximumDepth = 8;
     private readonly byte[] payload;
 
     private PowerShellValue(PowerShellValueKind kind, byte[] payload)
