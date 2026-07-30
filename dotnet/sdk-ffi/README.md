@@ -140,6 +140,33 @@ This is neither a live console, `PSHost`, callback/event API, nor a stream of
 SMA objects, credentials, or other CLR references. Cancellation can expose
 already-captured records, but still never produces a successful final result.
 
+## DTO projections and bounded paging
+
+`PowerShellDtoContractAttribute` and `PowerShellDtoMemberAttribute` opt an
+application DTO into the package's separate incremental source generator. The
+generator emits direct `Read`, `TryRead`, and `Write` methods for a versioned
+`PowerShellValue` property bag; no reflection or runtime type discovery is
+used. Contracts require public settable properties and a public parameterless
+constructor, and support only the documented copied scalar kinds plus bounded
+one-dimensional arrays of those scalars. Every property bag carries an exact
+`$version` value. By default unknown properties, missing required properties,
+incorrect scalar kinds, and string/array limit violations return a structured
+`PowerShellDtoProjectionError`; `Read` raises the corresponding typed
+exception. This is an application DTO mapper, not a serializer for arbitrary
+CLR graphs, PowerShell objects, credentials, callbacks, or live-object
+contracts.
+
+`PowerShellValuePager` is the reusable bounded acknowledgement state machine
+for copied result values. Its caller-configured record and page bounds apply
+backpressure to writers, and its pages expose ordered sequences plus an
+acknowledgement cursor. Records remain retained only until
+`Acknowledge(sequence)` removes them. `GetCompletion().IsComplete` is true
+only after a successful terminal state and acknowledgement of every produced
+record; cancellation, disposal, a terminal error, or unacknowledged records
+are never silently complete. This primitive is deliberately distinct from
+`ReadStreamBatch`: it does not turn the existing lossy display stream into a
+typed data feed, and it never exposes SMA values or unbounded retention.
+
 `PowerShellRuntime.CreateSession(PowerShellSessionOptions)` creates a separate,
 reusable local-runspace session. `PowerShellSessionConfiguration` supplies
 copied tagged initial variables, module imports/paths, a working directory,

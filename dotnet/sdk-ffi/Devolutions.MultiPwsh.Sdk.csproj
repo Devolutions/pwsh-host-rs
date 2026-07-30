@@ -33,6 +33,8 @@
                       PrivateAssets="all" />
     <ProjectReference Include="..\live-contract-generator\Devolutions.MultiPwsh.LiveContract.Generator.csproj"
                       ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\dto-contract-generator\Devolutions.MultiPwsh.DtoContract.Generator.csproj"
+                      ReferenceOutputAssembly="false" />
     <Compile Include="..\interop\PowerShellLiveObjectProbeContract.cs"
              Link="PowerShellLiveObjectProbeContract.cs" />
     <Compile Include="..\interop\PowerShellLiveObjectContract.cs"
@@ -54,6 +56,10 @@
           PackagePath="buildTransitive\Devolutions.MultiPwsh.LiveContracts\"
           Visible="false" />
     <None Include="..\live-contract-generator\bin\$(Configuration)\netstandard2.0\Devolutions.MultiPwsh.LiveContract.Generator.dll"
+          Pack="true"
+          PackagePath="analyzers\dotnet\cs\"
+          Visible="false" />
+    <None Include="..\dto-contract-generator\bin\$(Configuration)\netstandard2.0\Devolutions.MultiPwsh.DtoContract.Generator.dll"
           Pack="true"
           PackagePath="analyzers\dotnet\cs\"
           Visible="false" />
