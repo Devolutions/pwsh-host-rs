@@ -522,6 +522,21 @@ unsafe impl Sync for Operation {}
 unsafe impl Send for TypedResultOperation {}
 unsafe impl Sync for TypedResultOperation {}
 
+impl Session {
+    fn clear_operation_active(&self) {
+        *self
+            .operation_active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+        if let Some(runspace_session) = &self.runspace_session {
+            *runspace_session
+                .operation_active
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+        }
+    }
+}
+
 impl Operation {
     fn new(builder_handle: u64, session: Arc<Session>, capability: Option<CapabilityInvocation>) -> Self {
         Self {
@@ -2588,7 +2603,13 @@ fn start_typed_result_operation(
                 ));
             }
         }
-        let capability = take_session_capability(&session)?;
+        let capability = match take_session_capability(&session) {
+            Ok(capability) => capability,
+            Err(error) => {
+                session.clear_operation_active();
+                return Err(error);
+            }
+        };
         (session, capability)
     };
 

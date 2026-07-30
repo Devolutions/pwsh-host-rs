@@ -55,6 +55,10 @@ jobs:
         shell: pwsh
         run: dotnet run --project dotnet/live-contract-generator-tests/Devolutions.MultiPwsh.LiveContract.Generator.Tests.csproj -c Release
 
+      - name: Run DTO contract generator tests
+        shell: pwsh
+        run: dotnet run --project dotnet/dto-contract-generator-tests/Devolutions.MultiPwsh.DtoContract.Generator.Tests.csproj -c Release
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

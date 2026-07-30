@@ -440,6 +440,9 @@ Assert-Sequence -Actual $rustTypedResultApiTableFields -Expected (@(
 if (-not [regex]::IsMatch($rustBindingsSource, '(?s)Bindings_GetFfiApiV4.*?Err\(_\)\s*=>\s*None')) {
     throw 'Rust bindings must treat the typed result paging managed table as optional for payload compatibility.'
 }
+if (-not [regex]::IsMatch($rustBindingsSource, '(?s)Bindings_GetFfiApiV3.*?Err\(_\)\s*=>\s*None')) {
+    throw 'Rust bindings must retain V3 managed table optionality for payload compatibility.'
+}
 
 $rustBindingsTableMatch = [regex]::Match($rustBindingsSource, '(?s)pub\(crate\)\s+struct\s+FfiBindings\s*\{(?<body>.*?)\n\s*\}')
 if (-not $rustBindingsTableMatch.Success) {

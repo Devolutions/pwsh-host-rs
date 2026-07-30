@@ -54,7 +54,7 @@ public sealed class DtoContractGenerator : IIncrementalGenerator
                 if (contract is not null)
                 {
                     production.AddSource(
-                        $"{type.Name}.PowerShellDtoProjection.g.cs",
+                        GetHintName(type),
                         SourceText.From(Emit(contract), Encoding.UTF8));
                 }
             }
@@ -67,14 +67,15 @@ public sealed class DtoContractGenerator : IIncrementalGenerator
         if (type.DeclaredAccessibility != Accessibility.Public ||
             type.ContainingType is not null ||
             type.TypeParameters.Length != 0 ||
-            type.TypeKind is not (TypeKind.Class or TypeKind.Struct) ||
+            type.TypeKind != TypeKind.Class ||
+            type.IsAbstract ||
             attribute is null ||
             attribute.ConstructorArguments.Length != 1 ||
             attribute.ConstructorArguments[0].Value is not int version ||
             version < 1)
         {
             production.ReportDiagnostic(Diagnostic.Create(InvalidContract, Location(type), type.Name,
-                "must be a public, non-generic top-level class or struct with a positive version"));
+                "must be a public, non-abstract, non-generic top-level class with a positive version"));
             return null;
         }
 
@@ -98,12 +99,13 @@ public sealed class DtoContractGenerator : IIncrementalGenerator
                 continue;
             }
 
-            if (property.IsStatic || property.SetMethod is null ||
+            if (property.IsStatic || property.IsIndexer || property.IsRequired || property.SetMethod is null ||
+                property.SetMethod.IsInitOnly ||
                 property.SetMethod.DeclaredAccessibility != Accessibility.Public ||
                 property.GetMethod is null || property.GetMethod.DeclaredAccessibility != Accessibility.Public)
             {
                 production.ReportDiagnostic(Diagnostic.Create(UnsupportedMember, Location(property), property.Name,
-                    "must have public instance getter and setter"));
+                    "must have public instance getter and non-init setter and cannot be required or an indexer"));
                 continue;
             }
 
@@ -114,7 +116,8 @@ public sealed class DtoContractGenerator : IIncrementalGenerator
                 : property.Name;
             int maxString = GetNamedInt(memberAttribute, "MaximumStringLength", 4096);
             int maxCollection = GetNamedInt(memberAttribute, "MaximumCollectionCount", 64);
-            if (wireName == "$version" || wireName.Length > 128 || wireName.IndexOf('\0') >= 0 ||
+            if (string.Equals(wireName, "$version", StringComparison.OrdinalIgnoreCase) ||
+                wireName.Length > 128 || wireName.IndexOf('\0') >= 0 ||
                 !names.Add(wireName) || maxString < 0 || maxString > 64 * 1024 ||
                 maxCollection < 0 || maxCollection > 64)
             {
@@ -145,6 +148,13 @@ public sealed class DtoContractGenerator : IIncrementalGenerator
         {
             production.ReportDiagnostic(Diagnostic.Create(InvalidContract, Location(type), type.Name,
                 "must declare at least one [PowerShellDtoMember] property"));
+            return null;
+        }
+
+        if (members.Count > 63)
+        {
+            production.ReportDiagnostic(Diagnostic.Create(InvalidContract, Location(type), type.Name,
+                "must declare no more than 63 [PowerShellDtoMember] properties because $version uses one of the 64 property bag entries"));
             return null;
         }
 
@@ -210,15 +220,22 @@ public sealed class DtoContractGenerator : IIncrementalGenerator
         {
             if (ReferenceEquals(member.Kind, ProjectionKind.String))
             {
-                source.Append("        if (value.").Append(member.PropertyName).Append(".Length > ")
+                source.Append("        if (value.@").Append(member.PropertyName).Append(".Length > ")
                     .Append(member.MaximumStringLength.ToString(CultureInfo.InvariantCulture))
                     .AppendLine(") throw global::Devolutions.PowerShell.Ffi.PowerShellDtoProjection.CreateException(global::Devolutions.PowerShell.Ffi.PowerShellDtoProjection.ValueTooLarge(" + Literal(member.WireName) + ", \"The DTO string member exceeds its declared bound.\"));");
             }
             else if (member.Kind.IsArray)
             {
-                source.Append("        if (value.").Append(member.PropertyName).Append(".Length > ")
+                source.Append("        if (value.@").Append(member.PropertyName).Append(".Length > ")
                     .Append(member.MaximumCollectionCount.ToString(CultureInfo.InvariantCulture))
                     .AppendLine(") throw global::Devolutions.PowerShell.Ffi.PowerShellDtoProjection.CreateException(global::Devolutions.PowerShell.Ffi.PowerShellDtoProjection.ValueTooLarge(" + Literal(member.WireName) + ", \"The DTO array exceeds its declared bound.\"));");
+                if (ReferenceEquals(member.Kind.Element, ProjectionKind.String))
+                {
+                    source.Append("        if (global::System.Linq.Enumerable.Any(value.@").Append(member.PropertyName)
+                        .Append(", static item => item.Length > ")
+                        .Append(member.MaximumStringLength.ToString(CultureInfo.InvariantCulture))
+                        .AppendLine(")) throw global::Devolutions.PowerShell.Ffi.PowerShellDtoProjection.CreateException(global::Devolutions.PowerShell.Ffi.PowerShellDtoProjection.ValueTooLarge(" + Literal(member.WireName) + ", \"A DTO string array member contains an item that exceeds its declared bound.\"));");
+                }
             }
         }
         source.AppendLine("        return global::Devolutions.PowerShell.Ffi.PowerShellDtoProjection.CreatePropertyBag(" + contract.Version.ToString(CultureInfo.InvariantCulture) + ", new global::System.Collections.Generic.KeyValuePair<string, global::Devolutions.PowerShell.Ffi.PowerShellValue>[]");
@@ -226,7 +243,7 @@ public sealed class DtoContractGenerator : IIncrementalGenerator
         foreach (MemberInfo member in contract.Members)
         {
             source.Append("            new(").Append(Literal(member.WireName)).Append(", ")
-                .Append(WriteExpression("value." + member.PropertyName, member)).AppendLine("),");
+                .Append(WriteExpression("value.@" + member.PropertyName, member)).AppendLine("),");
         }
         source.AppendLine("        });");
         source.AppendLine("    }");
@@ -254,11 +271,11 @@ public sealed class DtoContractGenerator : IIncrementalGenerator
             source.AppendLine("            {");
             EmitScalarRead(source, member.Kind.Element!, "values[index]", "converted[index]", path, member.MaximumStringLength, "                ");
             source.AppendLine("            }");
-            source.Append("            dto.").Append(member.PropertyName).AppendLine(" = converted;");
+            source.Append("            dto.@").Append(member.PropertyName).AppendLine(" = converted;");
         }
         else
         {
-            EmitScalarRead(source, member.Kind, member.PropertyName + "Value", "dto." + member.PropertyName, path, member.MaximumStringLength, "            ");
+            EmitScalarRead(source, member.Kind, member.PropertyName + "Value", "dto.@" + member.PropertyName, path, member.MaximumStringLength, "            ");
         }
         source.AppendLine("        }");
     }
@@ -360,6 +377,28 @@ public sealed class DtoContractGenerator : IIncrementalGenerator
 
     private static Location Location(ISymbol symbol) =>
         symbol.Locations.FirstOrDefault() ?? Microsoft.CodeAnalysis.Location.None;
+
+    private static string GetHintName(INamedTypeSymbol type)
+    {
+        var hintName = new StringBuilder();
+        foreach (char character in type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat))
+        {
+            if ((character >= 'a' && character <= 'z') ||
+                (character >= 'A' && character <= 'Z') ||
+                (character >= '0' && character <= '9'))
+            {
+                hintName.Append(character);
+            }
+            else
+            {
+                hintName.Append('_')
+                    .Append(((int)character).ToString("X4", CultureInfo.InvariantCulture))
+                    .Append('_');
+            }
+        }
+
+        return hintName.Append(".PowerShellDtoProjection.g.cs").ToString();
+    }
 
     private static string Literal(string value) => Microsoft.CodeAnalysis.CSharp.SymbolDisplay.FormatLiteral(value, quote: true);
 
