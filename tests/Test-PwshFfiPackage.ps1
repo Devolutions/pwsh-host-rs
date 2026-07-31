@@ -121,6 +121,8 @@ function Resolve-PowerShellPayloadDirectory {
         throw "The FFI package smoke requires a PowerShell 7.4 payload, but '$resolved' reported '$version'."
     }
 
+    $script:QualifiedPowerShellVersion = $version.Trim()
+
     return $resolved
 }
 
@@ -469,6 +471,219 @@ void VerifyProgressUpdate()
     }
 }
 
+void RequireProjectionFailure(
+    Action projection,
+    PowerShellCompleteResultProjectionFailure expectedFailure,
+    string description)
+{
+    try
+    {
+        projection();
+        throw new InvalidOperationException("Projection unexpectedly succeeded: " + description);
+    }
+    catch (PowerShellCompleteResultProjectionException exception)
+        when (exception.Failure == expectedFailure)
+    {
+    }
+}
+
+PowerShellInvocationResult InvokeProjectionScript(
+    PowerShellRuntime runtime,
+    string script,
+    string description)
+{
+    using PowerShell builder = CreatePowerShellWhenAvailable(runtime, description);
+    return builder.AddScript(script).Invoke();
+}
+
+void VerifyRuntimeDiagnostics(PowerShellRuntime runtime, string payloadDirectory)
+{
+    PowerShellRuntimeDiagnosticReport report = runtime.Diagnostics;
+    Require(
+        Path.IsPathFullyQualified(report.PayloadDirectory) &&
+        Directory.Exists(report.PayloadDirectory) &&
+        File.Exists(Path.Combine(report.PayloadDirectory, "pwsh.dll")) &&
+        report.BindingsAbiVersion == 1 &&
+        report.PayloadTableShape == PowerShellPayloadTableShape.V1 &&
+        report.PayloadTableSlotCount != 0 &&
+        report.PayloadTableSize >= (nuint)report.PayloadTableSlotCount * (nuint)IntPtr.Size &&
+        report.FeatureFlags == runtime.FeatureFlags &&
+        (report.FeatureFlags & (1UL << 24)) != 0 &&
+        report.RegisteredLiveObjectContractPacks.Count == 0 &&
+        (report.PowerShellFileVersion is null ||
+            (!string.IsNullOrWhiteSpace(report.PowerShellFileVersion) &&
+             report.PowerShellFileVersion.Length <= 128)) &&
+        typeof(PowerShellRuntimeDiagnosticReport)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .All(property => property.SetMethod is null) &&
+        typeof(PowerShellLiveObjectContractPackIdentity)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .All(property => property.SetMethod is null),
+        "Runtime diagnostics did not expose the documented immutable, descriptive payload facts.");
+    // The report exposes the runtime's canonicalized payload directory, which on Windows
+    // is extended-length prefixed and therefore is not string-equal to the activation
+    // argument. It must still resolve to the same directory.
+    static string NormalizePayloadDirectory(string path)
+    {
+        string trimmed = path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..] : path;
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(trimmed));
+    }
+
+    Require(
+        NormalizePayloadDirectory(report.PayloadDirectory)
+            .Equals(NormalizePayloadDirectory(payloadDirectory), StringComparison.OrdinalIgnoreCase),
+        $"Runtime diagnostics reported payload directory '{report.PayloadDirectory}' which does not resolve to '{payloadDirectory}'.");
+    Console.WriteLine(
+        "FFI package consumer PowerShell file version: " +
+        (report.PowerShellFileVersion ?? "unreported"));
+}
+
+void VerifyCompleteResultProjection(PowerShellRuntime runtime)
+{
+    const string DtoScript =
+        "[pscustomobject]@{ '`$version' = [uint64]1; Name = 'generated-projection'; Count = [int64]7 }";
+    PowerShellInvocationResult validResult = InvokeProjectionScript(
+        runtime,
+        DtoScript,
+        "the generated DTO result builder");
+    PowerShellObjectSnapshot validRecord = validResult.Output.Records.Single();
+    Require(
+        validRecord.PropertyBag is not null,
+        $"The generated DTO source result did not retain a property bag ({validRecord.PropertyEntryCount} retained, {validRecord.DroppedPropertyEntryCount} dropped).");
+    PackageProjectionDto invocationDto = PowerShellCompleteResultProjection.Read(
+        validResult,
+        PackageProjectionDtoPowerShellDtoProjection.Read);
+    Require(
+        invocationDto.Name == "generated-projection" &&
+        invocationDto.Count == 7,
+        "The complete invocation result was not projected through the explicit generated DTO mapper.");
+
+    RequireProjectionFailure(
+        () => _ = PowerShellCompleteResultProjection.Read(
+            InvokeProjectionScript(runtime, string.Empty, "the zero-result projection builder"),
+            PackageProjectionDtoPowerShellDtoProjection.Read),
+        PowerShellCompleteResultProjectionFailure.ZeroResults,
+        "zero results");
+    RequireProjectionFailure(
+        () => _ = PowerShellCompleteResultProjection.Read(
+            InvokeProjectionScript(
+                runtime,
+                DtoScript + "; " + DtoScript,
+                "the multiple-result projection builder"),
+            PackageProjectionDtoPowerShellDtoProjection.Read),
+        PowerShellCompleteResultProjectionFailure.MultipleResults,
+        "multiple results");
+    RequireProjectionFailure(
+        () => _ = PowerShellCompleteResultProjection.Read(
+            InvokeProjectionScript(
+                runtime,
+                "[pscustomobject]@{ '`$version' = [uint64]1; Name = 'truncated'; Count = [int64]7; Nested = @{ Value = 1 } }",
+                "the truncated-result projection builder"),
+            PackageProjectionDtoPowerShellDtoProjection.Read),
+        PowerShellCompleteResultProjectionFailure.IncompleteOrTruncated,
+        "truncated result");
+    RequireProjectionFailure(
+        () => _ = PowerShellCompleteResultProjection.Read(
+            InvokeProjectionScript(
+                runtime,
+                "[pscustomobject]@{ '`$version' = [uint64]1; Name = 'mapper-failure' }",
+                "the mapper-failure projection builder"),
+            PackageProjectionDtoPowerShellDtoProjection.Read),
+        PowerShellCompleteResultProjectionFailure.MapperFailure,
+        "mapper failure");
+
+    using (PowerShell typedBuilder = CreatePowerShellWhenAvailable(runtime, "the typed DTO result builder"))
+    using (PowerShellTypedResultInvocation typed = typedBuilder
+        .AddScript(DtoScript)
+        .BeginTypedResultInvocation())
+    {
+        PowerShellValuePage first = WaitForTypedPage(
+            typed,
+            acknowledgedThrough: 0,
+            maximumRecords: 1,
+            page => page.Records.Count == 1,
+            "the typed DTO result page");
+        PowerShellValuePage complete = WaitForTypedPage(
+            typed,
+            acknowledgedThrough: first.NextSequence,
+            maximumRecords: 1,
+            page => page.IsComplete,
+            "the typed DTO completion page");
+        PackageProjectionDto typedDto = PowerShellCompleteResultProjection.Read(
+            new[] { first, complete },
+            PackageProjectionDtoPowerShellDtoProjection.Read);
+        Require(
+            typedDto.Name == "generated-projection" &&
+            typedDto.Count == 7,
+            "The complete typed result sequence was not projected through the explicit generated DTO mapper.");
+    }
+
+    using (PowerShell incompleteBuilder = CreatePowerShellWhenAvailable(runtime, "the incomplete typed DTO result builder"))
+    using (PowerShellTypedResultInvocation incomplete = incompleteBuilder
+        .AddScript(DtoScript)
+        .BeginTypedResultInvocation())
+    {
+        PowerShellValuePage partial = WaitForTypedPage(
+            incomplete,
+            acknowledgedThrough: 0,
+            maximumRecords: 1,
+            page => page.Records.Count == 1,
+            "the incomplete typed DTO result page");
+        RequireProjectionFailure(
+            () => _ = PowerShellCompleteResultProjection.Read(
+                new[] { partial },
+                PackageProjectionDtoPowerShellDtoProjection.Read),
+            PowerShellCompleteResultProjectionFailure.IncompleteOrTruncated,
+            "incomplete typed result sequence");
+    }
+
+    using (PowerShell observedBuilder = CreatePowerShellWhenAvailable(runtime, "the observed DTO result builder"))
+    using (PowerShellObservedInvocation observed = observedBuilder
+        .AddScript(DtoScript)
+        .BeginObservedInvocation())
+    {
+        PowerShellValuePage first = WaitForObservedResultPage(
+            observed,
+            acknowledgedThrough: 0,
+            maximumRecords: 1,
+            page => page.Records.Count == 1,
+            "the observed DTO result page");
+        var resultPages = new List<PowerShellValuePage> { first };
+        ulong resultAcknowledgement = first.NextSequence;
+        ulong diagnosticAcknowledgement = 0;
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        PowerShellValuePage resultPage = first;
+        PowerShellObservedDiagnosticPage diagnosticPage = null!;
+        while (DateTime.UtcNow < deadline)
+        {
+            resultPage = observed.ReadResults(resultAcknowledgement, maximumRecords: 1);
+            resultAcknowledgement = resultPage.NextSequence;
+            resultPages.Add(resultPage);
+            diagnosticPage = observed.ReadDiagnostics(diagnosticAcknowledgement, maximumRecords: 1);
+            diagnosticAcknowledgement = diagnosticPage.NextSequence;
+            if (resultPage.IsComplete && diagnosticPage.IsComplete)
+            {
+                break;
+            }
+
+            Thread.Sleep(10);
+        }
+
+        Require(
+            resultPage.IsComplete &&
+            diagnosticPage is not null &&
+            diagnosticPage.IsComplete,
+            "The observed DTO result and diagnostics did not reach complete terminal pages.");
+        PackageProjectionDto observedDto = PowerShellCompleteResultProjection.Read(
+            resultPages,
+            PackageProjectionDtoPowerShellDtoProjection.Read);
+        Require(
+            observedDto.Name == "generated-projection" &&
+            observedDto.Count == 7,
+            "The complete observed result sequence was not projected through the explicit generated DTO mapper.");
+    }
+}
+
 async Task VerifyRecipesSchemasAndPoliciesAsync(PowerShellRuntime runtime)
 {
     var outputSchema = new PowerShellResultSchema(
@@ -657,6 +872,50 @@ PowerShellValuePage WaitForTypedPage(
     throw new TimeoutException("Timed out waiting for " + description + ".");
 }
 
+PowerShellValuePage WaitForObservedResultPage(
+    PowerShellObservedInvocation invocation,
+    ulong acknowledgedThrough,
+    int maximumRecords,
+    Func<PowerShellValuePage, bool> predicate,
+    string description)
+{
+    DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+    while (DateTime.UtcNow < deadline)
+    {
+        PowerShellValuePage page = invocation.ReadResults(acknowledgedThrough, maximumRecords);
+        if (predicate(page))
+        {
+            return page;
+        }
+
+        Thread.Sleep(10);
+    }
+
+    throw new TimeoutException("Timed out waiting for " + description + ".");
+}
+
+PowerShellObservedDiagnosticPage WaitForObservedDiagnosticPage(
+    PowerShellObservedInvocation invocation,
+    ulong acknowledgedThrough,
+    int maximumRecords,
+    Func<PowerShellObservedDiagnosticPage, bool> predicate,
+    string description)
+{
+    DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+    while (DateTime.UtcNow < deadline)
+    {
+        PowerShellObservedDiagnosticPage page = invocation.ReadDiagnostics(acknowledgedThrough, maximumRecords);
+        if (predicate(page))
+        {
+            return page;
+        }
+
+        Thread.Sleep(10);
+    }
+
+    throw new TimeoutException("Timed out waiting for " + description + ".");
+}
+
 PowerShell CreatePowerShellWhenAvailable(PowerShellRuntime runtime, string description)
 {
     DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
@@ -816,21 +1075,427 @@ async Task VerifyTypedResultPagingAsync(PowerShellRuntime runtime)
     using PowerShell availabilityCheck = CreatePowerShellWhenAvailable(runtime, "subsequent facade calls");
 }
 
+async Task VerifyObservedInvocationAsync(PowerShellRuntime runtime)
+{
+    Require(
+        (runtime.FeatureFlags & (1UL << 22)) != 0,
+        "The packaged NativeAOT consumer did not negotiate observed invocation support.");
+
+    using (PowerShell builder = CreatePowerShellWhenAvailable(runtime, "the observed backpressure builder"))
+    using (PowerShellObservedInvocation invocation = builder
+        .AddScript("1; 2")
+        .BeginObservedInvocation(new PowerShellObservedInvocationOptions(
+            maximumBufferedResultRecords: 1,
+            maximumResultPageRecords: 1,
+            maximumBufferedDiagnosticRecords: 1,
+            maximumDiagnosticPageRecords: 1)))
+    {
+        PowerShellValuePage firstResult = WaitForObservedResultPage(
+            invocation,
+            acknowledgedThrough: 0,
+            maximumRecords: 1,
+            page => page.Records.Count == 1,
+            "the first observed result page");
+        Require(
+            firstResult.Records[0].Value.TryGetSignedInteger(out long firstValue) &&
+            firstValue == 1 &&
+            firstResult.TotalRecordCount == 1,
+            "Observed results did not retain the first bounded copied value.");
+
+        PowerShellValuePage replayedResult = invocation.ReadResults(acknowledgedThrough: 0, maximumRecords: 1);
+        Require(
+            replayedResult.Records.Select(record => record.Sequence)
+                .SequenceEqual(firstResult.Records.Select(record => record.Sequence)),
+            "Observed results implicitly acknowledged a result page.");
+
+        PowerShellValuePage blockedByDiagnostics = invocation.ReadResults(
+            acknowledgedThrough: firstResult.NextSequence,
+            maximumRecords: 1);
+        Require(
+            blockedByDiagnostics.Records.Count == 0 &&
+            blockedByDiagnostics.TotalRecordCount == 1,
+            "A full observed diagnostic queue did not backpressure the same invocation.");
+
+        PowerShellObservedDiagnosticPage firstDiagnostic = WaitForObservedDiagnosticPage(
+            invocation,
+            acknowledgedThrough: 0,
+            maximumRecords: 1,
+            page => page.Records.Count == 1,
+            "the first observed diagnostic page");
+        Require(
+            firstDiagnostic.Records[0].Stream == PowerShellStreamKind.Output &&
+            firstDiagnostic.Records[0].Text == "1",
+            "Observed output diagnostics were not copied losslessly.");
+
+        PowerShellObservedDiagnosticPage secondDiagnostic = WaitForObservedDiagnosticPage(
+            invocation,
+            acknowledgedThrough: firstDiagnostic.NextSequence,
+            maximumRecords: 1,
+            page => page.Records.Count == 1,
+            "the diagnostic released by acknowledgement");
+        PowerShellValuePage secondResult = WaitForObservedResultPage(
+            invocation,
+            acknowledgedThrough: firstResult.NextSequence,
+            maximumRecords: 1,
+            page => page.Records.Count == 1,
+            "the result released by diagnostic acknowledgement");
+        Require(
+            secondResult.Records[0].Value.TryGetSignedInteger(out long secondValue) &&
+            secondValue == 2 &&
+            secondDiagnostic.Records[0].Text == "2",
+            "Observed channel acknowledgement did not independently release the blocked producer.");
+
+        PowerShellValuePage resultTerminal = WaitForObservedResultPage(
+            invocation,
+            acknowledgedThrough: secondResult.NextSequence,
+            maximumRecords: 1,
+            page => page.IsTerminal,
+            "observed result terminal metadata");
+        Require(
+            !resultTerminal.IsComplete &&
+            resultTerminal.TerminalStatus == PowerShellFfiStatus.Success,
+            "Observed result acknowledgement completed before diagnostics were acknowledged.");
+        PowerShellObservedDiagnosticPage diagnosticTerminal = WaitForObservedDiagnosticPage(
+            invocation,
+            acknowledgedThrough: secondDiagnostic.NextSequence,
+            maximumRecords: 1,
+            page => page.IsTerminal,
+            "observed diagnostic terminal metadata");
+        Require(
+            diagnosticTerminal.IsComplete &&
+            diagnosticTerminal.TerminalStatus == PowerShellFfiStatus.Success,
+            "Observed invocation did not complete after both channels were acknowledged.");
+    }
+
+    using (PowerShell builder = CreatePowerShellWhenAvailable(runtime, "the observed diagnostics builder"))
+    using (PowerShellObservedInvocation invocation = builder
+        .AddScript(
+            "Write-Output 'observed-output'; Write-Error 'observed-error' -ErrorAction Continue; " +
+            "Write-Warning 'observed-warning'; Write-Verbose 'observed-verbose' -Verbose; " +
+            "Write-Debug 'observed-debug' -Debug; Write-Information 'observed-information' -InformationAction Continue; " +
+            "Write-Progress -Activity 'observed-progress' -Status 'running'")
+        .BeginObservedInvocation())
+    {
+        ulong resultAcknowledgement = 0;
+        ulong diagnosticAcknowledgement = 0;
+        PowerShellValuePage resultPage = null!;
+        PowerShellObservedDiagnosticPage diagnosticPage = null!;
+        var streams = new HashSet<PowerShellStreamKind>();
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            resultPage = invocation.ReadResults(resultAcknowledgement);
+            resultAcknowledgement = resultPage.NextSequence;
+            diagnosticPage = invocation.ReadDiagnostics(diagnosticAcknowledgement);
+            diagnosticAcknowledgement = diagnosticPage.NextSequence;
+            foreach (PowerShellObservedDiagnosticRecord record in diagnosticPage.Records)
+            {
+                streams.Add(record.Stream);
+            }
+
+            if (resultPage.IsTerminal && diagnosticPage.IsTerminal)
+            {
+                break;
+            }
+
+            Thread.Sleep(10);
+        }
+
+        Require(
+            resultPage.IsTerminal &&
+            diagnosticPage.IsTerminal &&
+            streams.SetEquals(Enum.GetValues<PowerShellStreamKind>()) &&
+            resultPage.TerminalStatus == PowerShellFfiStatus.ManagedFailure &&
+            diagnosticPage.TerminalStatus == PowerShellFfiStatus.ManagedFailure &&
+            !resultPage.IsComplete &&
+            !diagnosticPage.IsComplete,
+            "Observed invocation did not copy every stream or mark an error stream incomplete.");
+    }
+
+    using (PowerShell builder = CreatePowerShellWhenAvailable(runtime, "the observed cancellation builder"))
+    using (PowerShellObservedInvocation invocation = builder
+        .AddScript("Start-Sleep -Seconds 5; 'must-not-complete'")
+        .BeginObservedInvocation())
+    {
+        Thread.Sleep(50);
+        invocation.Stop();
+        PowerShellValuePage cancelled = WaitForObservedResultPage(
+            invocation,
+            acknowledgedThrough: 0,
+            maximumRecords: 1,
+            page => page.IsTerminal,
+            "observed invocation cancellation");
+        Require(
+            cancelled.TerminalStatus == PowerShellFfiStatus.OperationCancelled &&
+            !cancelled.IsComplete,
+            "Stopping an observed invocation did not produce incomplete cancellation.");
+    }
+
+    using (PowerShell builder = CreatePowerShellWhenAvailable(runtime, "the observed terminating error builder"))
+    using (PowerShellObservedInvocation invocation = builder
+        .AddScript("throw 'observed-terminating-error'")
+        .BeginObservedInvocation())
+    {
+        PowerShellObservedDiagnosticPage terminatingDiagnostic = WaitForObservedDiagnosticPage(
+            invocation,
+            acknowledgedThrough: 0,
+            maximumRecords: 1,
+            page => page.Records.Count == 1,
+            "the observed terminating error diagnostic");
+        PowerShellValuePage terminatingResult = WaitForObservedResultPage(
+            invocation,
+            acknowledgedThrough: 0,
+            maximumRecords: 1,
+            page => page.IsTerminal,
+            "the observed terminating error result");
+        Require(
+            terminatingDiagnostic.Records[0].Stream == PowerShellStreamKind.Error &&
+            terminatingDiagnostic.Records[0].Text.Contains("observed-terminating-error", StringComparison.Ordinal) &&
+            terminatingDiagnostic.IsTerminal &&
+            terminatingDiagnostic.TerminalStatus == PowerShellFfiStatus.ManagedFailure &&
+            terminatingResult.IsTerminal &&
+            terminatingResult.TerminalStatus == PowerShellFfiStatus.ManagedFailure &&
+            !terminatingResult.IsComplete &&
+            !terminatingDiagnostic.IsComplete,
+            "Observed terminating errors were not copied before incomplete terminal failure.");
+    }
+
+    using PowerShell availabilityCheck = CreatePowerShellWhenAvailable(runtime, "the observed invocation pipeline");
+    await Task.CompletedTask;
+}
+
 void VerifyTransactionAndHostCapabilities(PowerShellSession session)
 {
-    var stagedIntent = new StagedIntentCapability();
+    using var stagedIntent = new StagedIntentHandler();
+    var stagedSchema = new PowerShellStagedIntentSchema(
+    [
+        new PowerShellStagedIntentProperty("Id", [PowerShellValueKind.String]),
+        new PowerShellStagedIntentProperty("Name", [PowerShellValueKind.String]),
+    ],
+    maximumPayloadBytes: 512);
+    var stagedDefinition = new PowerShellStagedIntentDefinition(
+        "example.intent",
+        stagedSchema,
+        stagedIntent,
+        deadline: TimeSpan.FromSeconds(2));
+    using PowerShellStagedIntentCoordinator stagedIntents =
+        PowerShellStagedIntentCoordinator.Register([stagedDefinition]);
+
+    using (PowerShell successful = session.CreatePowerShell())
+    {
+        PowerShellInvocationResult result = successful
+            .AddScript(@"
+                `$stage = `$DpsCapabilities.Invoke('example.intent.stage', [pscustomobject]@{
+                    stageId = 'intent-1'
+                    intent = [pscustomobject]@{ Id = 'intent-1'; Name = 'committed' }
+                })
+                `$validation = `$DpsCapabilities.Invoke('example.intent.validate', 'intent-1')
+                `$commit = `$DpsCapabilities.Invoke('example.intent.commit', 'intent-1')
+                ""`$(`$stage.status)|`$(`$validation.status)|`$(`$commit.status)""
+            ")
+            .WithCapabilities(stagedIntents.Capabilities)
+            .Invoke();
+        Require(
+            result.Output.Records.Count == 1 &&
+            result.Output.Records[0].DisplayText == "staged|validated|committed" &&
+            stagedIntent.CommittedName == "committed",
+            "The staged intent coordinator did not complete stage, validate, and commit.");
+    }
+
+    using (PowerShell postCommit = session.CreatePowerShell())
+    {
+        PowerShellInvocationResult result = postCommit
+            .AddScript(@"
+                `$duplicate = `$DpsCapabilities.Invoke('example.intent.stage', [pscustomobject]@{
+                    stageId = 'intent-1'
+                    intent = [pscustomobject]@{ Id = 'intent-1'; Name = 'duplicate' }
+                })
+                `$afterTerminal = `$DpsCapabilities.Invoke('example.intent.abort', 'intent-1')
+                ""`$(`$duplicate.status)|`$(`$afterTerminal.status)""
+            ")
+            .WithCapabilities(stagedIntents.Capabilities)
+            .Invoke();
+        Require(
+            result.Output.Records.Count == 1 &&
+            result.Output.Records[0].DisplayText == "rejected|terminal",
+            "The staged intent coordinator accepted a duplicate identifier or an operation after commit.");
+    }
+
+    using (PowerShell abort = session.CreatePowerShell())
+    {
+        PowerShellInvocationResult result = abort
+            .AddScript(@"
+                `$stage = `$DpsCapabilities.Invoke('example.intent.stage', [pscustomobject]@{
+                    stageId = 'intent-2'
+                    intent = [pscustomobject]@{ Id = 'intent-2'; Name = 'discarded' }
+                })
+                `$abort = `$DpsCapabilities.Invoke('example.intent.abort', 'intent-2')
+                `$afterTerminal = `$DpsCapabilities.Invoke('example.intent.validate', 'intent-2')
+                ""`$(`$stage.status)|`$(`$abort.status)|`$(`$afterTerminal.status)""
+            ")
+            .WithCapabilities(stagedIntents.Capabilities)
+            .Invoke();
+        Require(
+            result.Output.Records.Count == 1 &&
+            result.Output.Records[0].DisplayText == "staged|aborted|terminal" &&
+            stagedIntent.AbortedName == "discarded",
+            "The staged intent coordinator did not abort or reject an operation after abort.");
+    }
+
+    int stageCallsBeforeInvalidPayload = stagedIntent.StageCalls;
+    using (PowerShell invalid = session.CreatePowerShell())
+    {
+        PowerShellInvocationResult result = invalid
+            .AddScript(@"
+                (`$DpsCapabilities.Invoke('example.intent.stage', [pscustomobject]@{
+                    stageId = 'intent-invalid'
+                    intent = [pscustomobject]@{ Id = 'intent-invalid' }
+                })).status
+            ")
+            .WithCapabilities(stagedIntents.Capabilities)
+            .Invoke();
+        Require(
+            result.Output.Records.Count == 1 &&
+            result.Output.Records[0].DisplayText == "rejected" &&
+            stagedIntent.StageCalls == stageCallsBeforeInvalidPayload,
+            "An invalid staged intent reached the application handler.");
+    }
+
+    using (PowerShell stageCommitRace = session.CreatePowerShell())
+    {
+        PowerShellInvocationResult result = stageCommitRace
+            .AddScript(@"
+                `$stage = `$DpsCapabilities.Invoke('example.intent.stage', [pscustomobject]@{
+                    stageId = 'intent-commit-expiry'
+                    intent = [pscustomobject]@{ Id = 'intent-commit-expiry'; Name = 'commit-wins' }
+                })
+                `$validation = `$DpsCapabilities.Invoke('example.intent.validate', 'intent-commit-expiry')
+                ""`$(`$stage.status)|`$(`$validation.status)""
+            ")
+            .WithCapabilities(stagedIntents.Capabilities)
+            .Invoke();
+        Require(
+            result.Output.Records.Count == 1 &&
+            result.Output.Records[0].DisplayText == "staged|validated",
+            "The commit/expiry race intent did not stage and validate.");
+    }
+    int abortCallsBeforeCommitRace = stagedIntent.AbortCalls;
+    using (PowerShell commitRace = session.CreatePowerShell())
+    using (PowerShellInvocationOperation operation = commitRace
+        .AddScript("(`$DpsCapabilities.Invoke('example.intent.commit', 'intent-commit-expiry')).status")
+        .WithCapabilities(stagedIntents.Capabilities)
+        .BeginInvoke())
+    {
+        Require(
+            stagedIntent.CommitStarted.Wait(TimeSpan.FromSeconds(5)),
+            "The commit/expiry race handler did not begin.");
+        Thread.Sleep(2500);
+        stagedIntent.ReleaseCommit.Set();
+        Require(
+            operation.Wait(TimeSpan.FromSeconds(5)).State == PowerShellOperationState.Completed,
+            "The commit/expiry race operation did not complete.");
+        PowerShellInvocationResult result = operation.GetResult();
+        Require(
+            result.Output.Records.Count == 1 &&
+            result.Output.Records[0].DisplayText == "committed" &&
+            stagedIntent.CommittedName == "commit-wins" &&
+            stagedIntent.AbortCalls == abortCallsBeforeCommitRace &&
+            stagedIntent.RetainedStageCount == 0,
+            "Expiry overrode an accepted commit or delivered an unexpected cleanup abort.");
+    }
+
+    int abortCallsBeforeExpiry = stagedIntent.AbortCalls;
+    using (PowerShell expired = session.CreatePowerShell())
+    {
+        PowerShellInvocationResult stageResult = expired
+            .AddScript(@"
+                (`$DpsCapabilities.Invoke('example.intent.stage', [pscustomobject]@{
+                    stageId = 'intent-expired'
+                    intent = [pscustomobject]@{ Id = 'intent-expired'; Name = 'expired' }
+                })).status
+            ")
+            .WithCapabilities(stagedIntents.Capabilities)
+            .Invoke();
+        Require(
+            stageResult.Output.Records.Count == 1 &&
+            stageResult.Output.Records[0].DisplayText == "staged",
+            "The expiring intent did not stage.");
+    }
+    Thread.Sleep(2500);
+    using (PowerShell expired = session.CreatePowerShell())
+    {
+        PowerShellInvocationResult result = expired
+            .AddScript("(`$DpsCapabilities.Invoke('example.intent.validate', 'intent-expired')).status")
+            .WithCapabilities(stagedIntents.Capabilities)
+            .Invoke();
+        Require(
+            result.Output.Records.Count == 1 &&
+            result.Output.Records[0].DisplayText == "expired" &&
+            stagedIntent.AbortCalls == abortCallsBeforeExpiry + 1 &&
+            stagedIntent.AbortedName == "expired" &&
+            stagedIntent.RetainedStageCount == 0,
+            "The staged intent deadline did not notify the handler and clean up the expired stage.");
+    }
+
+    using (PowerShell cancelled = session.CreatePowerShell())
+    using (PowerShellInvocationOperation operation = cancelled
+        .AddScript(@"
+            `$DpsCapabilities.Invoke('example.intent.stage', [pscustomobject]@{
+                stageId = 'intent-cancelled'
+                intent = [pscustomobject]@{ Id = 'intent-cancelled'; Name = 'cancelled' }
+            })
+        ")
+        .WithCapabilities(stagedIntents.Capabilities)
+        .BeginInvoke())
+    {
+        Require(
+            stagedIntent.CancellationStarted.Wait(TimeSpan.FromSeconds(5)),
+            "The staged intent cancellation handler did not begin.");
+        operation.Stop();
+        Require(
+            operation.Wait(TimeSpan.FromSeconds(5)).State == PowerShellOperationState.Cancelled &&
+            stagedIntent.CancellationObserved,
+            "Stopping a staged intent invocation did not cancel the handler.");
+    }
+    using (PowerShell cancelled = session.CreatePowerShell())
+    {
+        PowerShellInvocationResult result = cancelled
+            .AddScript("(`$DpsCapabilities.Invoke('example.intent.validate', 'intent-cancelled')).status")
+            .WithCapabilities(stagedIntents.Capabilities)
+            .Invoke();
+        Require(
+            result.Output.Records.Count == 1 &&
+            result.Output.Records[0].DisplayText == "cancelled",
+            "Cancellation did not clean up the staged intent.");
+    }
+
+    using (PowerShell disposal = session.CreatePowerShell())
+    {
+        PowerShellInvocationResult result = disposal
+            .AddScript(@"
+                (`$DpsCapabilities.Invoke('example.intent.stage', [pscustomobject]@{
+                    stageId = 'intent-dispose'
+                    intent = [pscustomobject]@{ Id = 'intent-dispose'; Name = 'dispose' }
+                })).status
+            ")
+            .WithCapabilities(stagedIntents.Capabilities)
+            .Invoke();
+        Require(
+            result.Output.Records.Count == 1 &&
+            result.Output.Records[0].DisplayText == "staged",
+            "The disposal intent did not stage.");
+    }
+    int abortCallsBeforeDispose = stagedIntent.AbortCalls;
+    stagedIntents.Dispose();
+    Require(
+        stagedIntent.AbortCalls == abortCallsBeforeDispose + 1 &&
+        stagedIntent.AbortedName == "dispose" &&
+        stagedIntent.RetainedStageCount == 0,
+        "Disposing a coordinator did not deliver best-effort abort cleanup.");
+
     var hostInteractions = new HostInteractionCapability();
-    PowerShellCapabilityDefinition stageIntentDefinition = new(
-        "example.stage-intent",
-        [new PowerShellCapabilityArgumentSchema([PowerShellValueKind.PropertyBag])],
-        [PowerShellValueKind.Null],
-        PowerShellCapabilityPermission.Write,
-        maximumInputBytes: 4096,
-        maximumOutputBytes: 64,
-        deadline: TimeSpan.FromSeconds(5));
     using PowerShellCapabilitySet capabilities = PowerShellCapabilitySet.Register(
     [
-        new PowerShellCapabilityBinding(stageIntentDefinition, stagedIntent),
         new PowerShellCapabilityBinding(PowerShellHostInteraction.WriteText, hostInteractions),
         new PowerShellCapabilityBinding(PowerShellHostInteraction.ReportProgress, hostInteractions),
         new PowerShellCapabilityBinding(PowerShellHostInteraction.PromptChoice, hostInteractions),
@@ -840,21 +1505,18 @@ void VerifyTransactionAndHostCapabilities(PowerShellSession session)
     {
         PowerShellInvocationResult result = successful
             .AddScript(
-                "`$null = `$DpsCapabilities.Invoke('example.stage-intent', [pscustomobject]@{ Id = 'intent-1'; Name = 'committed' })\n" +
                 "`$null = `$DpsCapabilities.Invoke('host.write-text', 'host-text')\n" +
                 "`$null = `$DpsCapabilities.Invoke('host.report-progress', [pscustomobject]@{ ActivityId = 9; ParentActivityId = -1; Activity = 'Copy'; StatusDescription = 'Running'; PercentComplete = 50; SecondsRemaining = 3; IsCompleted = `$false })\n" +
                 "`$DpsCapabilities.Invoke('host.prompt-choice', [pscustomobject]@{ Caption = 'Caption'; Message = 'Message'; Choices = @('first', 'second'); DefaultChoice = 0 })")
             .WithCapabilities(capabilities)
             .Invoke();
-        stagedIntent.CommitAfterSuccess(result);
         Require(
             result.Output.Records.Count == 1 &&
             result.Output.Records[0].DisplayText == "1" &&
-            stagedIntent.CommittedName == "committed" &&
             hostInteractions.Text == "host-text" &&
             hostInteractions.Progress is { ActivityId: 9, PercentComplete: 50 } &&
             hostInteractions.PromptCount == 1,
-            "Declared transaction and host capabilities did not round-trip through the copied capability bridge.");
+            "Declared host capabilities did not round-trip through the copied capability bridge.");
     }
 
     using (PowerShell denied = session.CreatePowerShell())
@@ -877,26 +1539,6 @@ void VerifyTransactionAndHostCapabilities(PowerShellSession session)
             "An unregistered capability reached a registered handler.");
     }
 
-    using (PowerShell failed = session.CreatePowerShell())
-    {
-        try
-        {
-            failed
-                .AddScript("`$null = `$DpsCapabilities.Invoke('example.stage-intent', [pscustomobject]@{ Id = 'intent-2'; Name = 'discarded' }); throw 'rollback'")
-                .WithCapabilities(capabilities)
-                .Invoke();
-            throw new InvalidOperationException("A terminating transaction script returned successfully.");
-        }
-        catch (PowerShellInvocationException)
-        {
-            stagedIntent.Discard();
-        }
-
-        Require(
-            stagedIntent.CommittedName == "committed" &&
-            stagedIntent.StagedName is null,
-            "A failed invocation committed a staged capability intent.");
-    }
 }
 
 if (args.Length != 1)
@@ -905,11 +1547,14 @@ if (args.Length != 1)
 }
 
 PowerShellRuntime runtime = PowerShellRuntime.Activate(args[0]);
+VerifyRuntimeDiagnostics(runtime, args[0]);
 VerifyCopiedValueReaders();
 VerifyScriptParameterMetadata(runtime);
 VerifyProgressUpdate();
+VerifyCompleteResultProjection(runtime);
 await VerifyRecipesSchemasAndPoliciesAsync(runtime);
 await VerifyTypedResultPagingAsync(runtime);
+await VerifyObservedInvocationAsync(runtime);
 const string SecretMarker = "ffi-secret-marker-not-accepted";
 Require(
    PowerShellSecretTransfer.Policy == PowerShellSecretTransferPolicy.Rejected &&
@@ -1083,6 +1728,180 @@ try
 }
 catch (ArgumentException)
 {
+}
+
+string preflightRoot = Path.Combine(Path.GetTempPath(), $"pwsh-sdk-ffi-preflight-{Guid.NewGuid():N}");
+string preflightModuleName = "PreflightOnly";
+string preflightModuleDirectory = Path.Combine(preflightRoot, preflightModuleName);
+string preflightManifestPath = Path.Combine(preflightModuleDirectory, $"{preflightModuleName}.psd1");
+string preflightModulePath = Path.Combine(preflightModuleDirectory, $"{preflightModuleName}.psm1");
+string preflightSideEffectPath = Path.Combine(preflightRoot, "module-executed.txt");
+try
+{
+    Directory.CreateDirectory(preflightModuleDirectory);
+    string longVersion = new('1', 160);
+    string longCommand = new('x', 80);
+    File.WriteAllText(
+        preflightManifestPath,
+        $"@{{ RootModule = '{preflightModuleName}.psm1'; ModuleVersion = '{longVersion}'; FunctionsToExport = @('Get-PreflightOne', 'Get-PreflightTwo', 'Get-PreflightThree', '{longCommand}', 'Get-PreflightFive') }}");
+    File.WriteAllText(
+        preflightModulePath,
+        $"Set-Content -LiteralPath '{preflightSideEffectPath.Replace("'", "''", StringComparison.Ordinal)}' -Value 'executed'");
+
+    var preflightConfiguration = new PowerShellSessionConfiguration(
+        moduleImports: new[] { preflightModuleName },
+        allowedModulePaths: new[] { preflightRoot });
+    PowerShellSessionPreflightReport preflight = runtime.ValidateSessionConfiguration(preflightConfiguration);
+    PowerShellSessionModuleImportDiagnostic preflightImport = preflight.ModuleImports.Single();
+    Require(
+        preflight.Status == PowerShellSessionPreflightStatus.Valid &&
+        preflight.ModuleRoots.Count == 1 &&
+        preflight.ModuleRoots[0].Status == PowerShellSessionModuleRootStatus.Valid &&
+        preflightImport.Status == PowerShellSessionModuleImportStatus.Resolved &&
+        preflightImport.DeclaredVersion.Length == 128 &&
+        preflightImport.DeclaredCommands.Count == 4 &&
+        preflightImport.DeclaredCommands[3].Length == 64 &&
+        preflightImport.DeclaredCommandsTruncated &&
+        !File.Exists(preflightSideEffectPath),
+        "Session preflight did not return bounded static module declarations without executing module code.");
+
+    PowerShellSessionPreflightReport missingRoot = runtime.ValidateSessionConfiguration(
+        new PowerShellSessionConfiguration(
+            allowedModulePaths: new[] { Path.Combine(preflightRoot, "missing-root") }));
+    Require(
+        missingRoot.Status == PowerShellSessionPreflightStatus.InvalidModuleRoots &&
+        missingRoot.ModuleRoots.Single().Status == PowerShellSessionModuleRootStatus.Missing,
+        "Session preflight did not report a missing module root.");
+
+    PowerShellSessionPreflightReport invalidRoot = runtime.ValidateSessionConfiguration(
+        new PowerShellSessionConfiguration(
+            allowedModulePaths: new[] { preflightRoot, preflightRoot + Path.DirectorySeparatorChar }));
+    Require(
+        invalidRoot.Status == PowerShellSessionPreflightStatus.InvalidModuleRoots &&
+        invalidRoot.ModuleRoots.Any(root => root.Status == PowerShellSessionModuleRootStatus.Invalid),
+        "Session preflight did not report duplicate canonical module roots.");
+
+    PowerShellSessionPreflightReport unresolvableImport = runtime.ValidateSessionConfiguration(
+        new PowerShellSessionConfiguration(
+            moduleImports: new[] { "MissingPreflightModule" },
+            allowedModulePaths: new[] { preflightRoot }));
+    Require(
+        unresolvableImport.Status == PowerShellSessionPreflightStatus.UnresolvableModuleImports &&
+        unresolvableImport.ModuleImports.Single().Status == PowerShellSessionModuleImportStatus.Unresolvable,
+        "Session preflight did not report an unresolvable module import.");
+
+    string invalidManifestName = "InvalidPreflightModule";
+    File.WriteAllText(Path.Combine(preflightRoot, $"{invalidManifestName}.psd1"), "not a manifest hashtable");
+    PowerShellSessionPreflightReport invalidManifest = runtime.ValidateSessionConfiguration(
+        new PowerShellSessionConfiguration(
+            moduleImports: new[] { invalidManifestName },
+            allowedModulePaths: new[] { preflightRoot }));
+    Require(
+        invalidManifest.Status == PowerShellSessionPreflightStatus.InvalidModuleManifest &&
+        invalidManifest.ModuleImports.Single().Status == PowerShellSessionModuleImportStatus.ManifestInvalid,
+        "Session preflight did not report an invalid module manifest.");
+
+    string externalModuleName = "ExternalPreflightModule";
+    string externalModuleDirectory = Path.Combine(preflightRoot, externalModuleName);
+    string externalTargetPath = Path.Combine(Path.GetTempPath(), "pwsh-sdk-ffi-external-module.psm1");
+    Directory.CreateDirectory(externalModuleDirectory);
+    File.WriteAllText(
+        Path.Combine(externalModuleDirectory, $"{externalModuleName}.psd1"),
+        $"@{{ ModuleVersion = '1.0'; RootModule = '{externalTargetPath.Replace("'", "''", StringComparison.Ordinal)}' }}");
+    var externalConfiguration = new PowerShellSessionConfiguration(
+        moduleImports: new[] { externalModuleName },
+        allowedModulePaths: new[] { preflightRoot });
+    PowerShellSessionPreflightReport externalDeclaration = runtime.ValidateSessionConfiguration(externalConfiguration);
+    Require(
+        externalDeclaration.Status == PowerShellSessionPreflightStatus.ExternalModuleDeclarations &&
+        externalDeclaration.ModuleImports.Single().Status == PowerShellSessionModuleImportStatus.ManifestDeclaresExternalPath,
+        "Session preflight did not report a manifest loading code from outside its approved module root.");
+
+    try
+    {
+        using PowerShellSession externalSession = runtime.CreateSession(
+            new PowerShellSessionOptions(configuration: externalConfiguration));
+        return 1;
+    }
+    catch (PowerShellFfiException)
+    {
+    }
+
+    string nestedEscapeName = "NestedEscapePreflightModule";
+    string nestedEscapeDirectory = Path.Combine(preflightRoot, nestedEscapeName);
+    Directory.CreateDirectory(nestedEscapeDirectory);
+    File.WriteAllText(
+        Path.Combine(nestedEscapeDirectory, $"{nestedEscapeName}.psd1"),
+        "@{ ModuleVersion = '1.0'; NestedModules = @('..\\..\\escaped-preflight.psm1') }");
+    PowerShellSessionPreflightReport nestedEscape = runtime.ValidateSessionConfiguration(
+        new PowerShellSessionConfiguration(
+            moduleImports: new[] { nestedEscapeName },
+            allowedModulePaths: new[] { preflightRoot }));
+    Require(
+        nestedEscape.Status == PowerShellSessionPreflightStatus.ExternalModuleDeclarations &&
+        nestedEscape.ModuleImports.Single().Status == PowerShellSessionModuleImportStatus.ManifestDeclaresExternalPath,
+        "Session preflight did not report a relative nested-module path escaping its approved module root.");
+
+    string containedName = "ContainedPreflightModule";
+    string containedDirectory = Path.Combine(preflightRoot, containedName);
+    Directory.CreateDirectory(containedDirectory);
+    File.WriteAllText(Path.Combine(containedDirectory, $"{containedName}.psm1"), "function Get-Contained { 1 }");
+    File.WriteAllText(
+        Path.Combine(containedDirectory, $"{containedName}.psd1"),
+        $"@{{ ModuleVersion = '1.0'; RootModule = '{containedName}.psm1'; RequiredModules = @('Microsoft.PowerShell.Utility'); NestedModules = @(@{{ ModuleName = 'Microsoft.PowerShell.Management'; ModuleVersion = '1.0' }}); FunctionsToExport = @('Get-Contained') }}");
+    PowerShellSessionPreflightReport contained = runtime.ValidateSessionConfiguration(
+        new PowerShellSessionConfiguration(
+            moduleImports: new[] { containedName },
+            allowedModulePaths: new[] { preflightRoot }));
+    Require(
+        contained.Status == PowerShellSessionPreflightStatus.Valid &&
+        contained.ModuleImports.Single().Status == PowerShellSessionModuleImportStatus.Resolved,
+        "Session preflight rejected a manifest whose module references are contained or name-based.");
+
+    PowerShellSessionPreflightReport missingWorkingDirectory = runtime.ValidateSessionConfiguration(
+        new PowerShellSessionConfiguration(
+            allowedModulePaths: new[] { preflightRoot },
+            workingDirectory: Path.Combine(preflightRoot, "missing-working-directory")));
+    Require(
+        missingWorkingDirectory.Status == PowerShellSessionPreflightStatus.InvalidWorkingDirectory &&
+        missingWorkingDirectory.Diagnostic.Length != 0,
+        "Session preflight did not report a nonexistent working directory.");
+
+    PowerShellSessionPreflightReport validWorkingDirectory = runtime.ValidateSessionConfiguration(
+        new PowerShellSessionConfiguration(
+            allowedModulePaths: new[] { preflightRoot },
+            workingDirectory: preflightRoot));
+    Require(
+        validWorkingDirectory.Status == PowerShellSessionPreflightStatus.Valid,
+        "Session preflight rejected an existing working directory.");
+
+    PowerShellSessionPreflightReport currentRunspaceConfiguration = runtime.ValidateSessionConfiguration(
+        new PowerShellSessionOptions(
+            runspaceMode: PowerShellRunspaceMode.CurrentRunspace,
+            configuration: preflightConfiguration));
+    Require(
+        currentRunspaceConfiguration.Status == PowerShellSessionPreflightStatus.InvalidConfiguration,
+        "Session preflight did not reject configured current-runspace sessions.");
+
+    try
+    {
+        using PowerShellSession invalidCurrentRunspaceSession = runtime.CreateSession(
+            new PowerShellSessionOptions(
+                runspaceMode: PowerShellRunspaceMode.CurrentRunspace,
+                configuration: preflightConfiguration));
+        return 1;
+    }
+    catch (PowerShellFfiException exception)
+        when (exception.Status == PowerShellFfiStatus.UnsupportedCapability)
+    {
+    }
+}
+finally
+{
+    if (Directory.Exists(preflightRoot))
+    {
+        Directory.Delete(preflightRoot, recursive: true);
+    }
 }
 
 var sessionConfiguration = new PowerShellSessionConfiguration(
@@ -1512,6 +2331,16 @@ await VerifySafeHandleDisposeRacesAsync();
 Console.WriteLine("FFI package consumer: Success");
 return 0;
 
+[PowerShellDtoContract(1)]
+public sealed class PackageProjectionDto
+{
+    [PowerShellDtoMember(MaximumStringLength = 64)]
+    public string Name { get; set; } = string.Empty;
+
+    [PowerShellDtoMember]
+    public long Count { get; set; }
+}
+
 sealed class LabelCapability : IPowerShellCapabilityHandler
 {
     public PowerShellValue Invoke(
@@ -1596,53 +2425,193 @@ sealed class CancellableCapability : IPowerShellCapabilityHandler, IDisposable
     }
 }
 
-sealed class StagedIntentCapability : IPowerShellCapabilityHandler
+sealed class StagedIntentHandler : IPowerShellStagedIntentHandler, IDisposable
 {
-    public string? StagedName { get; private set; }
+    private readonly object gate = new();
+    private readonly Dictionary<string, string> staged = new(StringComparer.Ordinal);
+    private bool cancellationObserved;
+    private int stageCalls;
+    private int abortCalls;
+    private string? abortedName;
+    private string? committedName;
 
-    public string? CommittedName { get; private set; }
-
-    public PowerShellValue Invoke(
-        PowerShellCapabilityInvocation invocation,
-        IReadOnlyList<PowerShellValue> arguments)
+    public string? CommittedName
     {
-        if (invocation.Definition.Name != "example.stage-intent" ||
-            arguments.Count != 1 ||
-            arguments[0].Kind != PowerShellValueKind.PropertyBag)
+        get
         {
-            throw new ArgumentException("The staged intent capability contract was not preserved.");
+            lock (gate)
+            {
+                return committedName;
+            }
         }
+    }
 
-        IReadOnlyDictionary<string, PowerShellValue> properties = arguments[0].GetPropertyBag();
-        if (properties.Count != 2 ||
+    public string? AbortedName
+    {
+        get
+        {
+            lock (gate)
+            {
+                return abortedName;
+            }
+        }
+    }
+
+    public int StageCalls
+    {
+        get
+        {
+            lock (gate)
+            {
+                return stageCalls;
+            }
+        }
+    }
+
+    public int AbortCalls
+    {
+        get
+        {
+            lock (gate)
+            {
+                return abortCalls;
+            }
+        }
+    }
+
+    public int RetainedStageCount
+    {
+        get
+        {
+            lock (gate)
+            {
+                return staged.Count;
+            }
+        }
+    }
+
+    public ManualResetEventSlim CancellationStarted { get; } = new(false);
+
+    public ManualResetEventSlim CommitStarted { get; } = new(false);
+
+    public ManualResetEventSlim ReleaseCommit { get; } = new(false);
+
+    public bool CancellationObserved
+    {
+        get
+        {
+            lock (gate)
+            {
+                return cancellationObserved;
+            }
+        }
+    }
+
+    public PowerShellStagedIntentHandlerResult Invoke(PowerShellStagedIntentInvocation invocation)
+    {
+        IReadOnlyDictionary<string, PowerShellValue> properties = invocation.Intent.Intent.GetPropertyBag();
+        if (invocation.Intent.OperationName != "example.intent" ||
+            properties.Count != 2 ||
             !properties.TryGetValue("Id", out PowerShellValue? identifier) ||
-            !identifier!.TryGetString(out string? identifierText) ||
-            identifierText != "intent-1" && identifierText != "intent-2" ||
+            !identifier.TryGetString(out string? identifierText) ||
+            identifierText != invocation.Intent.StageIdentifier ||
             !properties.TryGetValue("Name", out PowerShellValue? name) ||
-            !name!.TryGetString(out string? nameText) ||
+            !name.TryGetString(out string? nameText) ||
             string.IsNullOrWhiteSpace(nameText))
         {
-            throw new ArgumentException("The staged intent payload is invalid.");
+            return PowerShellStagedIntentHandlerResult.Reject("The staged intent payload is invalid.");
         }
 
-        StagedName = nameText;
-        return PowerShellValue.Null;
-    }
-
-    public void CommitAfterSuccess(PowerShellInvocationResult result)
-    {
-        if (result.HadErrors || result.IsTerminatingFailure || StagedName is null)
+        if (invocation.Operation == PowerShellStagedIntentOperation.Stage &&
+            invocation.Intent.StageIdentifier == "intent-cancelled")
         {
-            throw new InvalidOperationException("Only a successful invocation can commit a staged intent.");
+            CancellationStarted.Set();
+            while (!invocation.CancellationToken.IsCancellationRequested)
+            {
+                Thread.Sleep(10);
+            }
+
+            lock (gate)
+            {
+                cancellationObserved = true;
+            }
+            invocation.CancellationToken.ThrowIfCancellationRequested();
         }
 
-        CommittedName = StagedName;
-        StagedName = null;
+        if (invocation.Operation == PowerShellStagedIntentOperation.Commit &&
+            invocation.Intent.StageIdentifier == "intent-commit-expiry")
+        {
+            CommitStarted.Set();
+            if (!ReleaseCommit.Wait(TimeSpan.FromSeconds(5)))
+            {
+                throw new TimeoutException("The commit race test did not release the handler.");
+            }
+        }
+
+        return invocation.Operation switch
+        {
+            PowerShellStagedIntentOperation.Stage => Stage(invocation.Intent.StageIdentifier, nameText),
+            PowerShellStagedIntentOperation.Validate => Validate(invocation.Intent.StageIdentifier),
+            PowerShellStagedIntentOperation.Commit => Commit(invocation.Intent.StageIdentifier),
+            PowerShellStagedIntentOperation.Abort => Abort(invocation.Intent.StageIdentifier),
+            _ => throw new ArgumentOutOfRangeException(nameof(invocation)),
+        };
     }
 
-    public void Discard()
+    public void Dispose()
     {
-        StagedName = null;
+        CancellationStarted.Dispose();
+        CommitStarted.Dispose();
+        ReleaseCommit.Dispose();
+    }
+
+    private PowerShellStagedIntentHandlerResult Stage(string stageIdentifier, string name)
+    {
+        lock (gate)
+        {
+            stageCalls++;
+            return staged.TryAdd(stageIdentifier, name)
+                ? PowerShellStagedIntentHandlerResult.Accept()
+                : PowerShellStagedIntentHandlerResult.Reject("The stage already exists.");
+        }
+    }
+
+    private PowerShellStagedIntentHandlerResult Validate(string stageIdentifier)
+    {
+        lock (gate)
+        {
+            return staged.ContainsKey(stageIdentifier)
+                ? PowerShellStagedIntentHandlerResult.Accept()
+                : PowerShellStagedIntentHandlerResult.Reject("The stage is missing.");
+        }
+    }
+
+    private PowerShellStagedIntentHandlerResult Commit(string stageIdentifier)
+    {
+        lock (gate)
+        {
+            if (!staged.Remove(stageIdentifier, out string? name))
+            {
+                return PowerShellStagedIntentHandlerResult.Reject("The stage is missing.");
+            }
+
+            committedName = name;
+            return PowerShellStagedIntentHandlerResult.Accept();
+        }
+    }
+
+    private PowerShellStagedIntentHandlerResult Abort(string stageIdentifier)
+    {
+        lock (gate)
+        {
+            abortCalls++;
+            if (staged.Remove(stageIdentifier, out string? name))
+            {
+                abortedName = name;
+            }
+
+            return PowerShellStagedIntentHandlerResult.Accept();
+        }
     }
 }
 
@@ -1713,7 +2682,30 @@ sealed class HostInteractionCapability : IPowerShellCapabilityHandler
         throw "The packaged SDK native asset version metadata does not match multi-pwsh $multiPwshVersion."
     }
 
-    Invoke-CheckedCommand -FilePath $consumerExe -ArgumentList @($payloadDirectory)
+    Write-Host ">> $consumerExe $payloadDirectory"
+    $consumerOutput = & $consumerExe $payloadDirectory
+    $consumerOutput | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed with exit code $LASTEXITCODE`: $consumerExe $payloadDirectory"
+    }
+
+    $reportedVersionLine = $consumerOutput |
+        Where-Object { $_ -like 'FFI package consumer PowerShell file version: *' } |
+        Select-Object -First 1
+    if ($null -eq $reportedVersionLine) {
+        throw 'The package consumer did not report the PowerShell file version from runtime diagnostics.'
+    }
+
+    $reportedVersion = $reportedVersionLine.Substring('FFI package consumer PowerShell file version: '.Length).Trim()
+    if ($reportedVersion -ne 'unreported' -and -not $reportedVersion.StartsWith($script:QualifiedPowerShellVersion, [StringComparison]::Ordinal)) {
+        throw "Runtime diagnostics reported PowerShell '$reportedVersion' but the qualified payload is $($script:QualifiedPowerShellVersion)."
+    }
+
+    Write-Host "Qualified PowerShell payload: $($script:QualifiedPowerShellVersion) (runtime diagnostics reported '$reportedVersion')"
+    if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) {
+        "Package harness qualified PowerShell $($script:QualifiedPowerShellVersion) (runtime diagnostics reported ``$reportedVersion``)." |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+    }
 }
 finally {
     if ($null -eq $oldNugetPackages) {

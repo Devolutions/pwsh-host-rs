@@ -16,53 +16,62 @@ public sealed unsafe class PowerShellSession : IDisposable
 
     internal static PowerShellSession Create(PowerShellSessionOptions options)
     {
-        ArgumentNullException.ThrowIfNull(options);
         PowerShell.EnsureSupportedAbi();
-        PowerShellSessionConfiguration configuration = options.Configuration;
-        PowerShellValue initialVariablesValue = configuration.InitialVariablesValue;
-        PowerShellValue moduleImportsValue = configuration.ModuleImportsValue;
-        PowerShellValue modulePathsValue = configuration.AllowedModulePathsValue;
-        PowerShellValue environmentValue = configuration.EnvironmentValue;
-        byte[] initialVariablesPayload = initialVariablesValue.Payload;
-        byte[] moduleImportsPayload = moduleImportsValue.Payload;
-        byte[] modulePathsPayload = modulePathsValue.Payload;
-        byte[] workingDirectoryBytes = PowerShell.EncodeUtf8(configuration.WorkingDirectory);
-        byte[] environmentPayload = environmentValue.Payload;
-        fixed (byte* initialVariables = initialVariablesPayload)
-        fixed (byte* moduleImports = moduleImportsPayload)
-        fixed (byte* modulePaths = modulePathsPayload)
-        fixed (byte* workingDirectory = workingDirectoryBytes)
-        fixed (byte* environment = environmentPayload)
+        return WithNativeOptions(options, nativeOptions =>
         {
-            NativeSessionOptions nativeOptions = new()
-            {
-                Size = checked((uint)sizeof(NativeSessionOptions)),
-                RunspaceMode = checked((uint)options.RunspaceMode),
-                InitialConfiguration = checked((uint)options.InitialConfiguration),
-                HistoryMode = checked((uint)options.HistoryMode),
-                ErrorPreference = checked((uint)options.ErrorPreference),
-                WarningPreference = checked((uint)options.WarningPreference),
-                VerbosePreference = checked((uint)options.VerbosePreference),
-                DebugPreference = checked((uint)options.DebugPreference),
-                InformationPreference = checked((uint)options.InformationPreference),
-                ExecutionPolicy = checked((uint)configuration.ExecutionPolicy),
-                InitialVariables = PowerShell.CreateNativeValue(initialVariablesValue, initialVariables),
-                ModuleImports = PowerShell.CreateNativeValue(moduleImportsValue, moduleImports),
-                AllowedModulePaths = PowerShell.CreateNativeValue(modulePathsValue, modulePaths),
-                WorkingDirectory = new NativeUtf8Span
-                {
-                    Data = workingDirectoryBytes.Length == 0 ? null : workingDirectory,
-                    Length = (nuint)workingDirectoryBytes.Length,
-                },
-                Environment = PowerShell.CreateNativeValue(environmentValue, environment),
-            };
             ulong nativeSessionHandle = 0;
             byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
             NativeCallResult result = NativeCall.CreateResult(diagnostic);
-            int status = NativeMethods.CreateSession(&nativeOptions, &nativeSessionHandle, &result);
+            int status = NativeMethods.CreateSession(nativeOptions, &nativeSessionHandle, &result);
             NativeCall.ThrowIfFailed(status, result, diagnostic);
             return new PowerShellSession(new PowerShellSessionHandle(nativeSessionHandle));
-        }
+        });
+    }
+
+    internal static PowerShellSessionPreflightReport Preflight(PowerShellSessionOptions options)
+    {
+        PowerShell.EnsureSupportedAbi();
+        PowerShell.EnsureSessionPreflightSupported();
+        return WithNativeOptions(options, nativeOptions =>
+        {
+            byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+            NativeCallResult result = NativeCall.CreateResult(diagnostic);
+            nuint requiredLength = 0;
+            int status = NativeMethods.PreflightSession(nativeOptions, null, 0, &requiredLength, &result);
+            if (status != (int)PowerShellFfiStatus.Success &&
+                status != (int)PowerShellFfiStatus.BufferTooSmall)
+            {
+                NativeCall.ThrowIfFailed(status, result, diagnostic);
+            }
+            if (requiredLength > PowerShellValue.MaximumPayloadLength)
+            {
+                throw new PowerShellFfiException(
+                    PowerShellFfiStatus.ManagedFailure,
+                    "Native PowerShell FFI returned an oversized session preflight report.");
+            }
+
+            byte[] payload = new byte[checked((int)requiredLength)];
+            fixed (byte* payloadPointer = payload)
+            {
+                result = NativeCall.CreateResult(diagnostic);
+                status = NativeMethods.PreflightSession(
+                    nativeOptions,
+                    payloadPointer,
+                    (nuint)payload.Length,
+                    &requiredLength,
+                    &result);
+                NativeCall.ThrowIfFailed(status, result, diagnostic);
+            }
+            if (requiredLength != (nuint)payload.Length)
+            {
+                throw new PowerShellFfiException(
+                    PowerShellFfiStatus.ManagedFailure,
+                    "Native PowerShell FFI returned an inconsistent session preflight report.");
+            }
+
+            return PowerShellSessionPreflightReport.FromNative(
+                PowerShellValue.FromNative((uint)PowerShellValueKind.PropertyBag, payload));
+        });
     }
 
     public PowerShell CreatePowerShell()
@@ -388,6 +397,56 @@ public sealed unsafe class PowerShellSession : IDisposable
     private static bool IsAsciiDigit(char value)
     {
         return value is >= '0' and <= '9';
+    }
+
+    private unsafe delegate T NativeSessionOptionsCallback<T>(NativeSessionOptions* options);
+
+    private static T WithNativeOptions<T>(
+        PowerShellSessionOptions options,
+        NativeSessionOptionsCallback<T> callback)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(callback);
+        PowerShellSessionConfiguration configuration = options.Configuration;
+        PowerShellValue initialVariablesValue = configuration.InitialVariablesValue;
+        PowerShellValue moduleImportsValue = configuration.ModuleImportsValue;
+        PowerShellValue modulePathsValue = configuration.AllowedModulePathsValue;
+        PowerShellValue environmentValue = configuration.EnvironmentValue;
+        byte[] initialVariablesPayload = initialVariablesValue.Payload;
+        byte[] moduleImportsPayload = moduleImportsValue.Payload;
+        byte[] modulePathsPayload = modulePathsValue.Payload;
+        byte[] workingDirectoryBytes = PowerShell.EncodeUtf8(configuration.WorkingDirectory);
+        byte[] environmentPayload = environmentValue.Payload;
+        fixed (byte* initialVariables = initialVariablesPayload)
+        fixed (byte* moduleImports = moduleImportsPayload)
+        fixed (byte* modulePaths = modulePathsPayload)
+        fixed (byte* workingDirectory = workingDirectoryBytes)
+        fixed (byte* environment = environmentPayload)
+        {
+            NativeSessionOptions nativeOptions = new()
+            {
+                Size = checked((uint)sizeof(NativeSessionOptions)),
+                RunspaceMode = checked((uint)options.RunspaceMode),
+                InitialConfiguration = checked((uint)options.InitialConfiguration),
+                HistoryMode = checked((uint)options.HistoryMode),
+                ErrorPreference = checked((uint)options.ErrorPreference),
+                WarningPreference = checked((uint)options.WarningPreference),
+                VerbosePreference = checked((uint)options.VerbosePreference),
+                DebugPreference = checked((uint)options.DebugPreference),
+                InformationPreference = checked((uint)options.InformationPreference),
+                ExecutionPolicy = checked((uint)configuration.ExecutionPolicy),
+                InitialVariables = PowerShell.CreateNativeValue(initialVariablesValue, initialVariables),
+                ModuleImports = PowerShell.CreateNativeValue(moduleImportsValue, moduleImports),
+                AllowedModulePaths = PowerShell.CreateNativeValue(modulePathsValue, modulePaths),
+                WorkingDirectory = new NativeUtf8Span
+                {
+                    Data = workingDirectoryBytes.Length == 0 ? null : workingDirectory,
+                    Length = (nuint)workingDirectoryBytes.Length,
+                },
+                Environment = PowerShell.CreateNativeValue(environmentValue, environment),
+            };
+            return callback(&nativeOptions);
+        }
     }
 
     private static PowerShellSessionState ToState(uint value)

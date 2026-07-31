@@ -112,6 +112,33 @@ consumer-to-session direction. Payload-to-consumer object contracts,
 cross-session identity, compatibility relaxation, and SDK-owned
 application-specific schema generation remain future work.
 
+#### Contract packs are a coordinated breaking release
+
+There is no contract-pack version negotiation, compatibility manifest, accepted
+version range, or reused-identifier policy, and none is planned. A contract's
+interface identifier, version tuple, direction flags, operation shape, and the
+`GetLiveObjectContractPackV1` pack ABI are one indivisible agreement between a
+consumer and its payload adapter. Changing any of them is a breaking change:
+build and ship both sides together, and re-run the consuming application's own
+acceptance tests against the new pair.
+
+The registry fails activation loudly rather than degrading. Each rejection below
+is exercised end to end by the self-contained Win-x64 NativeAOT sample using the
+fixtures in `dotnet/live-object-incompatible-test-pack`, run as
+`NativeAotFfiSample.exe <payload> --expect-rejected-contract-pack:<fixture>`:
+
+| Fixture | Declared defect | Rejection |
+| --- | --- | --- |
+| `duplicate-across-packs` | Two packs in one activation declare the same interface identifier | `duplicate interface identifiers` |
+| `duplicate-within-pack` | One pack declares the same interface identifier twice | `duplicate interface identifiers` |
+| `direction-violation` | Contract omits `ConsumerToSession` | `unsupported direction` |
+| `reserved-identifier` | Pack re-declares an identifier the payload already owns | `has already been registered` |
+| `unsupported-pack-abi` | Pack reports an unimplemented `AbiVersion` | `contract pack API is invalid` |
+
+Because activation is all-or-nothing, a rejected pack never leaves a partially
+registered contract behind, and there is no path by which a stale consumer
+silently binds a newer payload contract.
+
 The transfer is `IUnknown` only: the NativeAOT consumer creates a
 source-generated CCW, Rust retains no object graph and forwards its transfer
 reference, and the trusted payload adapter creates source-generated RCWs before
@@ -163,8 +190,11 @@ A session-affine dispatcher is required before supporting that category.
   `LIVE_STREAM_POLLING` feature bit is present, so consumers can reject a native
   asset that lacks polling before calling its additive export.
 - The managed payload and Rust host use one jointly shipped **V1 payload binding
-  table**. It includes the core, live-stream, and typed-result slots. This is
-  separate from the public native ABI, which remains v2.
+  table**. It includes the core, live-stream, typed-result, and bounded runtime
+  diagnostics slots. This is
+  separate from the public native ABI, which remains v2. Rust validates the
+  fixed V1 header (size, version, features) before reading an extended table
+  field, then requires the full current table size.
 - The supported ABI uses sized, caller-owned `multi_pwsh_call_result` structures. Each operation
   returns its own bounded UTF-8 diagnostic and truncation metadata, so concurrent
   calls never read a process-global error slot. `multi_pwsh_utf8_span` permits
@@ -457,6 +487,20 @@ process-global entry point) to construct builders. The runtime object reports
 the selected path and negotiated ABI/features; it does not permit selecting a
 second payload or unloading the selected runtime.
 
+`PowerShellRuntime.Diagnostics` is a read-only descriptive report for the
+active runtime. It contains the canonical payload directory, an explicitly
+nullable PowerShell file version, the V1 payload table ABI/size/slot shape,
+enabled feature flags, and registered contract-pack adapter type names. It is
+not an integrity or deployment-policy result: it returns no payload hashes,
+assembly paths, environment dump, secret, or payload object, and it cannot
+mutate runtime state. The payload directory is the runtime's canonicalized
+active payload directory rather than a verbatim echo of an activation argument:
+on Windows it is an extended-length `\\?\` path, and `PATH`-based activation
+discovers it at runtime, so consumers must not compare it against their own
+input string. Because it is a local filesystem path it can embed a user profile
+directory, so redact it before writing the report to shared logs or external
+telemetry.
+
 ## Facade scope
 
 This SDK offers copied-DTO compatibility, not SMA compatibility. The table
@@ -555,6 +599,22 @@ text view of every output/stream channel and reports whether it is complete.
 Neither helper recreates an SMA object, parses CLIXML as a CLR graph, or treats
 display text as a typed DTO.
 
+For an exactly-one generated DTO result, use
+`PowerShellCompleteResultProjection.Read` with the generated mapper explicitly:
+
+```csharp
+ConnectionDto connection = PowerShellCompleteResultProjection.Read(
+    completedResult,
+    ConnectionDtoPowerShellDtoProjection.Read);
+```
+
+The helper also accepts the complete ordered `PowerShellValuePage` sequence
+from typed or observed invocation paging. It fails closed with distinct
+`ZeroResults`, `MultipleResults`, `IncompleteOrTruncated`, and `MapperFailure`
+reasons. It only invokes the provided generated mapper; it does not execute
+PowerShell, discover DTOs by reflection, or transfer arbitrary CLR/`PSObject`
+data.
+
 ### Replacing injected application data
 
 Value-only scripts can map application-owned input DTOs into explicit
@@ -583,6 +643,14 @@ authorization manager permits external scripts only from those locations. This
 is not a module sandbox or a PowerCLI claim. Do not enable PowerCLI, arbitrary
 module initialization, native loading, or remoting modules until their runtime
 behavior has passed a separate application-owned validation.
+
+`PowerShellRuntime.ValidateSessionConfiguration` applies the same root and
+import resolution before session creation without creating a runspace, importing
+or loading a module, or executing PowerShell/module code. It returns immutable,
+bounded copied diagnostics for missing/invalid roots, unresolvable imports, and
+invalid/unreadable manifests. Static manifest declarations may expose a bounded
+module version and command list; they are parsed as data only and do not
+authorize or execute a module.
 
 ### Declarative recipes and result schemas
 
@@ -714,17 +782,45 @@ copied input and result data in session variables. Promote only a reviewed
 operation, such as the example `app.get-label`, to an enumerated capability.
 Scripts cannot call arbitrary proxy methods or obtain original managed objects.
 
-For a connection-edit flow, the NativeAOT sample sets a copied `connection`
-property bag (`Id`, `Name`, and `Host`) and attaches the declared
-`rdm.stage-connection-patch` capability only to the invocation that uses it.
-The capability accepts exactly one bounded property bag with `ConnectionId`
-and `DisplayName`, validates both fields, records a consumer-owned patch
-intent, and returns only `{ Accepted = true }`. This replaces a narrowly
-reviewed operation, not an injected `$RDM` object: scripts cannot discover
-other members, obtain the original connection, or invoke another application
-operation. The sample's two-second deadline, 256-byte input limit, and
-64-byte response limit are application-contract choices that production
-callers must set for their own reviewed intent DTO.
+`PowerShellStagedIntentCoordinator` is a generic lifecycle layer over this
+same capability registration. It does not add a callback vtable, native
+callback path, reentrancy, or application-object bridge. A
+`PowerShellStagedIntentDefinition` declares a canonical operation name, copied
+property-bag schema, handler, and retained stage deadline. It registers the
+four capability names `<operation>.stage`, `.validate`, `.commit`, and
+`.abort`; up to four definitions fit in the existing 16-capability bound.
+
+`stage` accepts exactly `{ stageId, intent }`, where `stageId` is a bounded
+opaque identifier supplied by the caller and `intent` is the schema-validated
+copied property bag. The remaining operations accept only the stage identifier.
+Each result is a copied property bag with `operation`, `status`, `stageId`,
+`expiresAt`, and `message`. The explicit status values distinguish `staged`,
+`validated`, `committed`, `aborted`, `rejected`, `unknown-stage`, `expired`,
+`terminal`, `cancelled`, and `busy`. Envelope/schema/bounds checks occur before
+the application handler is called. The coordinator rejects duplicate, unknown,
+expired, and terminal stages; retains at most 64 active stages; and removes
+active stage data on deadline, cancellation, and disposal.
+
+Every retained stage has at most one terminal transition: commit or abort.
+Expiry, cancellation, and disposal abort the coordinator's retained copied
+state, then best-effort deliver `Abort` to the application handler so it can
+release its own retained data. The notification runs outside the coordinator
+lock, ignores handler failures, does not provide rollback, and requires an
+idempotent handler.
+
+The NativeAOT sample uses `rdm.connection-patch` with copied `ConnectionId`
+and `DisplayName` properties, then demonstrates stage/validate/commit and a
+separate stage/abort flow. This remains a narrowly reviewed operation, not an
+injected `$RDM` object: scripts cannot discover other members, obtain the
+original connection, or invoke another application operation.
+
+`committed` has deliberately narrow meaning: the host accepted the intent. It
+is not a cross-resource atomic transaction, supplies no rollback guarantee,
+and does not prove that a handler's persistence or side effect completed.
+Authorization, review UI, persistence, actual effects, compensating actions,
+and any expiry cleanup outside the coordinator's copied state remain the
+application's responsibility. Stage only copied non-secret `PowerShellValue`
+data; never use staged intents for credentials or secret material.
 
 ### One-shot administrative command example
 
@@ -863,6 +959,12 @@ dotnet publish dotnet/nativeaot-sample/NativeAotFfiSample.csproj -c Release
 ./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe
 # Or select a payload explicitly:
 ./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe <payload>
+# Contract-pack rejection fixtures (each must exit 0 by being rejected):
+./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe <payload> --expect-rejected-contract-pack:duplicate-across-packs
+./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe <payload> --expect-rejected-contract-pack:duplicate-within-pack
+./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe <payload> --expect-rejected-contract-pack:direction-violation
+./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe <payload> --expect-rejected-contract-pack:reserved-identifier
+./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe <payload> --expect-rejected-contract-pack:unsupported-pack-abi
 
 dotnet pack dotnet/sdk-ffi/Devolutions.MultiPwsh.Sdk.csproj -c Release -o artifacts/sdk-nuget
 pwsh -NoLogo -NoProfile -File tests/Test-PwshFfiPackage.ps1 `
@@ -875,3 +977,23 @@ The ignored Rust test and NativeAOT sample require a real payload root containin
 `System.Management.Automation.dll`. The packaged Win-x64 consumer requires a
 PowerShell 7.4 payload and verifies typed-result paging through the managed
 facade, native host, and required V1 payload binding table.
+
+### Recording the qualified PowerShell version
+
+Qualification tracks the **latest released 7.4.x**; it is not pinned to a fixed
+patch. Because the qualified patch therefore moves over time, both the CI
+installer and the package harness record the exact build that was exercised
+instead of asserting a hardcoded one:
+
+- `scripts/Install-PowerShell74ForCi.ps1` resolves the newest non-prerelease
+  `v7.4.*` tag, verifies the extracted `pwsh` actually reports that version,
+  exports it as `PwshQualifiedVersion`, and appends it to the job summary.
+- `tests/Test-PwshFfiPackage.ps1` records the payload's `$PSVersionTable`
+  version, and cross-checks it against the `PowerShellFileVersion` that
+  `PowerShellRuntime.Diagnostics` reports through the packaged consumer. The
+  file version carries an extra build component (for example payload `7.4.17`
+  reports `7.4.17.500`), so the check is a prefix match and fails if the
+  diagnostics report a different patch than the payload under test.
+
+A release note or CI run therefore states which PowerShell build the SDK was
+qualified against; it never claims a patch that was not exercised.

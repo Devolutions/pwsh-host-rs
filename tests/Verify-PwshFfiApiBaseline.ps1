@@ -155,6 +155,7 @@ $expectedManagedStructs = [ordered]@{
     'NativeSessionPoolOptions' = @{ Size = 20; Fields = @('Size|0|System.UInt32', 'MinimumSessions|4|System.UInt32', 'MaximumSessions|8|System.UInt32', 'Flags|12|System.UInt32', 'Reserved|16|System.UInt32') }
     'NativeOperationStreamBatchInfo' = @{ Size = 64; Fields = @('Size|0|System.UInt32', 'OperationState|4|System.UInt32', 'TerminalStatus|8|System.Int32', 'Flags|12|System.UInt32', 'NextSequence|16|System.UInt64', 'TotalRecordCount|24|System.UInt64', 'DroppedRecordCount|32|System.UInt64', 'SourceDroppedRecordCount|40|System.UInt64', 'LostRecordCount|48|System.UInt64', 'RecordCount|56|System.UInt32', 'Reserved|60|System.UInt32') }
     'NativeTypedResultPageInfo' = @{ Size = 56; Fields = @('Size|0|System.UInt32', 'Flags|4|System.UInt32', 'TerminalStatus|8|System.Int32', 'Reserved|12|System.UInt32', 'AcknowledgedSequence|16|System.UInt64', 'NextSequence|24|System.UInt64', 'TotalRecordCount|32|System.UInt64', 'DroppedRecordCount|40|System.UInt64', 'RecordCount|48|System.UInt32', 'Reserved2|52|System.UInt32') }
+    'NativeRuntimeDiagnosticsInfo' = @{ Size = 40; Fields = @('Size|0|System.UInt32', 'BindingsAbiVersion|4|System.UInt32', 'PayloadTableSize|8|System.UIntPtr', 'PayloadTableSlotCount|16|System.UInt32', 'PayloadTableShape|20|System.UInt32', 'PowerShellFileVersionAvailable|24|System.UInt32', 'ContractPackCount|28|System.UInt32', 'Reserved|32|System.UInt32') }
     'NativeLiveObjectContractDescriptor' = @{ Size = 32; Fields = @('Size|0|System.UInt32', 'Directions|4|System.UInt32', 'InterfaceIdLow|8|System.UInt64', 'InterfaceIdHigh|16|System.UInt64', 'MajorVersion|24|System.UInt16', 'MinorVersion|26|System.UInt16', 'Reserved|28|System.UInt32') }
     'NativeLiveObjectContractPackApi' = @{ Size = 40; Fields = @('Size|0|System.UIntPtr', 'AbiVersion|8|System.UInt32', 'ContractCount|12|System.UInt32', 'Contracts|16|Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor*', 'CreatePayloadProxy|24|System.IntPtr', 'ReleasePayloadProxy|32|System.IntPtr') }
 }
@@ -320,10 +321,29 @@ $expectedTypedResultTableSlots = @(
     @{ Field = 'TypedResultPage_CopyRecordValue'; Rust = 'typed_result_page_copy_record_value_fn'; Alias = 'FnFfiTypedResultPageCopyRecordValue'; Method = 'FfiTypedResultPage_CopyRecordValue'; Signature = 'IntPtr,int,uint*,byte*,int,int*,FfiCallResult*,int' }
     @{ Field = 'TypedResultPage_Release'; Rust = 'typed_result_page_release_fn'; Alias = 'FnFfiTypedResultInvocationComplete'; Method = 'FfiTypedResultPage_Release'; Signature = 'IntPtr,FfiCallResult*,int' }
 )
+$expectedObservedInvocationTableSlots = @(
+    @{ Field = 'PowerShell_BeginObservedInvocation'; Rust = 'power_shell_begin_observed_invocation_fn'; Alias = 'FnFfiPowerShellBeginObservedInvocation'; Method = 'FfiPowerShell_BeginObservedInvocation'; Signature = 'IntPtr,int,int,int,int,IntPtr*,FfiCallResult*,int' }
+    @{ Field = 'ObservedInvocation_Poll'; Rust = 'observed_invocation_poll_fn'; Alias = 'FnFfiObservedInvocationPoll'; Method = 'FfiObservedInvocation_Poll'; Signature = 'IntPtr,int*,FfiCallResult*,int' }
+    @{ Field = 'ObservedInvocation_ReadResultPage'; Rust = 'observed_invocation_read_result_page_fn'; Alias = 'FnFfiObservedInvocationReadResultPage'; Method = 'FfiObservedInvocation_ReadResultPage'; Signature = 'IntPtr,long,int,IntPtr*,FfiCallResult*,int' }
+    @{ Field = 'ObservedInvocation_ReadDiagnosticPage'; Rust = 'observed_invocation_read_diagnostic_page_fn'; Alias = 'FnFfiObservedInvocationReadDiagnosticPage'; Method = 'FfiObservedInvocation_ReadDiagnosticPage'; Signature = 'IntPtr,long,int,IntPtr*,FfiCallResult*,int' }
+    @{ Field = 'ObservedInvocation_Complete'; Rust = 'observed_invocation_complete_fn'; Alias = 'FnFfiObservedInvocationComplete'; Method = 'FfiObservedInvocation_Complete'; Signature = 'IntPtr,FfiCallResult*,int' }
+    @{ Field = 'ObservedInvocation_Stop'; Rust = 'observed_invocation_stop_fn'; Alias = 'FnFfiObservedInvocationComplete'; Method = 'FfiObservedInvocation_Stop'; Signature = 'IntPtr,FfiCallResult*,int' }
+    @{ Field = 'ObservedInvocation_Release'; Rust = 'observed_invocation_release_fn'; Alias = 'FnFfiObservedInvocationComplete'; Method = 'FfiObservedInvocation_Release'; Signature = 'IntPtr,FfiCallResult*,int' }
+    @{ Field = 'ObservedDiagnosticPage_GetInfo'; Rust = 'observed_diagnostic_page_get_info_fn'; Alias = 'FnFfiObservedDiagnosticPageGetInfo'; Method = 'FfiObservedDiagnosticPage_GetInfo'; Signature = 'IntPtr,long*,long*,long*,long*,int*,uint*,int*,FfiCallResult*,int' }
+    @{ Field = 'ObservedDiagnosticPage_GetRecordInfo'; Rust = 'observed_diagnostic_page_get_record_info_fn'; Alias = 'FnFfiObservedDiagnosticPageGetRecordInfo'; Method = 'FfiObservedDiagnosticPage_GetRecordInfo'; Signature = 'IntPtr,int,int*,long*,FfiCallResult*,int' }
+    @{ Field = 'ObservedDiagnosticPage_CopyRecordTextToUtf8'; Rust = 'observed_diagnostic_page_copy_record_text_to_utf8_fn'; Alias = 'FnFfiObservedDiagnosticPageCopyRecordTextToUtf8'; Method = 'FfiObservedDiagnosticPage_CopyRecordTextToUtf8'; Signature = 'IntPtr,int,byte*,int,int*,FfiCallResult*,int' }
+    @{ Field = 'ObservedDiagnosticPage_Release'; Rust = 'observed_diagnostic_page_release_fn'; Alias = 'FnFfiObservedInvocationComplete'; Method = 'FfiObservedDiagnosticPage_Release'; Signature = 'IntPtr,FfiCallResult*,int' }
+)
+$expectedSessionPreflightTableSlots = @(
+    @{ Field = 'PowerShellSession_PreflightConfigured'; Rust = 'session_preflight_configured_fn'; Alias = 'FnFfiPowerShellSessionPreflightConfigured'; Method = 'FfiPowerShellSession_PreflightConfigured'; Signature = 'uint,uint,uint,uint,uint,uint,uint,uint,uint,byte*,int,byte*,int,byte*,int,byte*,int,byte*,int,byte*,int,int*,FfiCallResult*,int' }
+)
+$expectedRuntimeDiagnosticsTableSlots = @(
+    @{ Field = 'RuntimeDiagnostics_CopyPowerShellFileVersionUtf8'; Rust = 'runtime_diagnostics_copy_power_shell_file_version_utf8_fn'; Alias = 'FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8'; Method = 'FfiRuntimeDiagnostics_CopyPowerShellFileVersionUtf8'; Signature = 'byte*,int,int*,int*,FfiCallResult*,int' }
+)
 $compactFfiBindingsSource = $ffiBindingsSource -replace '\s+', ''
-$allTableSlots = @($expectedTableSlots) + @($expectedLiveTableSlots) + @($expectedTypedResultTableSlots)
+$allTableSlots = @($expectedTableSlots) + @($expectedLiveTableSlots) + @($expectedTypedResultTableSlots) + @($expectedObservedInvocationTableSlots) + @($expectedSessionPreflightTableSlots) + @($expectedRuntimeDiagnosticsTableSlots)
 $ffiApiType = $bindingsAssemblyObject.GetType('NativeHost.Bindings+FfiApiV1', $true)
-Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::SizeOf([Type]$ffiApiType)) -Expected 584 -Description 'Managed FfiApiV1 size'
+Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::SizeOf([Type]$ffiApiType)) -Expected 688 -Description 'Managed FfiApiV1 size'
 $ffiApiFields = @($ffiApiType.GetFields($instanceFields) | Sort-Object MetadataToken)
 $expectedFfiApiFieldNames = @('Size', 'AbiVersion', 'FeatureFlags') + @($allTableSlots | ForEach-Object { $_.Field })
 Assert-Sequence -Actual @($ffiApiFields | ForEach-Object Name) -Expected $expectedFfiApiFieldNames -Description 'Managed FfiApiV1 slot order'
@@ -335,7 +355,7 @@ for ($index = 0; $index -lt $ffiApiFields.Count; $index++) {
     Assert-Equal -Actual (Get-ManagedTypeName $field.FieldType) -Expected $expectedType -Description "Managed FfiApiV1 '$($field.Name)' type"
 }
 
-$expectedBridgeFeatures = 'FeatureFlags=(1UL<<4)|(1UL<<5)|(1UL<<6)|FfiFeatureAsyncOperationPrimitives|FfiFeatureSessionPrimitives|FfiFeatureSessionPolling|FfiFeatureSnapshotProjections|FfiFeatureSessionConfiguration|FfiFeatureSessionVariables|FfiFeatureCapabilityRpc|FfiFeatureLiveObjectProbe|FfiFeatureLiveSessionObjectProbe|FfiFeatureLiveObjectContracts|FfiFeatureLiveStreamPolling|FfiFeatureTypedResultPaging'
+$expectedBridgeFeatures = 'FeatureFlags=(1UL<<4)|(1UL<<5)|(1UL<<6)|FfiFeatureAsyncOperationPrimitives|FfiFeatureSessionPrimitives|FfiFeatureSessionPolling|FfiFeatureSnapshotProjections|FfiFeatureSessionConfiguration|FfiFeatureSessionVariables|FfiFeatureCapabilityRpc|FfiFeatureLiveObjectProbe|FfiFeatureLiveSessionObjectProbe|FfiFeatureLiveObjectContracts|FfiFeatureLiveStreamPolling|FfiFeatureTypedResultPaging|FfiFeatureObservedInvocation|FfiFeatureSessionPreflight|FfiFeatureRuntimeDiagnostics'
 if (-not $compactFfiBindingsSource.Contains($expectedBridgeFeatures)) {
     throw 'Managed FfiApiV1 feature flags no longer advertise the checked bridge capabilities.'
 }
@@ -368,7 +388,10 @@ $expectedLiveRustTableFields = @(
 $expectedRustApiTableFields = @('size', 'abi_version', 'feature_flags') +
     @($expectedTableSlots | ForEach-Object Rust) +
     $expectedLiveRustTableFields +
-    @($expectedTypedResultTableSlots | ForEach-Object Rust)
+    @($expectedTypedResultTableSlots | ForEach-Object Rust) +
+    @($expectedObservedInvocationTableSlots | ForEach-Object Rust) +
+    @($expectedSessionPreflightTableSlots | ForEach-Object Rust) +
+    @($expectedRuntimeDiagnosticsTableSlots | ForEach-Object Rust)
 Assert-Sequence -Actual $rustApiTableFields -Expected $expectedRustApiTableFields -Description 'Rust FfiApiV1 slot order'
 
 $rustBindingsTableMatch = [regex]::Match($rustBindingsSource, '(?s)pub\(crate\)\s+struct\s+FfiBindings\s*\{(?<body>.*?)\n\s*\}')
@@ -380,11 +403,30 @@ $rustBindingsFields = @(
         ForEach-Object { "$($_.Groups['name'].Value)|$($_.Groups['type'].Value)" }
 )
 Assert-Sequence -Actual $rustBindingsFields -Expected (
+    @(
+        'abi_version|u32',
+        'payload_table_size|usize'
+    ) +
     @($expectedTableSlots | ForEach-Object { "$($_.Rust)|$($_.Alias)" }) +
-    @('live_stream|FfiLiveStreamBindings', 'typed_result_paging|FfiTypedResultPagingBindings')
+    @(
+        'live_stream|FfiLiveStreamBindings',
+        'typed_result_paging|FfiTypedResultPagingBindings',
+        'observed_invocation|FfiObservedInvocationBindings',
+        'session_preflight_configured_fn|FnFfiPowerShellSessionPreflightConfigured',
+        'runtime_diagnostics_copy_power_shell_file_version_utf8_fn|FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8'
+    )
 ) -Description 'Rust FfiBindings slot order and aliases'
 if (-not $rustFfiSource.Contains('const FEATURE_TYPED_RESULT_PAGING: u64 = 1 << 21;')) {
     throw 'Rust native ABI must advertise typed result paging feature bit 21.'
+}
+if (-not $rustFfiSource.Contains('const FEATURE_OBSERVED_INVOCATION: u64 = 1 << 22;')) {
+    throw 'Rust native ABI must advertise observed invocation feature bit 22.'
+}
+if (-not $rustFfiSource.Contains('const FEATURE_SESSION_PREFLIGHT: u64 = 1 << 23;')) {
+    throw 'Rust native ABI must advertise session preflight feature bit 23.'
+}
+if (-not $rustFfiSource.Contains('const FEATURE_RUNTIME_DIAGNOSTICS: u64 = 1 << 24;')) {
+    throw 'Rust native ABI must advertise runtime diagnostics feature bit 24.'
 }
 
 $expectedRustFunctionAliases = @'
@@ -420,6 +462,8 @@ FnFfiInvocationResultGetStreamTotals|unsafeextern"system"fn(PowerShellHandle,i32
 FnFfiInvocationResultGetStreamRecordProjectionInfo|unsafeextern"system"fn(PowerShellHandle,i32,i32,*muti32,*muti32,*muti32,*muti32,*muti32,*mutFfiCallResult)->i32
 FnFfiInvocationResultCopyStreamRecordValue|unsafeextern"system"fn(PowerShellHandle,i32,i32,i32,*mutu32,*mutu8,i32,*muti32,*mutFfiCallResult)->i32
 FnFfiPowerShellSessionCreateConfigured|unsafeextern"system"fn(u32,u32,u32,u32,u32,u32,u32,u32,u32,*constu8,i32,*constu8,i32,*constu8,i32,*constu8,i32,*constu8,i32,*mutPowerShellHandle,*mutFfiCallResult)->i32
+FnFfiPowerShellSessionPreflightConfigured|unsafeextern"system"fn(u32,u32,u32,u32,u32,u32,u32,u32,u32,*constu8,i32,*constu8,i32,*constu8,i32,*constu8,i32,*constu8,i32,*mutu8,i32,*muti32,*mutFfiCallResult)->i32
+FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8|unsafeextern"system"fn(*mutu8,i32,*muti32,*muti32,*mutFfiCallResult)->i32
 FnFfiPowerShellSessionSetVariable|unsafeextern"system"fn(PowerShellHandle,*constu8,i32,u32,*constu8,i32,*mutFfiCallResult)->i32
 FnFfiPowerShellSessionRemoveVariable|unsafeextern"system"fn(PowerShellHandle,*constu8,i32,*mutu32,*mutFfiCallResult)->i32
 FnFfiPowerShellSessionGetVariableSnapshot|unsafeextern"system"fn(PowerShellHandle,*constu8,i32,*mutu32,*mutu32,*mutu8,i32,*muti32,*mutFfiCallResult)->i32

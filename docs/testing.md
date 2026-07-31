@@ -62,3 +62,36 @@ pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Invoke-AppHostNuGetPackage
 ```
 
 The smoke harness creates a temporary SDK-style sample project, restores `Devolutions.MultiPwsh.Cli` from the local package source, validates AppHost build/publish output copying, and runs a renamed local apphost beside `pwsh.dll` and `pwsh.runtimeconfig.json` when a PowerShell payload is available.
+
+## In-process FFI SDK package tests
+
+Pack the SDK and run the self-contained Win-x64 NativeAOT package harness
+against a real PowerShell 7.4 payload root (the directory holding `pwsh.dll`
+and `pwsh.runtimeconfig.json`):
+
+```powershell
+dotnet pack dotnet\sdk-ffi\Devolutions.MultiPwsh.Sdk.csproj -c Release -o artifacts\sdk-nuget
+pwsh -NoLogo -NoProfile -File .\tests\Test-PwshFfiPackage.ps1 `
+    -PackageSource artifacts\sdk-nuget `
+    -PowerShellPayloadDirectory <payload-root>
+```
+
+The harness restores the inspected local `.nupkg` into an isolated NuGet cache,
+verifies the restored package against its SHA-512, publishes a NativeAOT
+consumer, and exercises the SDK surface end to end. It prints the qualified
+PowerShell version and cross-checks it against the `PowerShellFileVersion`
+reported by `PowerShellRuntime.Diagnostics`.
+
+Verify the public/binding API baseline after changing any exported surface:
+
+```powershell
+pwsh -NoLogo -NoProfile -File .\tests\Verify-PwshFfiApiBaseline.ps1
+```
+
+The verifier exits non-zero on any drift; update `tests\PwshFfiApiBaseline.txt`
+deliberately in the same change that alters the surface.
+
+Contract-pack rejection fixtures run through the NativeAOT sample. Each must
+exit `0` by being rejected — see
+[in-process FFI](in-process-ffi.md#contract-packs-are-a-coordinated-breaking-release)
+for the fixture list and the rejection each one proves.

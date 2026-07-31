@@ -25,6 +25,24 @@ const FFI_FEATURE_LIVE_SESSION_OBJECT_PROBE: u64 = 1 << 18;
 const FFI_FEATURE_LIVE_OBJECT_CONTRACTS: u64 = 1 << 19;
 const FFI_FEATURE_LIVE_STREAM_POLLING: u64 = 1 << 20;
 const FFI_FEATURE_TYPED_RESULT_PAGING: u64 = 1 << 21;
+const FFI_FEATURE_OBSERVED_INVOCATION: u64 = 1 << 22;
+const FFI_FEATURE_SESSION_PREFLIGHT: u64 = 1 << 23;
+const FFI_FEATURE_RUNTIME_DIAGNOSTICS: u64 = 1 << 24;
+const FFI_REQUIRED_FEATURES: u64 = FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
+    | FFI_FEATURE_SESSION_PRIMITIVES
+    | FFI_FEATURE_SESSION_POLLING
+    | FFI_FEATURE_SNAPSHOT_PROJECTIONS
+    | FFI_FEATURE_SESSION_CONFIGURATION
+    | FFI_FEATURE_SESSION_VARIABLES
+    | FFI_FEATURE_CAPABILITY_RPC
+    | FFI_FEATURE_LIVE_OBJECT_PROBE
+    | FFI_FEATURE_LIVE_SESSION_OBJECT_PROBE
+    | FFI_FEATURE_LIVE_OBJECT_CONTRACTS
+    | FFI_FEATURE_LIVE_STREAM_POLLING
+    | FFI_FEATURE_TYPED_RESULT_PAGING
+    | FFI_FEATURE_OBSERVED_INVOCATION
+    | FFI_FEATURE_SESSION_PREFLIGHT
+    | FFI_FEATURE_RUNTIME_DIAGNOSTICS;
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_BUFFER_TOO_SMALL: i32 = 1;
 
@@ -49,6 +67,14 @@ pub struct FfiLiveObjectContractDescriptor {
     pub major_version: u16,
     pub minor_version: u16,
     pub reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FfiApiV1Header {
+    size: usize,
+    abi_version: u32,
+    feature_flags: u64,
 }
 
 #[repr(C)]
@@ -127,6 +153,19 @@ struct FfiApiV1 {
     typed_result_page_get_record_info_fn: *const libc::c_void,
     typed_result_page_copy_record_value_fn: *const libc::c_void,
     typed_result_page_release_fn: *const libc::c_void,
+    power_shell_begin_observed_invocation_fn: *const libc::c_void,
+    observed_invocation_poll_fn: *const libc::c_void,
+    observed_invocation_read_result_page_fn: *const libc::c_void,
+    observed_invocation_read_diagnostic_page_fn: *const libc::c_void,
+    observed_invocation_complete_fn: *const libc::c_void,
+    observed_invocation_stop_fn: *const libc::c_void,
+    observed_invocation_release_fn: *const libc::c_void,
+    observed_diagnostic_page_get_info_fn: *const libc::c_void,
+    observed_diagnostic_page_get_record_info_fn: *const libc::c_void,
+    observed_diagnostic_page_copy_record_text_to_utf8_fn: *const libc::c_void,
+    observed_diagnostic_page_release_fn: *const libc::c_void,
+    session_preflight_configured_fn: *const libc::c_void,
+    runtime_diagnostics_copy_power_shell_file_version_utf8_fn: *const libc::c_void,
 }
 
 type FnBindingsGetFfiApiV1 = unsafe extern "system" fn() -> *const FfiApiV1;
@@ -183,6 +222,31 @@ type FnFfiTypedResultPageGetRecordInfo =
     unsafe extern "system" fn(PowerShellHandle, i32, *mut i64, *mut u32, *mut FfiCallResult) -> i32;
 type FnFfiTypedResultPageCopyRecordValue =
     unsafe extern "system" fn(PowerShellHandle, i32, *mut u32, *mut u8, i32, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellBeginObservedInvocation =
+    unsafe extern "system" fn(PowerShellHandle, i32, i32, i32, i32, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiObservedInvocationPoll = unsafe extern "system" fn(PowerShellHandle, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiObservedInvocationReadResultPage =
+    unsafe extern "system" fn(PowerShellHandle, i64, i32, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiObservedInvocationReadDiagnosticPage =
+    unsafe extern "system" fn(PowerShellHandle, i64, i32, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiObservedInvocationComplete = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiObservedDiagnosticPageGetInfo = unsafe extern "system" fn(
+    PowerShellHandle,
+    *mut i64,
+    *mut i64,
+    *mut i64,
+    *mut i64,
+    *mut i32,
+    *mut u32,
+    *mut i32,
+    *mut FfiCallResult,
+) -> i32;
+type FnFfiObservedDiagnosticPageGetRecordInfo =
+    unsafe extern "system" fn(PowerShellHandle, i32, *mut i32, *mut i64, *mut FfiCallResult) -> i32;
+type FnFfiObservedDiagnosticPageCopyRecordTextToUtf8 =
+    unsafe extern "system" fn(PowerShellHandle, i32, *mut u8, i32, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8 =
+    unsafe extern "system" fn(*mut u8, i32, *mut i32, *mut i32, *mut FfiCallResult) -> i32;
 type FnFfiInvocationResultRelease = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiInvocationResultGetInfo =
     unsafe extern "system" fn(PowerShellHandle, *mut u32, *mut i32, *mut FfiCallResult) -> i32;
@@ -237,6 +301,31 @@ type FnFfiPowerShellSessionCreateConfigured = unsafe extern "system" fn(
     *const u8,
     i32,
     *mut PowerShellHandle,
+    *mut FfiCallResult,
+) -> i32;
+type FnFfiPowerShellSessionPreflightConfigured = unsafe extern "system" fn(
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    *const u8,
+    i32,
+    *const u8,
+    i32,
+    *const u8,
+    i32,
+    *const u8,
+    i32,
+    *const u8,
+    i32,
+    *mut u8,
+    i32,
+    *mut i32,
     *mut FfiCallResult,
 ) -> i32;
 type FnFfiPowerShellSessionRelease = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
@@ -317,6 +406,8 @@ type FnFfiPowerShellAddLiveObject =
 
 #[derive(Clone, Copy)]
 pub(crate) struct FfiBindings {
+    abi_version: u32,
+    payload_table_size: usize,
     create_fn: FnFfiPowerShellCreate,
     release_fn: FnFfiPowerShellRelease,
     add_argument_utf8_fn: FnFfiPowerShellAddUtf8,
@@ -369,6 +460,16 @@ pub(crate) struct FfiBindings {
     live_object_contract_pack_register_many_fn: FnFfiLiveObjectContractPackRegisterMany,
     live_stream: FfiLiveStreamBindings,
     typed_result_paging: FfiTypedResultPagingBindings,
+    observed_invocation: FfiObservedInvocationBindings,
+    session_preflight_configured_fn: FnFfiPowerShellSessionPreflightConfigured,
+    runtime_diagnostics_copy_power_shell_file_version_utf8_fn: FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8,
+}
+
+pub struct FfiPayloadRuntimeDiagnostics {
+    pub bindings_abi_version: u32,
+    pub payload_table_size: usize,
+    pub payload_table_slot_count: u32,
+    pub power_shell_file_version: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -399,6 +500,21 @@ struct FfiTypedResultPagingBindings {
     typed_result_page_release_fn: FnFfiTypedResultInvocationComplete,
 }
 
+#[derive(Clone, Copy)]
+struct FfiObservedInvocationBindings {
+    power_shell_begin_observed_invocation_fn: FnFfiPowerShellBeginObservedInvocation,
+    observed_invocation_poll_fn: FnFfiObservedInvocationPoll,
+    observed_invocation_read_result_page_fn: FnFfiObservedInvocationReadResultPage,
+    observed_invocation_read_diagnostic_page_fn: FnFfiObservedInvocationReadDiagnosticPage,
+    observed_invocation_complete_fn: FnFfiObservedInvocationComplete,
+    observed_invocation_stop_fn: FnFfiObservedInvocationComplete,
+    observed_invocation_release_fn: FnFfiObservedInvocationComplete,
+    observed_diagnostic_page_get_info_fn: FnFfiObservedDiagnosticPageGetInfo,
+    observed_diagnostic_page_get_record_info_fn: FnFfiObservedDiagnosticPageGetRecordInfo,
+    observed_diagnostic_page_copy_record_text_to_utf8_fn: FnFfiObservedDiagnosticPageCopyRecordTextToUtf8,
+    observed_diagnostic_page_release_fn: FnFfiObservedInvocationComplete,
+}
+
 #[derive(Debug)]
 pub struct FfiBindingError {
     status: i32,
@@ -427,6 +543,38 @@ impl fmt::Display for FfiBindingError {
 
 impl std::error::Error for FfiBindingError {}
 
+fn incompatible_ffi_api_error() -> Error {
+    Error::IO(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "managed FFI bindings report an incompatible ABI version, table size, or required feature set",
+    ))
+}
+
+fn validate_ffi_api_header(header: FfiApiV1Header) -> Result<(), Error> {
+    if header.abi_version != FFI_BINDINGS_ABI_VERSION
+        || header.size < mem::size_of::<FfiApiV1>()
+        || header.feature_flags & FFI_REQUIRED_FEATURES != FFI_REQUIRED_FEATURES
+    {
+        return Err(incompatible_ffi_api_error());
+    }
+
+    Ok(())
+}
+
+unsafe fn load_ffi_api_v1(get_api_fn: FnBindingsGetFfiApiV1) -> Result<FfiApiV1, Error> {
+    let api_ptr = get_api_fn();
+    if api_ptr.is_null() {
+        return Err(Error::IO(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "managed FFI binding table is null",
+        )));
+    }
+
+    let header = (api_ptr as *const FfiApiV1Header).read();
+    validate_ffi_api_header(header)?;
+    Ok(api_ptr.read())
+}
+
 impl FfiBindings {
     pub(crate) fn new_with_loader(fn_loader: &AssemblyDelegateLoader<PdCString>) -> Result<Self, Error> {
         fn get_function_pointer(
@@ -446,51 +594,7 @@ impl FfiBindings {
             unsafe { mem::transmute(fn_ptr) }
         };
 
-        let api = unsafe {
-            let api_ptr = get_api_fn();
-            if api_ptr.is_null() {
-                return Err(Error::IO(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "managed FFI binding table is null",
-                )));
-            }
-
-            *api_ptr
-        };
-
-        if api.abi_version != FFI_BINDINGS_ABI_VERSION
-            || api.size < mem::size_of::<FfiApiV1>()
-            || api.feature_flags
-                & (FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
-                    | FFI_FEATURE_SESSION_PRIMITIVES
-                    | FFI_FEATURE_SESSION_POLLING
-                    | FFI_FEATURE_SNAPSHOT_PROJECTIONS
-                    | FFI_FEATURE_SESSION_CONFIGURATION
-                    | FFI_FEATURE_SESSION_VARIABLES
-                    | FFI_FEATURE_CAPABILITY_RPC
-                    | FFI_FEATURE_LIVE_OBJECT_PROBE
-                    | FFI_FEATURE_LIVE_SESSION_OBJECT_PROBE
-                    | FFI_FEATURE_LIVE_OBJECT_CONTRACTS
-                    | FFI_FEATURE_LIVE_STREAM_POLLING
-                    | FFI_FEATURE_TYPED_RESULT_PAGING)
-                != (FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
-                    | FFI_FEATURE_SESSION_PRIMITIVES
-                    | FFI_FEATURE_SESSION_POLLING
-                    | FFI_FEATURE_SNAPSHOT_PROJECTIONS
-                    | FFI_FEATURE_SESSION_CONFIGURATION
-                    | FFI_FEATURE_SESSION_VARIABLES
-                    | FFI_FEATURE_CAPABILITY_RPC
-                    | FFI_FEATURE_LIVE_OBJECT_PROBE
-                    | FFI_FEATURE_LIVE_SESSION_OBJECT_PROBE
-                    | FFI_FEATURE_LIVE_OBJECT_CONTRACTS
-                    | FFI_FEATURE_LIVE_STREAM_POLLING
-                    | FFI_FEATURE_TYPED_RESULT_PAGING)
-        {
-            return Err(Error::IO(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "managed FFI bindings report an incompatible ABI version, table size, or required feature set",
-            )));
-        }
+        let api = unsafe { load_ffi_api_v1(get_api_fn)? };
 
         let fields = [
             api.create_fn,
@@ -563,6 +667,19 @@ impl FfiBindings {
             api.typed_result_page_get_record_info_fn,
             api.typed_result_page_copy_record_value_fn,
             api.typed_result_page_release_fn,
+            api.power_shell_begin_observed_invocation_fn,
+            api.observed_invocation_poll_fn,
+            api.observed_invocation_read_result_page_fn,
+            api.observed_invocation_read_diagnostic_page_fn,
+            api.observed_invocation_complete_fn,
+            api.observed_invocation_stop_fn,
+            api.observed_invocation_release_fn,
+            api.observed_diagnostic_page_get_info_fn,
+            api.observed_diagnostic_page_get_record_info_fn,
+            api.observed_diagnostic_page_copy_record_text_to_utf8_fn,
+            api.observed_diagnostic_page_release_fn,
+            api.session_preflight_configured_fn,
+            api.runtime_diagnostics_copy_power_shell_file_version_utf8_fn,
         ];
         if fields.iter().any(|field| field.is_null()) {
             return Err(Error::IO(std::io::Error::new(
@@ -661,8 +778,63 @@ impl FfiBindings {
                 )
             },
         };
+        let observed_invocation = FfiObservedInvocationBindings {
+            power_shell_begin_observed_invocation_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellBeginObservedInvocation>(
+                    api.power_shell_begin_observed_invocation_fn,
+                )
+            },
+            observed_invocation_poll_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiObservedInvocationPoll>(api.observed_invocation_poll_fn)
+            },
+            observed_invocation_read_result_page_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiObservedInvocationReadResultPage>(
+                    api.observed_invocation_read_result_page_fn,
+                )
+            },
+            observed_invocation_read_diagnostic_page_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiObservedInvocationReadDiagnosticPage>(
+                    api.observed_invocation_read_diagnostic_page_fn,
+                )
+            },
+            observed_invocation_complete_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiObservedInvocationComplete>(
+                    api.observed_invocation_complete_fn,
+                )
+            },
+            observed_invocation_stop_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiObservedInvocationComplete>(api.observed_invocation_stop_fn)
+            },
+            observed_invocation_release_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiObservedInvocationComplete>(
+                    api.observed_invocation_release_fn,
+                )
+            },
+            observed_diagnostic_page_get_info_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiObservedDiagnosticPageGetInfo>(
+                    api.observed_diagnostic_page_get_info_fn,
+                )
+            },
+            observed_diagnostic_page_get_record_info_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiObservedDiagnosticPageGetRecordInfo>(
+                    api.observed_diagnostic_page_get_record_info_fn,
+                )
+            },
+            observed_diagnostic_page_copy_record_text_to_utf8_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiObservedDiagnosticPageCopyRecordTextToUtf8>(
+                    api.observed_diagnostic_page_copy_record_text_to_utf8_fn,
+                )
+            },
+            observed_diagnostic_page_release_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiObservedInvocationComplete>(
+                    api.observed_diagnostic_page_release_fn,
+                )
+            },
+        };
 
         Ok(Self {
+            abi_version: api.abi_version,
+            payload_table_size: api.size,
             create_fn: unsafe { mem::transmute::<*const libc::c_void, FnFfiPowerShellCreate>(api.create_fn) },
             release_fn: unsafe { mem::transmute::<*const libc::c_void, FnFfiPowerShellRelease>(api.release_fn) },
             add_argument_utf8_fn: unsafe {
@@ -795,6 +967,16 @@ impl FfiBindings {
                     api.session_create_configured_fn,
                 )
             },
+            session_preflight_configured_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionPreflightConfigured>(
+                    api.session_preflight_configured_fn,
+                )
+            },
+            runtime_diagnostics_copy_power_shell_file_version_utf8_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8>(
+                    api.runtime_diagnostics_copy_power_shell_file_version_utf8_fn,
+                )
+            },
             session_set_variable_fn: unsafe {
                 mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionSetVariable>(api.session_set_variable_fn)
             },
@@ -851,7 +1033,87 @@ impl FfiBindings {
             },
             live_stream,
             typed_result_paging,
+            observed_invocation,
         })
+    }
+
+    pub(crate) fn runtime_diagnostics(&self) -> Result<FfiPayloadRuntimeDiagnostics, FfiBindingError> {
+        let power_shell_file_version = self.copy_power_shell_file_version()?;
+        Ok(FfiPayloadRuntimeDiagnostics {
+            bindings_abi_version: self.abi_version,
+            payload_table_size: self.payload_table_size,
+            payload_table_slot_count: ((mem::size_of::<FfiApiV1>() - mem::size_of::<FfiApiV1Header>())
+                / mem::size_of::<*const libc::c_void>()) as u32,
+            power_shell_file_version,
+        })
+    }
+
+    fn copy_power_shell_file_version(&self) -> Result<Option<String>, FfiBindingError> {
+        let mut available = 0_i32;
+        let mut required_length = 0_i32;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = unsafe {
+            (self.runtime_diagnostics_copy_power_shell_file_version_utf8_fn)(
+                std::ptr::null_mut(),
+                0,
+                &mut required_length,
+                &mut available,
+                &mut call_result,
+            )
+        };
+        check_status_allow_buffer_too_small(status, &call_result, &diagnostic)?;
+        if available == 0 {
+            if required_length != 0 {
+                return Err(FfiBindingError::from_status(
+                    -6,
+                    "managed runtime diagnostics reported an unavailable file version with a payload".to_owned(),
+                ));
+            }
+
+            return Ok(None);
+        }
+
+        if available != 1 || required_length <= 0 || required_length > 128 {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed runtime diagnostics returned invalid PowerShell file version metadata".to_owned(),
+            ));
+        }
+
+        let mut version = vec![0_u8; required_length as usize];
+        call_result = new_call_result(&mut diagnostic);
+        let status = unsafe {
+            (self.runtime_diagnostics_copy_power_shell_file_version_utf8_fn)(
+                version.as_mut_ptr(),
+                required_length,
+                &mut required_length,
+                &mut available,
+                &mut call_result,
+            )
+        };
+        check_status(status, &call_result, &diagnostic)?;
+        if available != 1 || required_length as usize != version.len() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed runtime diagnostics changed the PowerShell file version during copy".to_owned(),
+            ));
+        }
+
+        let version = String::from_utf8(version).map_err(|_| {
+            FfiBindingError::from_status(
+                -6,
+                "managed runtime diagnostics returned a non-UTF-8 PowerShell file version".to_owned(),
+            )
+        })?;
+        if version.is_empty() || version.contains('\0') {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed runtime diagnostics returned an invalid PowerShell file version".to_owned(),
+            ));
+        }
+
+        Ok(Some(version))
     }
 
     pub(crate) fn create_live_object_probe(&self, initial_count: i64) -> Result<*mut libc::c_void, FfiBindingError> {
@@ -1161,6 +1423,10 @@ impl FfiPowerShell {
         true
     }
 
+    pub fn supports_observed_invocation(&self) -> bool {
+        true
+    }
+
     pub fn begin_typed_result_invocation(
         &self,
         maximum_buffered_records: u32,
@@ -1198,6 +1464,54 @@ impl FfiPowerShell {
             _runtime: Arc::clone(&self._runtime),
             bindings: self.bindings,
             handle: Some(typed_result_handle),
+        })
+    }
+
+    pub fn begin_observed_invocation(
+        &self,
+        maximum_buffered_result_records: u32,
+        maximum_result_page_records: u32,
+        maximum_buffered_diagnostic_records: u32,
+        maximum_diagnostic_page_records: u32,
+    ) -> Result<FfiObservedInvocation, FfiBindingError> {
+        if maximum_buffered_result_records == 0
+            || maximum_buffered_result_records > 64
+            || maximum_result_page_records == 0
+            || maximum_result_page_records > maximum_buffered_result_records
+            || maximum_buffered_diagnostic_records == 0
+            || maximum_buffered_diagnostic_records > 64
+            || maximum_diagnostic_page_records == 0
+            || maximum_diagnostic_page_records > maximum_buffered_diagnostic_records
+        {
+            return Err(FfiBindingError::from_status(
+                -1,
+                "observed invocation bounds are invalid".to_owned(),
+            ));
+        }
+        let observed_invocation = self.bindings.observed_invocation;
+        let mut observed_handle = std::ptr::null_mut();
+        self.call(|handle, result| unsafe {
+            (observed_invocation.power_shell_begin_observed_invocation_fn)(
+                handle,
+                maximum_buffered_result_records as i32,
+                maximum_result_page_records as i32,
+                maximum_buffered_diagnostic_records as i32,
+                maximum_diagnostic_page_records as i32,
+                &mut observed_handle,
+                result,
+            )
+        })?;
+        if observed_handle.is_null() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed observed invocation returned a null handle".to_owned(),
+            ));
+        }
+
+        Ok(FfiObservedInvocation {
+            _runtime: Arc::clone(&self._runtime),
+            bindings: self.bindings,
+            handle: Some(observed_handle),
         })
     }
 
@@ -1897,6 +2211,506 @@ impl Drop for FfiTypedResultInvocation {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct FfiObservedDiagnosticRecord {
+    pub stream: u32,
+    pub sequence: u64,
+    pub text: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct FfiObservedDiagnosticPage {
+    pub acknowledged_sequence: u64,
+    pub next_sequence: u64,
+    pub total_record_count: u64,
+    pub dropped_record_count: u64,
+    pub terminal_status: i32,
+    pub is_terminal: bool,
+    pub is_truncated: bool,
+    pub is_complete: bool,
+    pub records: Vec<FfiObservedDiagnosticRecord>,
+}
+
+pub struct FfiObservedInvocation {
+    _runtime: Arc<HostedRuntime>,
+    bindings: FfiBindings,
+    handle: Option<PowerShellHandle>,
+}
+
+impl FfiObservedInvocation {
+    pub fn poll(&self) -> Result<bool, FfiBindingError> {
+        let observed_invocation = self.bindings.observed_invocation;
+        let mut completed = 0_i32;
+        self.call(|handle, result| unsafe {
+            (observed_invocation.observed_invocation_poll_fn)(handle, &mut completed, result)
+        })?;
+        match completed {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(FfiBindingError::from_status(
+                -6,
+                "managed observed invocation returned invalid completion metadata".to_owned(),
+            )),
+        }
+    }
+
+    pub fn read_result_page(
+        &self,
+        acknowledged_through: u64,
+        maximum_records: u32,
+    ) -> Result<FfiTypedResultPage, FfiBindingError> {
+        if acknowledged_through > i64::MAX as u64 || maximum_records == 0 || maximum_records > 64 {
+            return Err(FfiBindingError::from_status(
+                -1,
+                "observed result page cursor or limit is invalid".to_owned(),
+            ));
+        }
+
+        let observed_invocation = self.bindings.observed_invocation;
+        let typed_result_paging = self.bindings.typed_result_paging;
+        let mut page_handle = std::ptr::null_mut();
+        self.call(|handle, result| unsafe {
+            (observed_invocation.observed_invocation_read_result_page_fn)(
+                handle,
+                acknowledged_through as i64,
+                maximum_records as i32,
+                &mut page_handle,
+                result,
+            )
+        })?;
+        if page_handle.is_null() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed observed invocation returned a null result page handle".to_owned(),
+            ));
+        }
+
+        let page = (|| {
+            let mut acknowledged_sequence = 0_i64;
+            let mut next_sequence = 0_i64;
+            let mut total_record_count = 0_i64;
+            let mut dropped_record_count = 0_i64;
+            let mut terminal_status = 0_i32;
+            let mut flags = 0_u32;
+            let mut record_count = 0_i32;
+            let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+            let mut call_result = new_call_result(&mut diagnostic);
+            let status = unsafe {
+                (typed_result_paging.typed_result_page_get_info_fn)(
+                    page_handle,
+                    &mut acknowledged_sequence,
+                    &mut next_sequence,
+                    &mut total_record_count,
+                    &mut dropped_record_count,
+                    &mut terminal_status,
+                    &mut flags,
+                    &mut record_count,
+                    &mut call_result,
+                )
+            };
+            check_status(status, &call_result, &diagnostic)?;
+            let acknowledged_sequence = u64::try_from(acknowledged_sequence).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed observed result acknowledgement is invalid".to_owned())
+            })?;
+            let next_sequence = u64::try_from(next_sequence).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed observed result cursor is invalid".to_owned())
+            })?;
+            let total_record_count = u64::try_from(total_record_count)
+                .map_err(|_| FfiBindingError::from_status(-6, "managed observed result total is invalid".to_owned()))?;
+            let dropped_record_count = u64::try_from(dropped_record_count).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed observed result drop count is invalid".to_owned())
+            })?;
+            if acknowledged_sequence != acknowledged_through
+                || next_sequence < acknowledged_sequence
+                || next_sequence > total_record_count
+                || dropped_record_count > total_record_count
+                || record_count < 0
+                || record_count > maximum_records as i32
+                || flags & !0x7 != 0
+            {
+                return Err(FfiBindingError::from_status(
+                    -6,
+                    "managed observed result page metadata is invalid".to_owned(),
+                ));
+            }
+
+            let is_terminal = flags & 1 != 0;
+            let is_truncated = flags & (1 << 1) != 0;
+            let is_complete = flags & (1 << 2) != 0;
+            if (!is_terminal && terminal_status != 0)
+                || (is_complete && (!is_terminal || terminal_status != 0 || is_truncated))
+            {
+                return Err(FfiBindingError::from_status(
+                    -6,
+                    "managed observed result terminal metadata is inconsistent".to_owned(),
+                ));
+            }
+
+            let mut records = Vec::with_capacity(record_count as usize);
+            let mut previous_sequence = acknowledged_sequence;
+            for index in 0..record_count {
+                let mut sequence = 0_i64;
+                let mut kind = 0_u32;
+                call_result = new_call_result(&mut diagnostic);
+                let status = unsafe {
+                    (typed_result_paging.typed_result_page_get_record_info_fn)(
+                        page_handle,
+                        index,
+                        &mut sequence,
+                        &mut kind,
+                        &mut call_result,
+                    )
+                };
+                check_status(status, &call_result, &diagnostic)?;
+                let sequence = u64::try_from(sequence).map_err(|_| {
+                    FfiBindingError::from_status(-6, "managed observed result record sequence is invalid".to_owned())
+                })?;
+                if kind > 14 || sequence <= previous_sequence || sequence > next_sequence {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed observed result records are unordered or unsupported".to_owned(),
+                    ));
+                }
+                previous_sequence = sequence;
+
+                let mut required_length = 0_i32;
+                call_result = new_call_result(&mut diagnostic);
+                let status = unsafe {
+                    (typed_result_paging.typed_result_page_copy_record_value_fn)(
+                        page_handle,
+                        index,
+                        &mut kind,
+                        std::ptr::null_mut(),
+                        0,
+                        &mut required_length,
+                        &mut call_result,
+                    )
+                };
+                if status != STATUS_SUCCESS && status != STATUS_BUFFER_TOO_SMALL {
+                    check_status(status, &call_result, &diagnostic)?;
+                }
+                if kind > 14 || required_length < 0 || required_length as usize > 64 * 1024 {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed observed result value exceeds its fixed bound".to_owned(),
+                    ));
+                }
+                let mut payload = vec![0_u8; required_length as usize];
+                call_result = new_call_result(&mut diagnostic);
+                let status = unsafe {
+                    (typed_result_paging.typed_result_page_copy_record_value_fn)(
+                        page_handle,
+                        index,
+                        &mut kind,
+                        payload.as_mut_ptr(),
+                        required_length,
+                        &mut required_length,
+                        &mut call_result,
+                    )
+                };
+                check_status(status, &call_result, &diagnostic)?;
+                if kind > 14 || required_length as usize != payload.len() {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed observed result value changed during copy".to_owned(),
+                    ));
+                }
+                records.push(FfiTypedResultRecord {
+                    sequence,
+                    kind,
+                    payload,
+                });
+            }
+
+            if records.is_empty() {
+                if next_sequence != acknowledged_sequence {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed observed result page cursor is inconsistent".to_owned(),
+                    ));
+                }
+            } else if next_sequence != previous_sequence {
+                return Err(FfiBindingError::from_status(
+                    -6,
+                    "managed observed result page cursor is inconsistent".to_owned(),
+                ));
+            }
+
+            Ok(FfiTypedResultPage {
+                acknowledged_sequence,
+                next_sequence,
+                total_record_count,
+                dropped_record_count,
+                terminal_status,
+                is_terminal,
+                is_truncated,
+                is_complete,
+                records,
+            })
+        })();
+
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let release_status =
+            unsafe { (typed_result_paging.typed_result_page_release_fn)(page_handle, &mut call_result) };
+        match (page, check_status(release_status, &call_result, &diagnostic)) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    pub fn read_diagnostic_page(
+        &self,
+        acknowledged_through: u64,
+        maximum_records: u32,
+    ) -> Result<FfiObservedDiagnosticPage, FfiBindingError> {
+        if acknowledged_through > i64::MAX as u64 || maximum_records == 0 || maximum_records > 64 {
+            return Err(FfiBindingError::from_status(
+                -1,
+                "observed diagnostic page cursor or limit is invalid".to_owned(),
+            ));
+        }
+
+        let observed_invocation = self.bindings.observed_invocation;
+        let mut page_handle = std::ptr::null_mut();
+        self.call(|handle, result| unsafe {
+            (observed_invocation.observed_invocation_read_diagnostic_page_fn)(
+                handle,
+                acknowledged_through as i64,
+                maximum_records as i32,
+                &mut page_handle,
+                result,
+            )
+        })?;
+        if page_handle.is_null() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed observed invocation returned a null diagnostic page handle".to_owned(),
+            ));
+        }
+
+        let page = (|| {
+            let mut acknowledged_sequence = 0_i64;
+            let mut next_sequence = 0_i64;
+            let mut total_record_count = 0_i64;
+            let mut dropped_record_count = 0_i64;
+            let mut terminal_status = 0_i32;
+            let mut flags = 0_u32;
+            let mut record_count = 0_i32;
+            let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+            let mut call_result = new_call_result(&mut diagnostic);
+            let status = unsafe {
+                (observed_invocation.observed_diagnostic_page_get_info_fn)(
+                    page_handle,
+                    &mut acknowledged_sequence,
+                    &mut next_sequence,
+                    &mut total_record_count,
+                    &mut dropped_record_count,
+                    &mut terminal_status,
+                    &mut flags,
+                    &mut record_count,
+                    &mut call_result,
+                )
+            };
+            check_status(status, &call_result, &diagnostic)?;
+            let acknowledged_sequence = u64::try_from(acknowledged_sequence).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed observed diagnostic acknowledgement is invalid".to_owned())
+            })?;
+            let next_sequence = u64::try_from(next_sequence).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed observed diagnostic cursor is invalid".to_owned())
+            })?;
+            let total_record_count = u64::try_from(total_record_count).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed observed diagnostic total is invalid".to_owned())
+            })?;
+            let dropped_record_count = u64::try_from(dropped_record_count).map_err(|_| {
+                FfiBindingError::from_status(-6, "managed observed diagnostic drop count is invalid".to_owned())
+            })?;
+            if acknowledged_sequence != acknowledged_through
+                || next_sequence < acknowledged_sequence
+                || next_sequence > total_record_count
+                || dropped_record_count > total_record_count
+                || record_count < 0
+                || record_count > maximum_records as i32
+                || flags & !0x7 != 0
+            {
+                return Err(FfiBindingError::from_status(
+                    -6,
+                    "managed observed diagnostic page metadata is invalid".to_owned(),
+                ));
+            }
+
+            let is_terminal = flags & 1 != 0;
+            let is_truncated = flags & (1 << 1) != 0;
+            let is_complete = flags & (1 << 2) != 0;
+            if (!is_terminal && terminal_status != 0)
+                || is_truncated
+                || (is_complete && (!is_terminal || terminal_status != 0))
+            {
+                return Err(FfiBindingError::from_status(
+                    -6,
+                    "managed observed diagnostic terminal metadata is inconsistent".to_owned(),
+                ));
+            }
+
+            let mut records = Vec::with_capacity(record_count as usize);
+            let mut previous_sequence = acknowledged_sequence;
+            for index in 0..record_count {
+                let mut stream = 0_i32;
+                let mut sequence = 0_i64;
+                call_result = new_call_result(&mut diagnostic);
+                let status = unsafe {
+                    (observed_invocation.observed_diagnostic_page_get_record_info_fn)(
+                        page_handle,
+                        index,
+                        &mut stream,
+                        &mut sequence,
+                        &mut call_result,
+                    )
+                };
+                check_status(status, &call_result, &diagnostic)?;
+                let stream = u32::try_from(stream).map_err(|_| {
+                    FfiBindingError::from_status(-6, "managed observed diagnostic stream is invalid".to_owned())
+                })?;
+                let sequence = u64::try_from(sequence).map_err(|_| {
+                    FfiBindingError::from_status(
+                        -6,
+                        "managed observed diagnostic record sequence is invalid".to_owned(),
+                    )
+                })?;
+                if stream >= 7 || sequence <= previous_sequence || sequence > next_sequence {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed observed diagnostic records are unordered or invalid".to_owned(),
+                    ));
+                }
+                previous_sequence = sequence;
+
+                let mut required_length = 0_i32;
+                call_result = new_call_result(&mut diagnostic);
+                let status = unsafe {
+                    (observed_invocation.observed_diagnostic_page_copy_record_text_to_utf8_fn)(
+                        page_handle,
+                        index,
+                        std::ptr::null_mut(),
+                        0,
+                        &mut required_length,
+                        &mut call_result,
+                    )
+                };
+                if status != STATUS_SUCCESS && status != STATUS_BUFFER_TOO_SMALL {
+                    check_status(status, &call_result, &diagnostic)?;
+                }
+                if required_length < 0 || required_length as usize > 64 * 1024 {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed observed diagnostic text exceeds its fixed bound".to_owned(),
+                    ));
+                }
+                let mut text = vec![0_u8; required_length as usize];
+                call_result = new_call_result(&mut diagnostic);
+                let status = unsafe {
+                    (observed_invocation.observed_diagnostic_page_copy_record_text_to_utf8_fn)(
+                        page_handle,
+                        index,
+                        text.as_mut_ptr(),
+                        required_length,
+                        &mut required_length,
+                        &mut call_result,
+                    )
+                };
+                check_status(status, &call_result, &diagnostic)?;
+                if required_length as usize != text.len() {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed observed diagnostic text changed during copy".to_owned(),
+                    ));
+                }
+                records.push(FfiObservedDiagnosticRecord {
+                    stream,
+                    sequence,
+                    text: String::from_utf8(text).map_err(|_| {
+                        FfiBindingError::from_status(-6, "managed observed diagnostic text is not UTF-8".to_owned())
+                    })?,
+                });
+            }
+
+            if records.is_empty() {
+                if next_sequence != acknowledged_sequence {
+                    return Err(FfiBindingError::from_status(
+                        -6,
+                        "managed observed diagnostic page cursor is inconsistent".to_owned(),
+                    ));
+                }
+            } else if next_sequence != previous_sequence {
+                return Err(FfiBindingError::from_status(
+                    -6,
+                    "managed observed diagnostic page cursor is inconsistent".to_owned(),
+                ));
+            }
+
+            Ok(FfiObservedDiagnosticPage {
+                acknowledged_sequence,
+                next_sequence,
+                total_record_count,
+                dropped_record_count,
+                terminal_status,
+                is_terminal,
+                is_truncated,
+                is_complete,
+                records,
+            })
+        })();
+
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let release_status =
+            unsafe { (observed_invocation.observed_diagnostic_page_release_fn)(page_handle, &mut call_result) };
+        match (page, check_status(release_status, &call_result, &diagnostic)) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    pub fn complete(&self) -> Result<(), FfiBindingError> {
+        let observed_invocation = self.bindings.observed_invocation;
+        self.call(|handle, result| unsafe { (observed_invocation.observed_invocation_complete_fn)(handle, result) })
+    }
+
+    pub fn stop(&self) -> Result<(), FfiBindingError> {
+        let observed_invocation = self.bindings.observed_invocation;
+        self.call(|handle, result| unsafe { (observed_invocation.observed_invocation_stop_fn)(handle, result) })
+    }
+
+    fn call<F>(&self, operation: F) -> Result<(), FfiBindingError>
+    where
+        F: FnOnce(PowerShellHandle, *mut FfiCallResult) -> i32,
+    {
+        let handle = self.handle.ok_or_else(|| {
+            FfiBindingError::from_status(-4, "Observed invocation handle has been released".to_owned())
+        })?;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let status = operation(handle, &mut call_result);
+        check_status(status, &call_result, &diagnostic)
+    }
+}
+
+impl Drop for FfiObservedInvocation {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let observed_invocation = self.bindings.observed_invocation;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        unsafe {
+            (observed_invocation.observed_invocation_release_fn)(handle, &mut call_result);
+        }
+    }
+}
+
 pub struct FfiPowerShellSession {
     _runtime: Arc<HostedRuntime>,
     bindings: FfiBindings,
@@ -2002,6 +2816,108 @@ impl FfiPowerShellSession {
             bindings,
             handle: Some(handle),
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn preflight_configured(
+        runtime: Arc<HostedRuntime>,
+        runspace_mode: u32,
+        initial_configuration: u32,
+        history_mode: u32,
+        error_preference: u32,
+        warning_preference: u32,
+        verbose_preference: u32,
+        debug_preference: u32,
+        information_preference: u32,
+        execution_policy: u32,
+        initial_variables: &[u8],
+        module_imports: &[u8],
+        allowed_module_paths: &[u8],
+        working_directory: &str,
+        environment: &[u8],
+    ) -> Result<Vec<u8>, FfiBindingError> {
+        let bindings = runtime.ffi_bindings();
+        let initial_variables_length = checked_value_length(initial_variables)?;
+        let module_imports_length = checked_value_length(module_imports)?;
+        let module_paths_length = checked_value_length(allowed_module_paths)?;
+        let working_directory_length = checked_utf8_length(working_directory)?;
+        let environment_length = checked_value_length(environment)?;
+        let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
+        let mut call_result = new_call_result(&mut diagnostic);
+        let mut required_length = 0_i32;
+        let status = unsafe {
+            (bindings.session_preflight_configured_fn)(
+                runspace_mode,
+                initial_configuration,
+                history_mode,
+                error_preference,
+                warning_preference,
+                verbose_preference,
+                debug_preference,
+                information_preference,
+                execution_policy,
+                initial_variables.as_ptr(),
+                initial_variables_length,
+                module_imports.as_ptr(),
+                module_imports_length,
+                allowed_module_paths.as_ptr(),
+                module_paths_length,
+                working_directory.as_ptr(),
+                working_directory_length,
+                environment.as_ptr(),
+                environment_length,
+                std::ptr::null_mut(),
+                0,
+                &mut required_length,
+                &mut call_result,
+            )
+        };
+        check_status_allow_buffer_too_small(status, &call_result, &diagnostic)?;
+        if required_length < 0 || required_length as usize > 64 * 1024 {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed PowerShell session preflight report exceeds its fixed bound".to_owned(),
+            ));
+        }
+
+        let mut payload = vec![0_u8; required_length as usize];
+        call_result = new_call_result(&mut diagnostic);
+        let status = unsafe {
+            (bindings.session_preflight_configured_fn)(
+                runspace_mode,
+                initial_configuration,
+                history_mode,
+                error_preference,
+                warning_preference,
+                verbose_preference,
+                debug_preference,
+                information_preference,
+                execution_policy,
+                initial_variables.as_ptr(),
+                initial_variables_length,
+                module_imports.as_ptr(),
+                module_imports_length,
+                allowed_module_paths.as_ptr(),
+                module_paths_length,
+                working_directory.as_ptr(),
+                working_directory_length,
+                environment.as_ptr(),
+                environment_length,
+                payload.as_mut_ptr(),
+                required_length,
+                &mut required_length,
+                &mut call_result,
+            )
+        };
+        check_status(status, &call_result, &diagnostic)?;
+        if required_length as usize != payload.len() {
+            return Err(FfiBindingError::from_status(
+                -6,
+                "managed PowerShell session preflight report changed during copy".to_owned(),
+            ));
+        }
+
+        Ok(payload)
     }
 
     pub fn create_builder(&self) -> Result<FfiPowerShell, FfiBindingError> {
@@ -2656,5 +3572,25 @@ fn call_diagnostic(result: &FfiCallResult, diagnostic: &[u8]) -> String {
         format!("managed binding returned status {}", result.status)
     } else {
         message
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static SMALL_FFI_API_V1: FfiApiV1Header = FfiApiV1Header {
+        size: mem::size_of::<FfiApiV1Header>(),
+        abi_version: FFI_BINDINGS_ABI_VERSION,
+        feature_flags: FFI_REQUIRED_FEATURES,
+    };
+
+    unsafe extern "system" fn get_small_ffi_api_v1() -> *const FfiApiV1 {
+        &SMALL_FFI_API_V1 as *const FfiApiV1Header as *const FfiApiV1
+    }
+
+    #[test]
+    fn rejects_smaller_ffi_api_before_copying_extended_fields() {
+        assert!(unsafe { load_ffi_api_v1(get_small_ffi_api_v1) }.is_err());
     }
 }

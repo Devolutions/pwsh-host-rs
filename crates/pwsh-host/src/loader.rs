@@ -2,7 +2,7 @@ use std::convert::TryFrom;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
-use crate::bindings::{Bindings, FfiBindingError, FfiBindings};
+use crate::bindings::{Bindings, FfiBindingError, FfiBindings, FfiPayloadRuntimeDiagnostics};
 use crate::context::HostfxrContext;
 use crate::delegate_loader::AssemblyDelegateLoader;
 use crate::error::Error;
@@ -94,6 +94,10 @@ impl HostedRuntime {
 
     pub fn pwsh_dir(&self) -> &Path {
         &self.pwsh_dir
+    }
+
+    pub fn runtime_diagnostics(&self) -> Result<FfiPayloadRuntimeDiagnostics, FfiBindingError> {
+        self.ffi_bindings.runtime_diagnostics()
     }
 }
 

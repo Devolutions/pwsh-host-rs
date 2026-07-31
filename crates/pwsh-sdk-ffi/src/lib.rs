@@ -6,7 +6,7 @@ use std::convert::TryFrom;
 use std::fs;
 use std::mem;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 #[cfg(test)]
@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 use pwsh_host::FfiLiveStreamRecord;
 use pwsh_host::{
     find_pwsh_dir, FfiBindingError, FfiInvocationResult, FfiLiveInvocation, FfiLiveObjectContractDescriptor,
-    FfiLiveStreamBatch, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue,
-    FfiTypedResultInvocation, FfiTypedResultPage, FfiTypedResultRecord, HostedRuntime, LiveObjectContractPack,
+    FfiLiveStreamBatch, FfiObservedDiagnosticPage, FfiObservedInvocation, FfiPowerShell, FfiPowerShellSession,
+    FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue, FfiTypedResultInvocation, FfiTypedResultPage,
+    FfiTypedResultRecord, HostedRuntime, LiveObjectContractPack,
 };
 
 const ABI_VERSION: u32 = 2;
@@ -45,6 +46,9 @@ const FEATURE_LIVE_SESSION_OBJECT_PROBE: u64 = 1 << 18;
 const FEATURE_LIVE_OBJECT_CONTRACTS: u64 = 1 << 19;
 const FEATURE_LIVE_STREAM_POLLING: u64 = 1 << 20;
 const FEATURE_TYPED_RESULT_PAGING: u64 = 1 << 21;
+const FEATURE_OBSERVED_INVOCATION: u64 = 1 << 22;
+const FEATURE_SESSION_PREFLIGHT: u64 = 1 << 23;
+const FEATURE_RUNTIME_DIAGNOSTICS: u64 = 1 << 24;
 const CALL_RESULT_DIAGNOSTIC_TRUNCATED: u32 = 1;
 #[cfg(test)]
 const RESULT_RECORD_SCALAR_VALUE_PRESENT: u32 = 1 << 1;
@@ -109,6 +113,18 @@ pub struct AbiInfo {
     abi_version: u32,
     feature_flags: u64,
     minimum_compatible_abi_version: u32,
+    _reserved: u32,
+}
+
+#[repr(C)]
+pub struct RuntimeDiagnosticsInfo {
+    size: u32,
+    bindings_abi_version: u32,
+    payload_table_size: usize,
+    payload_table_slot_count: u32,
+    payload_table_shape: u32,
+    power_shell_file_version_available: u32,
+    contract_pack_count: u32,
     _reserved: u32,
 }
 
@@ -278,6 +294,8 @@ struct State {
     operation_stream_batches: HashMap<u64, Arc<OperationStreamBatch>>,
     typed_result_operations: HashMap<u64, Arc<TypedResultOperation>>,
     typed_result_pages: HashMap<u64, Arc<FfiTypedResultPage>>,
+    observed_operations: HashMap<u64, Arc<ObservedInvocationOperation>>,
+    observed_diagnostic_pages: HashMap<u64, Arc<FfiObservedDiagnosticPage>>,
     capabilities: HashMap<u64, Arc<CapabilityRegistrationState>>,
     next_handle: u64,
     next_result_handle: u64,
@@ -285,6 +303,8 @@ struct State {
     next_operation_stream_batch_handle: u64,
     next_typed_result_operation_handle: u64,
     next_typed_result_page_handle: u64,
+    next_observed_operation_handle: u64,
+    next_observed_diagnostic_page_handle: u64,
     next_runspace_session_handle: u64,
     next_capability_handle: u64,
 }
@@ -395,6 +415,16 @@ struct TypedResultOperation {
     session: Arc<Session>,
     capability: Option<CapabilityInvocation>,
     invocation: Mutex<Option<FfiTypedResultInvocation>>,
+    pipeline_completed: AtomicBool,
+    cancellation_requested: AtomicBool,
+    finalized: AtomicBool,
+    worker_error: Mutex<Option<(Status, String)>>,
+}
+
+struct ObservedInvocationOperation {
+    session: Arc<Session>,
+    capability: Option<CapabilityInvocation>,
+    invocation: Mutex<Option<Arc<FfiObservedInvocation>>>,
     pipeline_completed: AtomicBool,
     cancellation_requested: AtomicBool,
     finalized: AtomicBool,
@@ -521,6 +551,8 @@ unsafe impl Send for Operation {}
 unsafe impl Sync for Operation {}
 unsafe impl Send for TypedResultOperation {}
 unsafe impl Sync for TypedResultOperation {}
+unsafe impl Send for ObservedInvocationOperation {}
+unsafe impl Sync for ObservedInvocationOperation {}
 
 impl Session {
     fn clear_operation_active(&self) {
@@ -896,6 +928,189 @@ impl TypedResultOperation {
     }
 }
 
+impl ObservedInvocationOperation {
+    fn new(session: Arc<Session>, capability: Option<CapabilityInvocation>, invocation: FfiObservedInvocation) -> Self {
+        Self {
+            session,
+            capability,
+            invocation: Mutex::new(Some(Arc::new(invocation))),
+            pipeline_completed: AtomicBool::new(false),
+            cancellation_requested: AtomicBool::new(false),
+            finalized: AtomicBool::new(false),
+            worker_error: Mutex::new(None),
+        }
+    }
+
+    fn request_stop(&self) {
+        if !self.cancellation_requested.swap(true, Ordering::AcqRel) {
+            self.cancel_capability();
+            let invocation = self
+                .invocation
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .cloned();
+            if let Some(invocation) = invocation {
+                let _ = invocation.stop();
+            }
+        }
+    }
+
+    fn read_result_page(
+        &self,
+        acknowledged_through: u64,
+        maximum_records: u32,
+    ) -> Result<FfiTypedResultPage, (Status, String)> {
+        if let Some(error) = self
+            .worker_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            return Err(error);
+        }
+
+        let invocation = self
+            .invocation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    Status::InvalidHandle,
+                    "observed invocation has been released".to_owned(),
+                )
+            })?;
+        let page = invocation
+            .read_result_page(acknowledged_through, maximum_records)
+            .map_err(managed_failure)?;
+        if page.is_complete && self.pipeline_completed.load(Ordering::Acquire) {
+            self.finalize();
+        }
+        Ok(page)
+    }
+
+    fn read_diagnostic_page(
+        &self,
+        acknowledged_through: u64,
+        maximum_records: u32,
+    ) -> Result<FfiObservedDiagnosticPage, (Status, String)> {
+        if let Some(error) = self
+            .worker_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            return Err(error);
+        }
+
+        let invocation = self
+            .invocation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    Status::InvalidHandle,
+                    "observed invocation has been released".to_owned(),
+                )
+            })?;
+        let page = invocation
+            .read_diagnostic_page(acknowledged_through, maximum_records)
+            .map_err(managed_failure)?;
+        if page.is_complete && self.pipeline_completed.load(Ordering::Acquire) {
+            self.finalize();
+        }
+        Ok(page)
+    }
+
+    fn poll_pipeline(&self) -> Result<bool, (Status, String)> {
+        let invocation = self
+            .invocation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    Status::InvalidHandle,
+                    "observed invocation has been released".to_owned(),
+                )
+            })?;
+        invocation.poll().map_err(managed_failure)
+    }
+
+    fn complete_pipeline(&self) -> Result<(), (Status, String)> {
+        let invocation = self
+            .invocation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    Status::InvalidHandle,
+                    "observed invocation has been released".to_owned(),
+                )
+            })?;
+        invocation.complete().map_err(managed_failure)
+    }
+
+    fn record_worker_error(&self, error: (Status, String)) {
+        *self
+            .worker_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
+        self.request_stop();
+    }
+
+    fn abort(&self) {
+        self.request_stop();
+        self.invocation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        self.finalize();
+    }
+
+    fn finalize(&self) {
+        if self.finalized.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        if self.capability.is_some() {
+            let _ = unsafe { self.session.power_shell.set_capability_context(0, 0, std::ptr::null()) };
+        }
+        set_active_capability(&self.session, None);
+        finish_capability(self.capability.as_ref());
+        self.clear_session_operation();
+    }
+
+    fn clear_session_operation(&self) {
+        let mut active = self
+            .session
+            .operation_active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *active = false;
+        if let Some(runspace_session) = &self.session.runspace_session {
+            let mut active = runspace_session
+                .operation_active
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *active = false;
+        }
+    }
+
+    fn cancel_capability(&self) {
+        if let Some(capability) = &self.capability {
+            capability.cancel();
+        }
+    }
+}
+
 impl Default for State {
     fn default() -> Self {
         Self {
@@ -909,6 +1124,8 @@ impl Default for State {
             operation_stream_batches: HashMap::new(),
             typed_result_operations: HashMap::new(),
             typed_result_pages: HashMap::new(),
+            observed_operations: HashMap::new(),
+            observed_diagnostic_pages: HashMap::new(),
             capabilities: HashMap::new(),
             next_handle: 1,
             next_result_handle: 1_u64 << 63,
@@ -916,6 +1133,8 @@ impl Default for State {
             next_operation_stream_batch_handle: 1_u64 << 59,
             next_typed_result_operation_handle: 1_u64 << 58,
             next_typed_result_page_handle: 1_u64 << 57,
+            next_observed_operation_handle: 1_u64 << 56,
+            next_observed_diagnostic_page_handle: 1_u64 << 55,
             next_runspace_session_handle: 1_u64 << 61,
             next_capability_handle: 1_u64 << 60,
         }
@@ -1829,6 +2048,50 @@ fn begin_typed_result_invocation_with_capability(
     }
 }
 
+fn begin_observed_invocation_with_capability(
+    session: &Session,
+    capability: Option<CapabilityInvocation>,
+    maximum_buffered_result_records: u32,
+    maximum_result_page_records: u32,
+    maximum_buffered_diagnostic_records: u32,
+    maximum_diagnostic_page_records: u32,
+) -> Result<FfiObservedInvocation, FfiBindingError> {
+    if let Some(capability) = capability {
+        set_active_capability(session, Some(capability.clone()));
+        let configured = unsafe {
+            session.power_shell.set_capability_context(
+                capability.registration.handle,
+                capability.invocation_id,
+                capability_dispatch as *const () as *const _,
+            )
+        };
+        if let Err(error) = configured {
+            set_active_capability(session, None);
+            capability.registration.end_invocation(capability.invocation_id);
+            return Err(error);
+        }
+        let invocation = session.power_shell.begin_observed_invocation(
+            maximum_buffered_result_records,
+            maximum_result_page_records,
+            maximum_buffered_diagnostic_records,
+            maximum_diagnostic_page_records,
+        );
+        if invocation.is_err() {
+            let _ = unsafe { session.power_shell.set_capability_context(0, 0, std::ptr::null()) };
+            set_active_capability(session, None);
+            capability.registration.end_invocation(capability.invocation_id);
+        }
+        invocation
+    } else {
+        session.power_shell.begin_observed_invocation(
+            maximum_buffered_result_records,
+            maximum_result_page_records,
+            maximum_buffered_diagnostic_records,
+            maximum_diagnostic_page_records,
+        )
+    }
+}
+
 fn status_from_callback(value: i32) -> Status {
     match value {
         0 => Status::Success,
@@ -2674,6 +2937,155 @@ fn start_typed_result_operation(
     Ok(operation_handle)
 }
 
+fn start_observed_invocation_operation(
+    handle: u64,
+    maximum_buffered_result_records: u32,
+    maximum_result_page_records: u32,
+    maximum_buffered_diagnostic_records: u32,
+    maximum_diagnostic_page_records: u32,
+) -> Result<u64, (Status, String)> {
+    if maximum_buffered_result_records == 0
+        || maximum_buffered_result_records as usize > MAX_TYPED_RESULT_RECORDS
+        || maximum_result_page_records == 0
+        || maximum_result_page_records > maximum_buffered_result_records
+        || maximum_buffered_diagnostic_records == 0
+        || maximum_buffered_diagnostic_records as usize > MAX_TYPED_RESULT_RECORDS
+        || maximum_diagnostic_page_records == 0
+        || maximum_diagnostic_page_records > maximum_buffered_diagnostic_records
+    {
+        return Err((
+            Status::InvalidArgument,
+            "observed invocation bounds are invalid".to_owned(),
+        ));
+    }
+
+    let _operation_lock = SESSION_OPERATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (session, capability) = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let session = state
+            .sessions
+            .get(&handle)
+            .cloned()
+            .ok_or_else(|| (Status::InvalidHandle, "PowerShell handle is invalid".to_owned()))?;
+        if !session.power_shell.supports_observed_invocation() {
+            return Err((
+                Status::UnsupportedCapability,
+                "The selected PowerShell payload does not support observed invocations.".to_owned(),
+            ));
+        }
+        {
+            let mut active = session
+                .operation_active
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if *active {
+                return Err((
+                    Status::Backpressure,
+                    "PowerShell builder already has an active async operation.".to_owned(),
+                ));
+            }
+            *active = true;
+        }
+        if let Some(runspace_session) = &session.runspace_session {
+            let parent_active = {
+                let mut active = runspace_session
+                    .operation_active
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *active {
+                    true
+                } else {
+                    *active = true;
+                    false
+                }
+            };
+            if parent_active {
+                let mut builder_active = session
+                    .operation_active
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *builder_active = false;
+                return Err((
+                    Status::Backpressure,
+                    "PowerShell session already has a pending or running async operation.".to_owned(),
+                ));
+            }
+        }
+        let capability = match take_session_capability(&session) {
+            Ok(capability) => capability,
+            Err(error) => {
+                session.clear_operation_active();
+                return Err(error);
+            }
+        };
+        (session, capability)
+    };
+
+    let invocation = begin_observed_invocation_with_capability(
+        &session,
+        capability.clone(),
+        maximum_buffered_result_records,
+        maximum_result_page_records,
+        maximum_buffered_diagnostic_records,
+        maximum_diagnostic_page_records,
+    );
+    let invocation = match invocation {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            let operation = ObservedInvocationOperation {
+                session,
+                capability: None,
+                invocation: Mutex::new(None),
+                pipeline_completed: AtomicBool::new(false),
+                cancellation_requested: AtomicBool::new(false),
+                finalized: AtomicBool::new(false),
+                worker_error: Mutex::new(None),
+            };
+            operation.clear_session_operation();
+            return Err(managed_failure(error));
+        }
+    };
+
+    let operation = Arc::new(ObservedInvocationOperation::new(session, capability, invocation));
+    let operation_handle = {
+        let mut state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let operation_handle = state.next_observed_operation_handle;
+        state.next_observed_operation_handle = state
+            .next_observed_operation_handle
+            .checked_add(1)
+            .filter(|value| *value != 0)
+            .unwrap_or(1_u64 << 56);
+        state
+            .observed_operations
+            .insert(operation_handle, Arc::clone(&operation));
+        operation_handle
+    };
+
+    if std::thread::Builder::new()
+        .name("pwsh-sdk-ffi-observed-invocation".to_owned())
+        .spawn({
+            let operation = Arc::clone(&operation);
+            move || run_observed_invocation_operation(operation)
+        })
+        .is_err()
+    {
+        state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .observed_operations
+            .remove(&operation_handle);
+        operation.abort();
+        return Err((
+            Status::HostFailure,
+            "failed to create the native observed invocation thread".to_owned(),
+        ));
+    }
+
+    Ok(operation_handle)
+}
+
 fn run_typed_result_operation(operation: Arc<TypedResultOperation>) {
     let _operation_lock = SESSION_OPERATION_LOCK
         .lock()
@@ -2687,6 +3099,34 @@ fn run_typed_result_operation(operation: Arc<TypedResultOperation>) {
         match operation.poll_pipeline() {
             Ok(true) => {
                 operation.pipeline_completed.store(true, Ordering::Release);
+                break;
+            }
+            Ok(false) => std::thread::sleep(Duration::from_millis(5)),
+            Err(error) => {
+                operation.record_worker_error(error);
+                break;
+            }
+        }
+    }
+}
+
+fn run_observed_invocation_operation(operation: Arc<ObservedInvocationOperation>) {
+    let _operation_lock = SESSION_OPERATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _execution_scope = InvocationExecutionScope::enter();
+    loop {
+        if operation.cancellation_requested.load(Ordering::Acquire) {
+            operation.request_stop();
+        }
+
+        match operation.poll_pipeline() {
+            Ok(true) => {
+                if let Err(error) = operation.complete_pipeline() {
+                    operation.record_worker_error(error);
+                } else {
+                    operation.pipeline_completed.store(true, Ordering::Release);
+                }
                 break;
             }
             Ok(false) => std::thread::sleep(Duration::from_millis(5)),
@@ -2776,6 +3216,118 @@ fn release_typed_result_page(handle: u64) -> Result<Status, (Status, String)> {
         .remove(&handle)
         .map(|_| Status::Success)
         .ok_or_else(|| (Status::InvalidHandle, "typed result page handle is invalid".to_owned()))
+}
+
+fn with_observed_operation<F>(handle: u64, operation: F) -> Result<Status, (Status, String)>
+where
+    F: FnOnce(&Arc<ObservedInvocationOperation>) -> Result<Status, (Status, String)>,
+{
+    let operation_handle = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.observed_operations.get(&handle).cloned().ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "observed invocation handle is invalid".to_owned(),
+            )
+        })?
+    };
+    operation(&operation_handle)
+}
+
+fn read_observed_result_page(
+    handle: u64,
+    acknowledged_through: u64,
+    maximum_records: u32,
+) -> Result<u64, (Status, String)> {
+    let operation = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.observed_operations.get(&handle).cloned().ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "observed invocation handle is invalid".to_owned(),
+            )
+        })?
+    };
+    let page = Arc::new(operation.read_result_page(acknowledged_through, maximum_records)?);
+    let mut state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let page_handle = state.next_typed_result_page_handle;
+    state.next_typed_result_page_handle = state
+        .next_typed_result_page_handle
+        .checked_add(1)
+        .filter(|value| *value != 0)
+        .unwrap_or(1_u64 << 57);
+    state.typed_result_pages.insert(page_handle, page);
+    Ok(page_handle)
+}
+
+fn read_observed_diagnostic_page(
+    handle: u64,
+    acknowledged_through: u64,
+    maximum_records: u32,
+) -> Result<u64, (Status, String)> {
+    let operation = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.observed_operations.get(&handle).cloned().ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "observed invocation handle is invalid".to_owned(),
+            )
+        })?
+    };
+    let page = Arc::new(operation.read_diagnostic_page(acknowledged_through, maximum_records)?);
+    let mut state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let page_handle = state.next_observed_diagnostic_page_handle;
+    state.next_observed_diagnostic_page_handle = state
+        .next_observed_diagnostic_page_handle
+        .checked_add(1)
+        .filter(|value| *value != 0)
+        .unwrap_or(1_u64 << 55);
+    state.observed_diagnostic_pages.insert(page_handle, page);
+    Ok(page_handle)
+}
+
+fn release_observed_operation(handle: u64) -> Result<Status, (Status, String)> {
+    let operation = {
+        let mut state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.observed_operations.remove(&handle).ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "observed invocation handle is invalid".to_owned(),
+            )
+        })?
+    };
+    operation.abort();
+    Ok(Status::Success)
+}
+
+fn with_observed_diagnostic_page<F>(handle: u64, operation: F) -> Result<Status, (Status, String)>
+where
+    F: FnOnce(&FfiObservedDiagnosticPage) -> Result<Status, (Status, String)>,
+{
+    let page = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.observed_diagnostic_pages.get(&handle).cloned().ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "observed diagnostic page handle is invalid".to_owned(),
+            )
+        })?
+    };
+    operation(&page)
+}
+
+fn release_observed_diagnostic_page(handle: u64) -> Result<Status, (Status, String)> {
+    let mut state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    state
+        .observed_diagnostic_pages
+        .remove(&handle)
+        .map(|_| Status::Success)
+        .ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "observed diagnostic page handle is invalid".to_owned(),
+            )
+        })
 }
 
 fn with_operation<F>(handle: u64, operation: F) -> Result<Status, (Status, String)>
@@ -3328,6 +3880,30 @@ fn active_payload_path() -> Result<String, (Status, String)> {
     })
 }
 
+fn runtime_diagnostics() -> Result<(pwsh_host::FfiPayloadRuntimeDiagnostics, Vec<String>), (Status, String)> {
+    let (runtime, contract_pack_identities) = {
+        let state = match state().lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let runtime = state.runtime.as_ref().cloned().ok_or_else(|| {
+            (
+                Status::NotInitialized,
+                "PowerShell runtime is not initialized".to_owned(),
+            )
+        })?;
+        let identities = state
+            .live_object_contract_packs
+            .iter()
+            .map(|pack| pack.payload_adapter_type_name.clone())
+            .collect();
+        (runtime, identities)
+    };
+
+    let diagnostics = runtime.runtime_diagnostics().map_err(managed_failure)?;
+    Ok((diagnostics, contract_pack_identities))
+}
+
 fn create_session_result() -> Result<u64, (Status, String)> {
     let mut state = match state().lock() {
         Ok(state) => state,
@@ -3390,20 +3966,21 @@ struct SessionOptionsInput<'a> {
     information_preference: u32,
     execution_policy: u32,
     initial_variables: &'a [u8],
-    module_imports: Vec<&'a str>,
-    allowed_module_paths: Vec<&'a str>,
+    module_imports_payload: &'a [u8],
+    allowed_module_paths_payload: &'a [u8],
     working_directory: &'a str,
     environment_payload: &'a [u8],
 }
 
-struct ResolvedSessionConfiguration {
-    module_imports: Vec<String>,
-    module_paths: Vec<String>,
-    working_directory: Option<String>,
-}
-
 unsafe fn session_options_input<'a>(
     options: *const SessionOptions,
+) -> Result<SessionOptionsInput<'a>, (Status, String)> {
+    session_options_input_with_current_runspace_rejection(options, true)
+}
+
+unsafe fn session_options_input_with_current_runspace_rejection<'a>(
+    options: *const SessionOptions,
+    reject_current_runspace_configuration: bool,
 ) -> Result<SessionOptionsInput<'a>, (Status, String)> {
     if options.is_null() {
         return Err((
@@ -3460,7 +4037,9 @@ unsafe fn session_options_input<'a>(
         initial_variables,
         initial_variables_are_empty,
         module_imports,
+        module_imports_payload,
         allowed_module_paths,
+        allowed_module_paths_payload,
         working_directory,
         environment,
         environment_payload,
@@ -3505,7 +4084,9 @@ unsafe fn session_options_input<'a>(
             initial_variables,
             initial_variables_are_empty,
             module_imports,
+            module_imports_payload,
             allowed_module_paths,
+            module_paths_payload,
             working_directory,
             environment,
             environment_payload,
@@ -3516,13 +4097,16 @@ unsafe fn session_options_input<'a>(
             &EMPTY_VALUE_CONTAINER[..],
             true,
             Vec::new(),
+            &EMPTY_VALUE_CONTAINER[..],
             Vec::new(),
+            &EMPTY_VALUE_CONTAINER[..],
             "",
             Vec::new(),
             &EMPTY_VALUE_CONTAINER[..],
         )
     };
-    if prefix.runspace_mode == 0
+    if reject_current_runspace_configuration
+        && prefix.runspace_mode == 0
         && (prefix.initial_configuration != 0
             || prefix.history_mode != 0
             || prefix.error_preference != 0
@@ -3554,8 +4138,8 @@ unsafe fn session_options_input<'a>(
         information_preference: prefix.information_preference,
         execution_policy,
         initial_variables,
-        module_imports,
-        allowed_module_paths,
+        module_imports_payload,
+        allowed_module_paths_payload,
         working_directory,
         environment_payload,
     })
@@ -3755,10 +4339,6 @@ fn create_runspace_session(options: SessionOptionsInput<'_>) -> Result<u64, (Sta
             "PowerShell runtime is not initialized".to_owned(),
         )
     })?;
-    let resolved = resolve_session_configuration(&options)?;
-    let resolved_module_imports_payload = encode_string_array(&resolved.module_imports, "module imports")?;
-    let resolved_module_paths_payload = encode_string_array(&resolved.module_paths, "module paths")?;
-    let resolved_working_directory = resolved.working_directory.unwrap_or_default();
     let session = FfiPowerShellSession::new_for_runtime(
         runtime,
         options.runspace_mode,
@@ -3771,9 +4351,9 @@ fn create_runspace_session(options: SessionOptionsInput<'_>) -> Result<u64, (Sta
         options.information_preference,
         options.execution_policy,
         options.initial_variables,
-        &resolved_module_imports_payload,
-        &resolved_module_paths_payload,
-        &resolved_working_directory,
+        options.module_imports_payload,
+        options.allowed_module_paths_payload,
+        options.working_directory,
         options.environment_payload,
     )
     .map_err(managed_failure)?;
@@ -3791,118 +4371,6 @@ fn create_runspace_session(options: SessionOptionsInput<'_>) -> Result<u64, (Sta
         }),
     );
     Ok(handle)
-}
-
-fn resolve_session_configuration(
-    options: &SessionOptionsInput<'_>,
-) -> Result<ResolvedSessionConfiguration, (Status, String)> {
-    let mut resolved_module_paths = Vec::with_capacity(options.allowed_module_paths.len());
-    for path in &options.allowed_module_paths {
-        let canonical = fs::canonicalize(path).map_err(|_| {
-            (
-                Status::InvalidArgument,
-                "a requested module path must be an existing directory".to_owned(),
-            )
-        })?;
-        if !canonical.is_dir() {
-            return Err((
-                Status::InvalidArgument,
-                "a requested module path must be an existing directory".to_owned(),
-            ));
-        }
-        resolved_module_paths.push(session_path_string(&canonical, "module path")?);
-    }
-    let mut resolved_module_imports = Vec::with_capacity(options.module_imports.len());
-    if !options.module_imports.is_empty() {
-        if options.allowed_module_paths.is_empty() {
-            return Err((
-                Status::InvalidArgument,
-                "module imports require one or more module paths".to_owned(),
-            ));
-        }
-        if options
-            .module_imports
-            .iter()
-            .any(|name| !valid_module_import_name(name))
-        {
-            return Err((
-                Status::InvalidArgument,
-                "a requested module import is invalid".to_owned(),
-            ));
-        }
-        resolved_module_imports.extend(options.module_imports.iter().map(|name| (*name).to_owned()));
-    }
-    let resolved_working_directory = if !options.working_directory.is_empty() {
-        let canonical = fs::canonicalize(options.working_directory).map_err(|_| {
-            (
-                Status::InvalidArgument,
-                "the requested working directory must be an existing directory".to_owned(),
-            )
-        })?;
-        if !canonical.is_dir() {
-            return Err((
-                Status::InvalidArgument,
-                "the requested working directory must be an existing directory".to_owned(),
-            ));
-        }
-        Some(session_path_string(&canonical, "working directory")?)
-    } else {
-        None
-    };
-    Ok(ResolvedSessionConfiguration {
-        module_imports: resolved_module_imports,
-        module_paths: resolved_module_paths,
-        working_directory: resolved_working_directory,
-    })
-}
-
-fn session_path_string(path: &Path, description: &str) -> Result<String, (Status, String)> {
-    let value = path.to_str().ok_or_else(|| {
-        (
-            Status::InvalidArgument,
-            format!("the requested {} is not valid UTF-8", description),
-        )
-    })?;
-    #[cfg(windows)]
-    let value = value.strip_prefix(r"\\?\").unwrap_or(value);
-    if value.len() > MAX_SESSION_PATH_BYTES || value.as_bytes().contains(&0) {
-        return Err((
-            Status::InvalidArgument,
-            format!("the requested {} exceeds its bound", description),
-        ));
-    }
-    Ok(value.to_owned())
-}
-
-fn encode_string_array(values: &[String], description: &str) -> Result<Vec<u8>, (Status, String)> {
-    if values.len() > MAX_SESSION_CONFIGURATION_ENTRIES {
-        return Err((
-            Status::InvalidArgument,
-            format!("PowerShell session {} exceed their bound", description),
-        ));
-    }
-    let mut payload = Vec::with_capacity(4 + values.len() * 16);
-    payload.extend_from_slice(&(values.len() as u32).to_le_bytes());
-    for value in values {
-        #[cfg(windows)]
-        let value = value.strip_prefix(r"\\?\").unwrap_or(value);
-        if value.len() > MAX_SESSION_PATH_BYTES || value.as_bytes().contains(&0) {
-            return Err((
-                Status::InvalidArgument,
-                format!("PowerShell session {} contain an invalid value", description),
-            ));
-        }
-        payload.extend_from_slice(&VALUE_KIND_STRING.to_le_bytes());
-        payload.extend_from_slice(&(value.len() as u32).to_le_bytes());
-        payload.extend_from_slice(value.as_bytes());
-    }
-    if payload.len() > MAX_VALUE_PAYLOAD_BYTES {
-        return Err((
-            Status::InvalidArgument,
-            format!("PowerShell session {} exceed the tagged-value bound", description),
-        ));
-    }
-    Ok(payload)
 }
 
 fn valid_module_import_name(value: &str) -> bool {
@@ -4083,6 +4551,9 @@ fn feature_flags() -> u64 {
         | FEATURE_LIVE_OBJECT_CONTRACTS
         | FEATURE_LIVE_STREAM_POLLING
         | FEATURE_TYPED_RESULT_PAGING
+        | FEATURE_OBSERVED_INVOCATION
+        | FEATURE_SESSION_PREFLIGHT
+        | FEATURE_RUNTIME_DIAGNOSTICS
 }
 
 fn create_live_object_probe(initial_count: i64) -> Result<*mut std::ffi::c_void, (Status, String)> {
@@ -4158,6 +4629,86 @@ pub unsafe extern "C" fn multi_pwsh_get_abi_info(info: *mut AbiInfo) -> i32 {
     (*info).minimum_compatible_abi_version = MINIMUM_COMPATIBLE_ABI_VERSION;
     (*info)._reserved = 0;
     Status::Success.value()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_get_runtime_diagnostics_info(
+    info: *mut RuntimeDiagnosticsInfo,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        if info.is_null() || (*info).size < mem::size_of::<RuntimeDiagnosticsInfo>() as u32 {
+            return Err((
+                Status::InvalidArgument,
+                "runtime diagnostics info output is invalid".to_owned(),
+            ));
+        }
+
+        let (diagnostics, contract_pack_identities) = runtime_diagnostics()?;
+        if contract_pack_identities.len() > MAX_LIVE_OBJECT_CONTRACT_PACKS {
+            return Err((
+                Status::ManagedFailure,
+                "runtime diagnostics contract-pack count exceeds its bound".to_owned(),
+            ));
+        }
+
+        (*info).bindings_abi_version = diagnostics.bindings_abi_version;
+        (*info).payload_table_size = diagnostics.payload_table_size;
+        (*info).payload_table_slot_count = diagnostics.payload_table_slot_count;
+        (*info).payload_table_shape = 1;
+        (*info).power_shell_file_version_available = u32::from(diagnostics.power_shell_file_version.is_some());
+        (*info).contract_pack_count = contract_pack_identities.len() as u32;
+        (*info)._reserved = 0;
+        Ok(Status::Success)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_copy_runtime_diagnostics_power_shell_file_version_utf8(
+    buffer: *mut u8,
+    buffer_len: usize,
+    required_len: *mut usize,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        let (diagnostics, _) = runtime_diagnostics()?;
+        let value = diagnostics.power_shell_file_version.unwrap_or_default();
+        if value.len() > 128 {
+            return Err((
+                Status::ManagedFailure,
+                "runtime diagnostics PowerShell file version exceeds its bound".to_owned(),
+            ));
+        }
+
+        Ok(unsafe { write_utf8(buffer, buffer_len, required_len, &value) })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_copy_runtime_diagnostics_contract_pack_identity_utf8(
+    index: u32,
+    buffer: *mut u8,
+    buffer_len: usize,
+    required_len: *mut usize,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        let (_, contract_pack_identities) = runtime_diagnostics()?;
+        let value = contract_pack_identities.get(index as usize).ok_or_else(|| {
+            (
+                Status::InvalidArgument,
+                "runtime diagnostics contract-pack index is invalid".to_owned(),
+            )
+        })?;
+        if value.is_empty() || value.len() > MAX_LIVE_OBJECT_CONTRACT_PACK_TYPE_NAME_BYTES {
+            return Err((
+                Status::ManagedFailure,
+                "runtime diagnostics contract-pack identity is invalid".to_owned(),
+            ));
+        }
+
+        Ok(unsafe { write_utf8(buffer, buffer_len, required_len, value) })
+    })
 }
 
 #[no_mangle]
@@ -5395,6 +5946,241 @@ pub unsafe extern "C" fn multi_pwsh_typed_result_page_release(page_handle: u64, 
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_begin_observed_invocation(
+    handle: u64,
+    maximum_buffered_result_records: u32,
+    maximum_result_page_records: u32,
+    maximum_buffered_diagnostic_records: u32,
+    maximum_diagnostic_page_records: u32,
+    observed_handle: *mut u64,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        if observed_handle.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "observed invocation handle output pointer is null".to_owned(),
+            ));
+        }
+        *observed_handle = start_observed_invocation_operation(
+            handle,
+            maximum_buffered_result_records,
+            maximum_result_page_records,
+            maximum_buffered_diagnostic_records,
+            maximum_diagnostic_page_records,
+        )?;
+        Ok(Status::Success)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_observed_invocation_read_result_page(
+    handle: u64,
+    acknowledged_through: u64,
+    maximum_records: u32,
+    page_handle: *mut u64,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        if page_handle.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "observed result page handle output pointer is null".to_owned(),
+            ));
+        }
+        *page_handle = read_observed_result_page(handle, acknowledged_through, maximum_records)?;
+        Ok(Status::Success)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_observed_invocation_read_diagnostic_page(
+    handle: u64,
+    acknowledged_through: u64,
+    maximum_records: u32,
+    page_handle: *mut u64,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        if page_handle.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "observed diagnostic page handle output pointer is null".to_owned(),
+            ));
+        }
+        *page_handle = read_observed_diagnostic_page(handle, acknowledged_through, maximum_records)?;
+        Ok(Status::Success)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_observed_invocation_stop(handle: u64, result: *mut CallResult) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        with_observed_operation(handle, |operation| {
+            operation.request_stop();
+            Ok(Status::Success)
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_observed_invocation_release(handle: u64, result: *mut CallResult) -> i32 {
+    v2_call_allow_active_pipeline(result, || release_observed_operation(handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_observed_diagnostic_page_get_info(
+    page_handle: u64,
+    info: *mut TypedResultPageInfo,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        if info.is_null() || (*info).size < mem::size_of::<TypedResultPageInfo>() as u32 {
+            return Err((
+                Status::InvalidArgument,
+                "observed diagnostic page info output is null or too small".to_owned(),
+            ));
+        }
+        with_observed_diagnostic_page(page_handle, |page| {
+            let mut flags = 0_u32;
+            if page.is_terminal {
+                flags |= 1;
+            }
+            if page.is_truncated {
+                flags |= 1 << 1;
+            }
+            if page.is_complete {
+                flags |= 1 << 2;
+            }
+            (*info).flags = flags;
+            (*info).terminal_status = page.terminal_status;
+            (*info)._reserved = 0;
+            (*info).acknowledged_sequence = page.acknowledged_sequence;
+            (*info).next_sequence = page.next_sequence;
+            (*info).total_record_count = page.total_record_count;
+            (*info).dropped_record_count = page.dropped_record_count;
+            (*info).record_count = u32::try_from(page.records.len()).map_err(|_| {
+                (
+                    Status::ManagedFailure,
+                    "observed diagnostic page record count exceeds its bound".to_owned(),
+                )
+            })?;
+            (*info)._reserved2 = 0;
+            Ok(Status::Success)
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_observed_diagnostic_page_get_record_info(
+    page_handle: u64,
+    record_index: u32,
+    stream: *mut u32,
+    sequence: *mut u64,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        if stream.is_null() || sequence.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "observed diagnostic page record output pointer is null".to_owned(),
+            ));
+        }
+        with_observed_diagnostic_page(page_handle, |page| {
+            let record = page.records.get(record_index as usize).ok_or_else(|| {
+                (
+                    Status::InvalidArgument,
+                    "observed diagnostic page record index is invalid".to_owned(),
+                )
+            })?;
+            *stream = record.stream;
+            *sequence = record.sequence;
+            Ok(Status::Success)
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_observed_diagnostic_page_copy_record_text_utf8(
+    page_handle: u64,
+    record_index: u32,
+    buffer: *mut u8,
+    buffer_len: usize,
+    required_len: *mut usize,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        with_observed_diagnostic_page(page_handle, |page| {
+            let record = page.records.get(record_index as usize).ok_or_else(|| {
+                (
+                    Status::InvalidArgument,
+                    "observed diagnostic page record index is invalid".to_owned(),
+                )
+            })?;
+            if record.text.len() > MAX_TYPED_RESULT_PAYLOAD_BYTES {
+                return Err((
+                    Status::ManagedFailure,
+                    "observed diagnostic text exceeds its fixed bound".to_owned(),
+                ));
+            }
+            match unsafe { write_utf8(buffer, buffer_len, required_len, &record.text) } {
+                Status::Success => Ok(Status::Success),
+                status => Err((status, "observed diagnostic text buffer is invalid".to_owned())),
+            }
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_observed_diagnostic_page_release(page_handle: u64, result: *mut CallResult) -> i32 {
+    v2_call_allow_active_pipeline(result, || release_observed_diagnostic_page(page_handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_session_preflight(
+    options: *const SessionOptions,
+    buffer: *mut u8,
+    buffer_len: usize,
+    required_len: *mut usize,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        let options = session_options_input_with_current_runspace_rejection(options, false)?;
+        let runtime = {
+            let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.runtime.as_ref().cloned().ok_or_else(|| {
+                (
+                    Status::NotInitialized,
+                    "PowerShell runtime is not initialized".to_owned(),
+                )
+            })?
+        };
+        let report = FfiPowerShellSession::preflight_configured(
+            runtime,
+            options.runspace_mode,
+            options.initial_configuration,
+            options.history_mode,
+            options.error_preference,
+            options.warning_preference,
+            options.verbose_preference,
+            options.debug_preference,
+            options.information_preference,
+            options.execution_policy,
+            options.initial_variables,
+            options.module_imports_payload,
+            options.allowed_module_paths_payload,
+            options.working_directory,
+            options.environment_payload,
+        )
+        .map_err(managed_failure)?;
+        match write_bytes(buffer, buffer_len, required_len, &report) {
+            Status::Success => Ok(Status::Success),
+            status => Err((status, "session preflight report buffer is invalid".to_owned())),
+        }
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_session_create(
     options: *const SessionOptions,
     session_handle: *mut u64,
@@ -6173,7 +6959,10 @@ mod tests {
             | FEATURE_LIVE_SESSION_OBJECT_PROBE
             | FEATURE_LIVE_OBJECT_CONTRACTS
             | FEATURE_LIVE_STREAM_POLLING
-            | FEATURE_TYPED_RESULT_PAGING;
+            | FEATURE_TYPED_RESULT_PAGING
+            | FEATURE_OBSERVED_INVOCATION
+            | FEATURE_SESSION_PREFLIGHT
+            | FEATURE_RUNTIME_DIAGNOSTICS;
 
         assert_eq!(ABI_VERSION, 2);
         assert_eq!(MINIMUM_COMPATIBLE_ABI_VERSION, 2);

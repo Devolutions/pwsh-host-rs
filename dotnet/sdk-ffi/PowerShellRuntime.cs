@@ -5,11 +5,13 @@ public sealed class PowerShellRuntime
     private PowerShellRuntime(
         uint abiVersion,
         ulong featureFlags,
-        string payloadDirectory)
+        string payloadDirectory,
+        PowerShellRuntimeDiagnosticReport diagnostics)
     {
         AbiVersion = abiVersion;
         FeatureFlags = featureFlags;
         PayloadDirectory = payloadDirectory;
+        Diagnostics = diagnostics;
     }
 
     public uint AbiVersion { get; }
@@ -17,6 +19,11 @@ public sealed class PowerShellRuntime
     public ulong FeatureFlags { get; }
 
     public string PayloadDirectory { get; }
+
+    /// <summary>
+    /// Gets safe descriptive facts about the active payload and binding table.
+    /// </summary>
+    public PowerShellRuntimeDiagnosticReport Diagnostics { get; }
 
     public static PowerShellRuntime Activate()
     {
@@ -51,10 +58,14 @@ public sealed class PowerShellRuntime
 
     private static PowerShellRuntime CreateActivatedRuntime()
     {
+        uint abiVersion = PowerShell.AbiVersion;
+        ulong featureFlags = PowerShell.FeatureFlags;
+        string payloadDirectory = PowerShell.GetActivePayloadDirectory();
         return new PowerShellRuntime(
-            PowerShell.AbiVersion,
-            PowerShell.FeatureFlags,
-            PowerShell.GetActivePayloadDirectory());
+            abiVersion,
+            featureFlags,
+            payloadDirectory,
+            PowerShellRuntimeDiagnosticReport.Create(payloadDirectory, featureFlags));
     }
 
     public PowerShell Create()
@@ -123,6 +134,22 @@ public sealed class PowerShellRuntime
         return PowerShellSession.Create(options);
     }
 
+    /// <summary>
+    /// Validates copied session configuration without creating a runspace,
+    /// importing a module, or executing PowerShell code.
+    /// </summary>
+    public PowerShellSessionPreflightReport ValidateSessionConfiguration(PowerShellSessionOptions options)
+    {
+        return PowerShellSession.Preflight(options);
+    }
+
+    public PowerShellSessionPreflightReport ValidateSessionConfiguration(
+        PowerShellSessionConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        return ValidateSessionConfiguration(new PowerShellSessionOptions(configuration: configuration));
+    }
+
     public PowerShellSessionPool CreateSessionPool(PowerShellSessionPoolOptions options)
     {
         return PowerShellSessionPool.Create(options);
@@ -147,6 +174,22 @@ public sealed class PowerShellRuntime
         }
 
         return PowerShellCapabilitySet.Register(bindings);
+    }
+
+    /// <summary>
+    /// Registers a bounded staged-intent lifecycle over the existing capability dispatcher.
+    /// </summary>
+    public PowerShellStagedIntentCoordinator RegisterStagedIntents(
+        IEnumerable<PowerShellStagedIntentDefinition> definitions)
+    {
+        if ((FeatureFlags & (1UL << 16)) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell payload does not support bounded capability RPC.");
+        }
+
+        return PowerShellStagedIntentCoordinator.Register(definitions);
     }
 
     internal static PowerShellInvocationResult InvokeRecipe(

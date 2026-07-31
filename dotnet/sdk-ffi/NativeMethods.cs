@@ -142,6 +142,19 @@ internal struct NativeTypedResultPageInfo
     internal uint Reserved2;
 }
 
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeRuntimeDiagnosticsInfo
+{
+    internal uint Size;
+    internal uint BindingsAbiVersion;
+    internal nuint PayloadTableSize;
+    internal uint PayloadTableSlotCount;
+    internal uint PayloadTableShape;
+    internal uint PowerShellFileVersionAvailable;
+    internal uint ContractPackCount;
+    internal uint Reserved;
+}
+
 internal static unsafe partial class NativeMethods
 {
     internal const string LibraryName = "multi-pwsh-sdk";
@@ -176,6 +189,29 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_get_payload_path_utf8")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int GetPayloadPath(
+        byte* buffer,
+        nuint bufferLength,
+        nuint* requiredLength,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_get_runtime_diagnostics_info")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int GetRuntimeDiagnosticsInfo(
+        NativeRuntimeDiagnosticsInfo* info,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_copy_runtime_diagnostics_power_shell_file_version_utf8")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CopyRuntimeDiagnosticsPowerShellFileVersion(
+        byte* buffer,
+        nuint bufferLength,
+        nuint* requiredLength,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_copy_runtime_diagnostics_contract_pack_identity_utf8")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CopyRuntimeDiagnosticsContractPackIdentity(
+        uint index,
         byte* buffer,
         nuint bufferLength,
         nuint* requiredLength,
@@ -568,11 +604,87 @@ internal static unsafe partial class NativeMethods
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int ReleaseTypedResultPage(ulong pageHandle, NativeCallResult* result);
 
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_begin_observed_invocation")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BeginObservedInvocation(
+        ulong handle,
+        uint maximumBufferedResultRecords,
+        uint maximumResultPageRecords,
+        uint maximumBufferedDiagnosticRecords,
+        uint maximumDiagnosticPageRecords,
+        ulong* observedHandle,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_observed_invocation_read_result_page")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int ReadObservedResultPage(
+        ulong observedHandle,
+        ulong acknowledgedThrough,
+        uint maximumRecords,
+        ulong* pageHandle,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_observed_invocation_read_diagnostic_page")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int ReadObservedDiagnosticPage(
+        ulong observedHandle,
+        ulong acknowledgedThrough,
+        uint maximumRecords,
+        ulong* pageHandle,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_observed_invocation_stop")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int StopObservedInvocation(ulong observedHandle, NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_observed_invocation_release")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int ReleaseObservedInvocation(ulong observedHandle, NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_observed_diagnostic_page_get_info")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int GetObservedDiagnosticPageInfo(
+        ulong pageHandle,
+        NativeTypedResultPageInfo* info,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_observed_diagnostic_page_get_record_info")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int GetObservedDiagnosticPageRecordInfo(
+        ulong pageHandle,
+        uint recordIndex,
+        uint* stream,
+        ulong* sequence,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_observed_diagnostic_page_copy_record_text_utf8")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CopyObservedDiagnosticPageRecordText(
+        ulong pageHandle,
+        uint recordIndex,
+        byte* buffer,
+        nuint bufferLength,
+        nuint* requiredLength,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_observed_diagnostic_page_release")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int ReleaseObservedDiagnosticPage(ulong pageHandle, NativeCallResult* result);
+
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_session_create")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int CreateSession(
         NativeSessionOptions* options,
         ulong* sessionHandle,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_session_preflight")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int PreflightSession(
+        NativeSessionOptions* options,
+        byte* buffer,
+        nuint bufferLength,
+        nuint* requiredLength,
         NativeCallResult* result);
 
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_session_release")]

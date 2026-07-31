@@ -23,6 +23,16 @@ bindings:FfiLiveObjectContractPack_RegisterMany
 bindings:FfiLiveObjectProbe_Create
 bindings:FfiLiveObjectProbe_Release
 bindings:FfiLiveObjectProbe_Unregister
+bindings:FfiObservedDiagnosticPage_CopyRecordTextToUtf8
+bindings:FfiObservedDiagnosticPage_GetInfo
+bindings:FfiObservedDiagnosticPage_GetRecordInfo
+bindings:FfiObservedDiagnosticPage_Release
+bindings:FfiObservedInvocation_Complete
+bindings:FfiObservedInvocation_Poll
+bindings:FfiObservedInvocation_ReadDiagnosticPage
+bindings:FfiObservedInvocation_ReadResultPage
+bindings:FfiObservedInvocation_Release
+bindings:FfiObservedInvocation_Stop
 bindings:FfiPowerShell_AddArgumentLiveObject
 bindings:FfiPowerShell_AddArgumentUtf8
 bindings:FfiPowerShell_AddArgumentValue
@@ -37,6 +47,7 @@ bindings:FfiPowerShell_AddScriptUtf8
 bindings:FfiPowerShell_AddScriptUtf8Local
 bindings:FfiPowerShell_AddStatement
 bindings:FfiPowerShell_BeginLiveInvocation
+bindings:FfiPowerShell_BeginObservedInvocation
 bindings:FfiPowerShell_BeginTypedResultInvocation
 bindings:FfiPowerShell_Clear
 bindings:FfiPowerShell_CompleteInput
@@ -79,6 +90,7 @@ facade:ctor:Devolutions.PowerShell.Ffi.PowerShellDtoContractAttribute::Void .cto
 facade:ctor:Devolutions.PowerShell.Ffi.PowerShellDtoMemberAttribute::Void .ctor(System.String)
 facade:ctor:Devolutions.PowerShell.Ffi.PowerShellLiveObject`1::Void .ctor(Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectContract, TContract)
 facade:ctor:Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPack::Void .ctor(System.String, System.String)
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions::Void .ctor(Int32, Int32, Int32, Int32)
 facade:ctor:Devolutions.PowerShell.Ffi.PowerShellResultSchema::Void .ctor(Int32, Int32, System.Collections.Generic.IEnumerable`1[Devolutions.PowerShell.Ffi.PowerShellValueKind], System.Collections.Generic.IEnumerable`1[System.String], Boolean, Boolean)
 facade:ctor:Devolutions.PowerShell.Ffi.PowerShellScriptRecipe::Void .ctor(System.String, Devolutions.PowerShell.Ffi.PowerShellResultSchema, System.Nullable`1[System.TimeSpan])
 facade:ctor:Devolutions.PowerShell.Ffi.PowerShellSessionConfiguration::Void .ctor(System.Collections.Generic.IEnumerable`1[System.Collections.Generic.KeyValuePair`2[System.String,Devolutions.PowerShell.Ffi.PowerShellValue]], System.Collections.Generic.IEnumerable`1[System.String], System.Collections.Generic.IEnumerable`1[System.String], System.String, System.Collections.Generic.IEnumerable`1[System.Collections.Generic.KeyValuePair`2[System.String,System.String]], Devolutions.PowerShell.Ffi.PowerShellSessionExecutionPolicy)
@@ -229,6 +241,7 @@ facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShellInvocationOperation BeginInvoke()
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShellInvocationResult Invoke()
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShellInvocationResult InvokeWithDiagnostics()
+facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShellObservedInvocation BeginObservedInvocation(Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions)
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShellTypedResultInvocation BeginTypedResultInvocation(Devolutions.PowerShell.Ffi.PowerShellValuePagerOptions)
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::System.String InvokeText()
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::System.Threading.Tasks.Task`1[Devolutions.PowerShell.Ffi.PowerShellInvocationResult] InvokeAsync(System.Threading.CancellationToken)
@@ -260,6 +273,10 @@ facade:method:Devolutions.PowerShell.Ffi.PowerShellInvocationOperation::Void Sto
 facade:method:Devolutions.PowerShell.Ffi.PowerShellLiveObject`1::Void Dispose()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe::Int64 Increment()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage ReadDiagnostics(UInt64, System.Nullable`1[System.Int32])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Devolutions.PowerShell.Ffi.PowerShellValuePage ReadResults(UInt64, System.Nullable`1[System.Int32])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Void Stop()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellResultSchema::Void Validate(Devolutions.PowerShell.Ffi.PowerShellInvocationResult)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShell Create()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellCapabilitySet RegisterCapabilities(System.Collections.Generic.IEnumerable`1[Devolutions.PowerShell.Ffi.PowerShellCapabilityBinding])
@@ -460,6 +477,20 @@ facade:property:Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot::UInt32 Drop
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot::UInt32 PropertyEntryCount
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot::UInt32 TypeNameCount
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot::UInt64 Sequence
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::Boolean IsComplete
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::Boolean IsTerminal
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::Devolutions.PowerShell.Ffi.PowerShellFfiStatus TerminalStatus
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticRecord] Records
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::UInt64 AcknowledgedSequence
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::UInt64 NextSequence
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::UInt64 TotalRecordCount
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticRecord::Devolutions.PowerShell.Ffi.PowerShellStreamKind Stream
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticRecord::System.String Text
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticRecord::UInt64 Sequence
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions::Int32 MaximumBufferedDiagnosticRecords
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions::Int32 MaximumBufferedResultRecords
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions::Int32 MaximumDiagnosticPageRecords
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions::Int32 MaximumResultPageRecords
 facade:property:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate::Boolean IsCompleted
 facade:property:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate::Int32 PercentComplete
 facade:property:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate::Int64 ActivityId
@@ -611,6 +642,10 @@ facade:type:Devolutions.PowerShell.Ffi.PowerShellLiveObject`1
 facade:type:Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPack
 facade:type:Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe
 facade:type:Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot
+facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage
+facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticRecord
+facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation
+facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions
 facade:type:Devolutions.PowerShell.Ffi.PowerShellOperationState
 facade:type:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate
 facade:type:Devolutions.PowerShell.Ffi.PowerShellResultSchema
@@ -668,6 +703,7 @@ native:multi_pwsh_add_parameter_value
 native:multi_pwsh_add_script_utf8
 native:multi_pwsh_add_script_utf8_local
 native:multi_pwsh_add_statement
+native:multi_pwsh_begin_observed_invocation
 native:multi_pwsh_begin_typed_result_invocation
 native:multi_pwsh_capability_register
 native:multi_pwsh_capability_release
@@ -688,6 +724,14 @@ native:multi_pwsh_invoke_utf8
 native:multi_pwsh_live_object_probe_create
 native:multi_pwsh_live_object_probe_release
 native:multi_pwsh_live_object_probe_unregister
+native:multi_pwsh_observed_diagnostic_page_copy_record_text_utf8
+native:multi_pwsh_observed_diagnostic_page_get_info
+native:multi_pwsh_observed_diagnostic_page_get_record_info
+native:multi_pwsh_observed_diagnostic_page_release
+native:multi_pwsh_observed_invocation_read_diagnostic_page
+native:multi_pwsh_observed_invocation_read_result_page
+native:multi_pwsh_observed_invocation_release
+native:multi_pwsh_observed_invocation_stop
 native:multi_pwsh_operation_get_result
 native:multi_pwsh_operation_poll
 native:multi_pwsh_operation_read_stream_batch
@@ -721,6 +765,48 @@ native:multi_pwsh_session_remove_variable
 native:multi_pwsh_session_set_live_object_contract_variable
 native:multi_pwsh_session_set_live_object_variable
 native:multi_pwsh_session_set_variable
+bindings:FfiPowerShellSession_PreflightConfigured
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellSessionPreflightReport ValidateSessionConfiguration(Devolutions.PowerShell.Ffi.PowerShellSessionConfiguration)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellSessionPreflightReport ValidateSessionConfiguration(Devolutions.PowerShell.Ffi.PowerShellSessionOptions)
+facade:type:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportDiagnostic
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportDiagnostic::System.Collections.Generic.IReadOnlyList`1[System.String] DeclaredCommands
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportDiagnostic::Boolean DeclaredCommandsTruncated
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportDiagnostic::System.String DeclaredVersion
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportDiagnostic::System.String Diagnostic
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportDiagnostic::System.String ManifestPath
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportDiagnostic::System.String ModuleImport
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportDiagnostic::System.String ResolvedPath
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportDiagnostic::Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus Status
+facade:type:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus::Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus ManifestDeclarationsUnavailable
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus::Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus ManifestDeclaresExternalPath
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus::Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus ManifestInvalid
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus::Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus ManifestUnreadable
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus::Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus Resolved
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus::Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportStatus Unresolvable
+facade:type:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootDiagnostic
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootDiagnostic::System.String CanonicalPath
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootDiagnostic::System.String Diagnostic
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootDiagnostic::System.String Path
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootDiagnostic::Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootStatus Status
+facade:type:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootStatus
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootStatus::Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootStatus Invalid
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootStatus::Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootStatus Missing
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootStatus::Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootStatus Valid
+facade:type:Devolutions.PowerShell.Ffi.PowerShellSessionPreflightReport
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionPreflightReport::System.String Diagnostic
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionPreflightReport::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellSessionModuleImportDiagnostic] ModuleImports
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionPreflightReport::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootDiagnostic] ModuleRoots
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionPreflightReport::Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus Status
+facade:type:Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus::Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus ExternalModuleDeclarations
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus::Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus InvalidConfiguration
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus::Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus InvalidModuleManifest
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus::Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus InvalidModuleRoots
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus::Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus InvalidWorkingDirectory
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus::Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus UnresolvableModuleImports
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus::Devolutions.PowerShell.Ffi.PowerShellSessionPreflightStatus Valid
+native:multi_pwsh_session_preflight
 native:multi_pwsh_set_capabilities
 native:multi_pwsh_stop
 native:multi_pwsh_typed_result_invocation_read_page
@@ -730,3 +816,91 @@ native:multi_pwsh_typed_result_page_copy_record_value
 native:multi_pwsh_typed_result_page_get_info
 native:multi_pwsh_typed_result_page_get_record_info
 native:multi_pwsh_typed_result_page_release
+facade:type:Devolutions.PowerShell.Ffi.IPowerShellStagedIntentHandler
+facade:method:Devolutions.PowerShell.Ffi.IPowerShellStagedIntentHandler::Devolutions.PowerShell.Ffi.PowerShellStagedIntentHandlerResult Invoke(Devolutions.PowerShell.Ffi.PowerShellStagedIntentInvocation)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellStagedIntentCoordinator RegisterStagedIntents(System.Collections.Generic.IEnumerable`1[Devolutions.PowerShell.Ffi.PowerShellStagedIntentDefinition])
+facade:type:Devolutions.PowerShell.Ffi.PowerShellStagedIntent
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntent::System.DateTimeOffset ExpiresAt
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntent::Devolutions.PowerShell.Ffi.PowerShellValue Intent
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntent::System.String OperationName
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntent::System.String StageIdentifier
+facade:type:Devolutions.PowerShell.Ffi.PowerShellStagedIntentCoordinator
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentCoordinator::Devolutions.PowerShell.Ffi.PowerShellCapabilitySet Capabilities
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentCoordinator::System.Collections.Generic.IReadOnlyCollection`1[Devolutions.PowerShell.Ffi.PowerShellStagedIntentDefinition] Definitions
+facade:method:Devolutions.PowerShell.Ffi.PowerShellStagedIntentCoordinator::Devolutions.PowerShell.Ffi.PowerShellStagedIntentCoordinator Register(System.Collections.Generic.IEnumerable`1[Devolutions.PowerShell.Ffi.PowerShellStagedIntentDefinition])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellStagedIntentCoordinator::Void Dispose()
+facade:type:Devolutions.PowerShell.Ffi.PowerShellStagedIntentDefinition
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellStagedIntentDefinition::Void .ctor(System.String, Devolutions.PowerShell.Ffi.PowerShellStagedIntentSchema, Devolutions.PowerShell.Ffi.IPowerShellStagedIntentHandler, System.TimeSpan)
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentDefinition::System.TimeSpan Deadline
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentDefinition::Devolutions.PowerShell.Ffi.IPowerShellStagedIntentHandler Handler
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentDefinition::System.String OperationName
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentDefinition::Devolutions.PowerShell.Ffi.PowerShellStagedIntentSchema Schema
+facade:type:Devolutions.PowerShell.Ffi.PowerShellStagedIntentHandlerResult
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentHandlerResult::Boolean IsAccepted
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentHandlerResult::System.String Message
+facade:method:Devolutions.PowerShell.Ffi.PowerShellStagedIntentHandlerResult::Devolutions.PowerShell.Ffi.PowerShellStagedIntentHandlerResult Accept(System.String)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellStagedIntentHandlerResult::Devolutions.PowerShell.Ffi.PowerShellStagedIntentHandlerResult Reject(System.String)
+facade:type:Devolutions.PowerShell.Ffi.PowerShellStagedIntentInvocation
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentInvocation::System.Threading.CancellationToken CancellationToken
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentInvocation::Devolutions.PowerShell.Ffi.PowerShellStagedIntent Intent
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentInvocation::Devolutions.PowerShell.Ffi.PowerShellStagedIntentOperation Operation
+facade:type:Devolutions.PowerShell.Ffi.PowerShellStagedIntentOperation
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentOperation::Devolutions.PowerShell.Ffi.PowerShellStagedIntentOperation Abort
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentOperation::Devolutions.PowerShell.Ffi.PowerShellStagedIntentOperation Commit
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentOperation::Devolutions.PowerShell.Ffi.PowerShellStagedIntentOperation Stage
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentOperation::Devolutions.PowerShell.Ffi.PowerShellStagedIntentOperation Validate
+facade:type:Devolutions.PowerShell.Ffi.PowerShellStagedIntentProperty
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellStagedIntentProperty::Void .ctor(System.String, System.Collections.Generic.IEnumerable`1[Devolutions.PowerShell.Ffi.PowerShellValueKind], Boolean)
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentProperty::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellValueKind] AllowedKinds
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentProperty::Boolean IsRequired
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentProperty::System.String Name
+facade:type:Devolutions.PowerShell.Ffi.PowerShellStagedIntentResult
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentResult::System.Nullable`1[System.DateTimeOffset] ExpiresAt
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentResult::System.String Message
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentResult::Devolutions.PowerShell.Ffi.PowerShellStagedIntentOperation Operation
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentResult::System.String StageIdentifier
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentResult::Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus Status
+facade:type:Devolutions.PowerShell.Ffi.PowerShellStagedIntentSchema
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellStagedIntentSchema::Void .ctor(System.Collections.Generic.IEnumerable`1[Devolutions.PowerShell.Ffi.PowerShellStagedIntentProperty], Int32)
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentSchema::Int32 MaximumPayloadBytes
+facade:property:Devolutions.PowerShell.Ffi.PowerShellStagedIntentSchema::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellStagedIntentProperty] Properties
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentSchema::Int32 MaximumIntentPayloadBytes
+facade:type:Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus::Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus Aborted
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus::Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus Busy
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus::Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus Cancelled
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus::Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus Committed
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus::Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus Expired
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus::Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus Rejected
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus::Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus Staged
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus::Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus Terminal
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus::Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus UnknownStage
+facade:field:Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus::Devolutions.PowerShell.Ffi.PowerShellStagedIntentStatus Validated
+bindings:FfiRuntimeDiagnostics_CopyPowerShellFileVersionUtf8
+facade:field:Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjectionFailure::Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjectionFailure IncompleteOrTruncated
+facade:field:Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjectionFailure::Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjectionFailure MapperFailure
+facade:field:Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjectionFailure::Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjectionFailure MultipleResults
+facade:field:Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjectionFailure::Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjectionFailure ZeroResults
+facade:field:Devolutions.PowerShell.Ffi.PowerShellPayloadTableShape::Devolutions.PowerShell.Ffi.PowerShellPayloadTableShape V1
+facade:method:Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjection::TDto Read[TDto](Devolutions.PowerShell.Ffi.PowerShellInvocationResult, System.Func`2[Devolutions.PowerShell.Ffi.PowerShellValue,TDto])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjection::TDto Read[TDto](System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellValuePage], System.Func`2[Devolutions.PowerShell.Ffi.PowerShellValue,TDto])
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjectionException::Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjectionFailure Failure
+facade:property:Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPackIdentity::System.String PayloadAdapterTypeName
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellRuntimeDiagnosticReport Diagnostics
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntimeDiagnosticReport::Devolutions.PowerShell.Ffi.PowerShellPayloadTableShape PayloadTableShape
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntimeDiagnosticReport::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPackIdentity] RegisteredLiveObjectContractPacks
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntimeDiagnosticReport::System.String PayloadDirectory
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntimeDiagnosticReport::System.String PowerShellFileVersion
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntimeDiagnosticReport::UInt32 BindingsAbiVersion
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntimeDiagnosticReport::UInt32 PayloadTableSlotCount
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntimeDiagnosticReport::UInt64 FeatureFlags
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRuntimeDiagnosticReport::UIntPtr PayloadTableSize
+facade:type:Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjection
+facade:type:Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjectionException
+facade:type:Devolutions.PowerShell.Ffi.PowerShellCompleteResultProjectionFailure
+facade:type:Devolutions.PowerShell.Ffi.PowerShellLiveObjectContractPackIdentity
+facade:type:Devolutions.PowerShell.Ffi.PowerShellPayloadTableShape
+facade:type:Devolutions.PowerShell.Ffi.PowerShellRuntimeDiagnosticReport
+native:multi_pwsh_copy_runtime_diagnostics_contract_pack_identity_utf8
+native:multi_pwsh_copy_runtime_diagnostics_power_shell_file_version_utf8
+native:multi_pwsh_get_runtime_diagnostics_info

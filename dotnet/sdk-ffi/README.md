@@ -154,6 +154,16 @@ exception. This is an application DTO mapper, not a serializer for arbitrary
 CLR graphs, PowerShell objects, credentials, callbacks, or live-object
 contracts.
 
+`PowerShellCompleteResultProjection.Read` connects an already completed
+`PowerShellInvocationResult`, or the full ordered typed/observed result-page
+sequence, to one application-selected generated mapper. Pass that mapper
+explicitly (for example, `MyDtoPowerShellDtoProjection.Read`). It requires
+exactly one copied result and rejects zero or multiple results,
+incomplete/truncated/dropped page sequences, and mapper failures with
+distinguishable `PowerShellCompleteResultProjectionFailure` values. It neither
+invokes PowerShell nor performs reflection, object serialization, or arbitrary
+`PSObject`/CLR transfer.
+
 `PowerShellValuePager` is the reusable bounded acknowledgement state machine
 for copied result values. Its caller-configured record and page bounds apply
 backpressure to writers, and its pages expose ordered sequences plus an
@@ -176,6 +186,17 @@ metadata. Outputs that cannot be represented losslessly as a documented tagged
 value terminate the typed operation with `UnsupportedValue` rather than being
 converted to text or silently omitted.
 
+`BeginObservedInvocation(options)` runs one pipeline with two independently
+acknowledged bounded channels: `ReadResults` returns copied typed
+`PowerShellValue` records and `ReadDiagnostics` returns lossless copied text
+records for output, error, warning, verbose, debug, information, and progress.
+Both buffers apply producer backpressure; neither drops records to make room.
+Terminal success is reported only after both channels have reached successful
+terminal states and every record in each has been acknowledged. Cancellation,
+disposal, encoding failure, and any terminal failure are incomplete. This is a
+single execution, not a pairing of separate result and diagnostic invocations,
+and it never exposes SMA objects or callbacks.
+
 `PowerShellRuntime.CreateSession(PowerShellSessionOptions)` creates a separate,
 reusable local-runspace session. `PowerShellSessionConfiguration` supplies
 copied tagged initial variables, module imports/paths, a working directory,
@@ -189,6 +210,28 @@ state records and report truncation. A session is not a pool. Normal pipeline
 execution and builder mutation, including calls through independent sessions,
 are process-globally serialized; only `Stop`/cancellation can run concurrently
 with an active pipeline.
+
+`ValidateSessionConfiguration` preflights the same module-root and import
+resolution rules without creating a runspace, importing a module, or executing
+PowerShell/module code. Its immutable copied report identifies invalid or
+missing roots, unresolvable imports, and invalid/unreadable manifests. For
+static manifests it reports a bounded declared version and up to four bounded
+declared commands; declaration extraction is informational and is not module
+authorization or execution.
+
+`PowerShellRuntime.Diagnostics` is an immutable, descriptive deployment report.
+It exposes the canonical active payload directory, an explicitly nullable
+PowerShell file version, payload binding-table V1 size/slot/ABI facts, negotiated
+feature flags, and registered contract-pack adapter type names. It does not
+return environment data, user or machine identity beyond the canonicalized
+payload path, assembly paths, hashes, integrity/attestation claims,
+deployment-policy verdicts, or payload objects; the report does not change
+runtime state. The payload directory is the runtime's canonicalized active
+payload directory, not a verbatim echo of an activation argument: on Windows it
+is an extended-length `\\?\` path, and `PATH`-based activation resolves it at
+runtime. Do not compare it against an input string, and redact it before
+writing the report to shared logs or external telemetry.
+
 `CreateSessionPool` is an intentional rejection boundary: it validates a
 maximum bound of 1–64 sessions then returns
 `UnsupportedCapability`, rather than faking concurrent pool behavior.
@@ -243,6 +286,32 @@ register their own handlers.
 `PowerShellHostInteraction.ParseProgressUpdate` validates an explicit copied
 `host.report-progress` property bag (including ID and range fields), rather
 than inferring progress from stream display text.
+
+`PowerShellStagedIntentCoordinator` builds a generic four-operation lifecycle
+on the same bounded capability dispatcher; it does not introduce another
+callback or object bridge. A `PowerShellStagedIntentDefinition` has a canonical
+operation name, copied property-bag schema, application handler, and stage
+deadline. It exposes `<operation>.stage`, `.validate`, `.commit`, and `.abort`.
+Stage accepts `{ stageId, intent }`; the caller-supplied `stageId` is opaque,
+bounded, and unique while retained. The other operations accept that identifier.
+Each response has copied `operation`, `status`, `stageId`, `expiresAt`, and
+`message` fields. Statuses explicitly distinguish staged, validated, committed,
+aborted, rejected, unknown, expired, terminal, cancelled, and busy states.
+
+The coordinator validates the envelope, schema, and bounds before the
+application handler runs; it rejects duplicate, expired, unknown, and
+terminal stages, retains at most 64 active stages, and clears stages on their
+deadline, cancellation, or disposal. Each retained stage has at most one
+terminal transition: commit or abort; expiry, cancellation, and disposal abort
+the coordinator's retained state. After that state is released, the coordinator
+best-effort delivers `Abort` to the application handler so it can release its
+own retained data. This notification is outside the coordinator lock, ignores
+handler failures, carries no rollback guarantee, and requires an idempotent
+handler. A `committed` status means only that the
+host accepted the intent. It is not a cross-resource transaction, has no
+rollback guarantee, and does not prove a side effect occurred. Applications
+own authorization, review UI, persistence, actual effects, and compensating
+action. Do not put secrets in staged `PowerShellValue` data.
 
 Raw ABI releases consume their handles, so a repeated raw release or later use
 returns `InvalidHandle`. Public `Dispose` methods are idempotent; their

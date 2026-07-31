@@ -26,8 +26,9 @@ mod pdcstring;
 
 pub use bindings::{
     FfiBindingError, FfiInvocationResult, FfiLiveInvocation, FfiLiveObjectContractDescriptor, FfiLiveStreamBatch,
-    FfiLiveStreamRecord, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue,
-    FfiTypedResultInvocation, FfiTypedResultPage, FfiTypedResultRecord, PowerShell,
+    FfiLiveStreamRecord, FfiObservedDiagnosticPage, FfiObservedDiagnosticRecord, FfiObservedInvocation,
+    FfiPayloadRuntimeDiagnostics, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot,
+    FfiSnapshotValue, FfiTypedResultInvocation, FfiTypedResultPage, FfiTypedResultRecord, PowerShell,
 };
 pub use host_detect::find_pwsh_dir;
 pub use loader::{get_assembly_delegate_loader_for_pwsh_dir, HostedRuntime, LiveObjectContractPack};
