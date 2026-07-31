@@ -162,6 +162,9 @@ A session-affine dispatcher is required before supporting that category.
 - The public native ABI remains v2. `ReadStreamBatch` is enabled only when the
   `LIVE_STREAM_POLLING` feature bit is present, so consumers can reject a native
   asset that lacks polling before calling its additive export.
+- The managed payload and Rust host use one jointly shipped **V1 payload binding
+  table**. It includes the core, live-stream, and typed-result slots. This is
+  separate from the public native ABI, which remains v2.
 - The supported ABI uses sized, caller-owned `multi_pwsh_call_result` structures. Each operation
   returns its own bounded UTF-8 diagnostic and truncation metadata, so concurrent
   calls never read a process-global error slot. `multi_pwsh_utf8_span` permits
@@ -279,6 +282,25 @@ before completing the task as cancelled; it never abandons or prematurely
 releases the operation handle. The facade uses `LibraryImport` and
 `SafeHandle` leases only—no SMA objects, native callbacks, or collectible
 managed delegates cross the boundary.
+
+### Typed result paging
+
+`PowerShell.BeginTypedResultInvocation(options)` is the lossless result-data
+counterpart to live stream polling. It is part of the required V1 payload
+binding table; the public native ABI remains v2. The caller chooses bounded
+record and page limits (1 through 64), then calls
+`Read(acknowledgedThrough, maximumRecords)`. Supplying a newer cursor
+explicitly acknowledges the previous page and releases its records; re-reading
+an earlier cursor does not acknowledge or discard anything.
+
+The payload producer blocks when the bounded queue is full. It never drops
+values to make room, and it returns `UnsupportedValue` when output cannot be
+represented as a documented tagged value rather than converting it to display
+text. Terminal pages carry cancellation, truncation, dropped-record, and
+completion state. `IsComplete` is true only after successful completion and
+acknowledgement of every produced record. This remains copied data only:
+arrays and property bags are bounded `PowerShellValue` values, never `PSObject`
+or arbitrary CLR-object transfer.
 
 ### Sessions, bounded settings, and polling
 
@@ -795,7 +817,9 @@ PowerShell payload and any selected modules separately. The application must not
 transitive `System.Management.Automation`, `Microsoft.PowerShell.SDK`, or
 payload runtime asset to the NativeAOT facade path. Activation reports a
 deterministic incompatibility if another selected payload/runtime already owns
-the process.
+the process. Structural payload checks ensure only that required host files
+exist; they do not attest to payload provenance, integrity, module manifests,
+or application deployment policy. Those remain application responsibilities.
 
 `win-arm64`, Linux, and macOS have packaged native assets but remain unvalidated
 for payload activation and must not be advertised as supported until each has a
@@ -839,8 +863,15 @@ dotnet publish dotnet/nativeaot-sample/NativeAotFfiSample.csproj -c Release
 ./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe
 # Or select a payload explicitly:
 ./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe <payload>
+
+dotnet pack dotnet/sdk-ffi/Devolutions.MultiPwsh.Sdk.csproj -c Release -o artifacts/sdk-nuget
+pwsh -NoLogo -NoProfile -File tests/Test-PwshFfiPackage.ps1 `
+    -PackageSource artifacts/sdk-nuget `
+    -PowerShellPayloadDirectory $env:PWSH_FFI_PAYLOAD
 ```
 
 The ignored Rust test and NativeAOT sample require a real payload root containing
 `pwsh.dll`, `pwsh.runtimeconfig.json`, and
-`System.Management.Automation.dll`.
+`System.Management.Automation.dll`. The packaged Win-x64 consumer requires a
+PowerShell 7.4 payload and verifies typed-result paging through the managed
+facade, native host, and required V1 payload binding table.

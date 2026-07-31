@@ -78,13 +78,11 @@ wrappers over the single broker interface. The host must continue to end the
 lease authoritatively; generated root disposal never releases a lease held by
 potentially retained child wrappers.
 
-The facade requires native ABI v2. `ReadStreamBatch` is independently gated by
-the `LIVE_STREAM_POLLING` feature bit, so a native asset that lacks polling
-returns `UnsupportedCapability` before its additive export is called. Use
-matching 0.17.0 package and native assets to enable polling. Its `SafeHandle`
-wrapper keeps a native handle alive for each P/Invoke call, including concurrent
-disposal races. Empty strings are valid UTF-8 inputs; embedded NUL characters
-are rejected.
+The facade requires native ABI v2. The jointly shipped V1 payload binding table
+includes both `ReadStreamBatch` and typed-result paging; use matching package,
+native asset, and managed payload bindings. Its `SafeHandle` wrapper keeps a
+native handle alive for each P/Invoke call, including concurrent disposal races.
+Empty strings are valid UTF-8 inputs; embedded NUL characters are rejected.
 
 `PowerShellValue` is the only way to pass non-string values. It supports
 bounded primitive values, bytes, arrays, and property bags that become copied
@@ -168,17 +166,15 @@ are never silently complete. This primitive is deliberately distinct from
 typed data feed, and it never exposes SMA values or unbounded retention.
 
 `BeginTypedResultInvocation(options)` connects that acknowledgement model to
-an invocation's output through the additive `TYPED_RESULT_PAGING` native
-feature. `Read(acknowledgedThrough, maximumRecords)` acknowledges the prior
-page and returns only copied `PowerShellValue` records (including bounded
-arrays and property bags), never SMA objects, `PSObject`, or display text.
-The configured buffer is a hard producer backpressure limit; values are not
-dropped to make room. Each page reports total, dropped, truncation, terminal,
-and completeness metadata. Outputs that cannot be represented losslessly as a
-documented tagged value terminate the typed operation with `UnsupportedValue`
-rather than being converted to text or silently omitted. Older native assets
-are rejected with `UnsupportedCapability` before the additive exports are
-called.
+an invocation's output through the required V1 payload binding table.
+`Read(acknowledgedThrough, maximumRecords)` acknowledges the prior page and
+returns only copied `PowerShellValue` records (including bounded arrays and
+property bags), never SMA objects, `PSObject`, or display text. The configured
+buffer is a hard producer backpressure limit; values are not dropped to make
+room. Each page reports total, dropped, truncation, terminal, and completeness
+metadata. Outputs that cannot be represented losslessly as a documented tagged
+value terminate the typed operation with `UnsupportedValue` rather than being
+converted to text or silently omitted.
 
 `PowerShellRuntime.CreateSession(PowerShellSessionOptions)` creates a separate,
 reusable local-runspace session. `PowerShellSessionConfiguration` supplies

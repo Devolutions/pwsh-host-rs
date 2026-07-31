@@ -114,6 +114,7 @@ internal unsafe sealed class FfiLiveObjectContractPackRegistry
         }
 
         var additions = new Dictionary<PowerShellLiveObjectContract, Registration>();
+        var interfaceIds = new HashSet<Guid>();
         for (uint packIndex = 0; packIndex < apiCount; packIndex++)
         {
             IntPtr apiPointer = apiPointers[packIndex];
@@ -140,11 +141,23 @@ internal unsafe sealed class FfiLiveObjectContractPackRegistry
             {
                 PowerShellLiveObjectContract contract =
                     PowerShellLiveObjectContract.FromNative(api.Contracts[contractIndex]);
-                if ((contract.Directions & PowerShellLiveObjectDirection.ConsumerToSession) == 0 ||
-                    !additions.TryAdd(contract, Registration.CreateExternal(create, release)))
-                {
-                    throw new InvalidOperationException("Live object contract pack contains duplicate or unsupported contracts.");
-                }
+                                if ((contract.Directions & PowerShellLiveObjectDirection.ConsumerToSession) == 0)
+                                {
+                                    throw new InvalidOperationException(
+                                        "Live object contract packs contain a contract with an unsupported direction.");
+                                }
+
+                                if (!interfaceIds.Add(contract.InterfaceId))
+                                {
+                                    throw new InvalidOperationException(
+                                        "Live object contract packs contain duplicate interface identifiers.");
+                                }
+
+                                if (!additions.TryAdd(contract, Registration.CreateExternal(create, release)))
+                                {
+                                    throw new InvalidOperationException(
+                                        "Live object contract packs contain incompatible interface identifiers.");
+                                }
             }
         }
 
@@ -152,9 +165,13 @@ internal unsafe sealed class FfiLiveObjectContractPackRegistry
         {
             foreach (PowerShellLiveObjectContract contract in additions.Keys)
             {
-                if (registrations.ContainsKey(contract))
+                foreach (PowerShellLiveObjectContract existing in registrations.Keys)
                 {
-                    throw new InvalidOperationException("A live object contract has already been registered.");
+                    if (existing.InterfaceId == contract.InterfaceId)
+                    {
+                        throw new InvalidOperationException(
+                            "A live object contract interface identifier has already been registered.");
+                    }
                 }
             }
 

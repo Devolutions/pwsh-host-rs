@@ -30,11 +30,16 @@
     <PwshFfiNativeLibrary>$(RepositoryRoot)\target\release\multi_pwsh_sdk.dll</PwshFfiNativeLibrary>
     <LiveObjectTestPackProject>$(MSBuildThisFileDirectory)..\live-object-test-pack\LiveObjectTestPack.csproj</LiveObjectTestPackProject>
     <LiveObjectTestPackAssembly>$(MSBuildThisFileDirectory)..\live-object-test-pack\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.LiveObject.TestPack.dll</LiveObjectTestPackAssembly>
+    <IncompatibleLiveObjectTestPackProject>$(MSBuildThisFileDirectory)..\live-object-incompatible-test-pack\Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.csproj</IncompatibleLiveObjectTestPackProject>
+    <IncompatibleLiveObjectTestPackAssembly>$(MSBuildThisFileDirectory)..\live-object-incompatible-test-pack\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.dll</IncompatibleLiveObjectTestPackAssembly>
   </PropertyGroup>
 
   <Target Name="BuildAndStagePwshFfiNativeLibrary" BeforeTargets="Publish">
     <Exec Command="cargo build --release -p pwsh-sdk-ffi" WorkingDirectory="$(RepositoryRoot)" />
     <MSBuild Projects="$(LiveObjectTestPackProject)"
+             Targets="Restore;Build"
+             Properties="Configuration=$(Configuration)" />
+    <MSBuild Projects="$(IncompatibleLiveObjectTestPackProject)"
              Targets="Restore;Build"
              Properties="Configuration=$(Configuration)" />
   </Target>
@@ -43,5 +48,7 @@
     <Copy SourceFiles="$(PwshFfiNativeLibrary)" DestinationFiles="$(PublishDir)multi-pwsh-sdk.dll" />
     <Copy SourceFiles="$(LiveObjectTestPackAssembly)"
           DestinationFiles="$(PublishDir)Devolutions.MultiPwsh.LiveObject.TestPack.dll" />
+    <Copy SourceFiles="$(IncompatibleLiveObjectTestPackAssembly)"
+          DestinationFiles="$(PublishDir)Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.dll" />
   </Target>
 </Project>

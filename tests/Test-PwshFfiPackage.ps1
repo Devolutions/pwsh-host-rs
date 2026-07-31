@@ -33,6 +33,43 @@ function Get-MultiPwshVersion {
     return $match.Matches[0].Groups[1].Value
 }
 
+function Assert-RestoredPackageMatchesInspectedNupkg {
+    param(
+        [Parameter(Mandatory)][string]$NugetCache,
+        [Parameter(Mandatory)][string]$PackageId,
+        [Parameter(Mandatory)][string]$PackageVersion,
+        [Parameter(Mandatory)][string]$InspectedPackagePath
+    )
+
+    $restoredRoot = Join-Path $NugetCache ("{0}\{1}" -f $PackageId.ToLowerInvariant(), $PackageVersion)
+    if (-not (Test-Path -LiteralPath $restoredRoot -PathType Container)) {
+        throw "Restore did not install $PackageId $PackageVersion into the isolated NuGet cache at $restoredRoot."
+    }
+
+    $expectedHash = (Get-FileHash -Algorithm SHA512 -LiteralPath $InspectedPackagePath).Hash
+    $shaFile = Join-Path $restoredRoot "$PackageId.$PackageVersion.nupkg.sha512"
+    if (Test-Path -LiteralPath $shaFile -PathType Leaf) {
+        $actualBase64 = (Get-Content -LiteralPath $shaFile -Raw).Trim()
+        $actualBytes = [Convert]::FromBase64String($actualBase64)
+        $actualHash = [BitConverter]::ToString($actualBytes).Replace('-', '')
+        if (-not $actualHash.Equals($expectedHash, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Restored $PackageId $PackageVersion does not match the inspected local nupkg hash."
+        }
+
+        return
+    }
+
+    $restoredNupkg = Join-Path $restoredRoot "$PackageId.$PackageVersion.nupkg"
+    if (-not (Test-Path -LiteralPath $restoredNupkg -PathType Leaf)) {
+        throw "Restore did not materialize $PackageId $PackageVersion nupkg metadata for hash verification."
+    }
+
+    $actualHash = (Get-FileHash -Algorithm SHA512 -LiteralPath $restoredNupkg).Hash
+    if (-not $actualHash.Equals($expectedHash, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Restored $PackageId $PackageVersion does not match the inspected local nupkg hash."
+    }
+}
+
 $multiPwshVersion = Get-MultiPwshVersion
 $sdkNativeAssets = @{
     'win-x64' = 'multi-pwsh-sdk.dll'
@@ -73,8 +110,15 @@ function Resolve-PowerShellPayloadDirectory {
 
     $resolved = (Resolve-Path $Path).Path
     if (-not (Test-Path (Join-Path $resolved 'pwsh.dll') -PathType Leaf) -or
-        -not (Test-Path (Join-Path $resolved 'pwsh.runtimeconfig.json') -PathType Leaf)) {
-        throw "The PowerShell payload is missing pwsh.dll or pwsh.runtimeconfig.json: $resolved"
+        -not (Test-Path (Join-Path $resolved 'pwsh.runtimeconfig.json') -PathType Leaf) -or
+        -not (Test-Path (Join-Path $resolved 'System.Management.Automation.dll') -PathType Leaf) -or
+        -not (Test-Path (Join-Path $resolved 'pwsh.exe') -PathType Leaf)) {
+        throw "The PowerShell payload is missing pwsh.dll, pwsh.runtimeconfig.json, System.Management.Automation.dll, or pwsh.exe: $resolved"
+    }
+
+    $version = & (Join-Path $resolved 'pwsh.exe') -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+    if ($LASTEXITCODE -ne 0 -or $version -notmatch '^7\.4\.') {
+        throw "The FFI package smoke requires a PowerShell 7.4 payload, but '$resolved' reported '$version'."
     }
 
     return $resolved
@@ -151,13 +195,22 @@ finally {
 }
 
 $payloadDirectory = Resolve-PowerShellPayloadDirectory -Path $PowerShellPayloadDirectory
-$workspace = Join-Path (Join-Path $repoRoot 'artifacts') "ffi-package-smoke-$([guid]::NewGuid().ToString('N'))"
-$nugetCache = Join-Path $workspace 'nuget-cache'
+$smokeId = [guid]::NewGuid().ToString('N')
+$workspace = Join-Path (Join-Path $repoRoot 'artifacts') "ffi-package-smoke-$smokeId"
+# Keep the isolated package cache on a short path so NativeAOT link inputs stay well
+# under legacy MAX_PATH limits while still excluding every fallback folder.
+$nugetCache = Join-Path ([System.IO.Path]::GetTempPath()) "mpwsh-nupkg-$smokeId"
 $oldNugetPackages = $env:NUGET_PACKAGES
+$oldNugetFallbackPackages = $env:NUGET_FALLBACK_PACKAGES
 $env:NUGET_PACKAGES = $nugetCache
+# Do not point fallback folders at the user global cache: a pre-existing
+# Devolutions.MultiPwsh.Sdk/<version> copy there would satisfy restore without
+# exercising the inspected local nupkg.
+$env:NUGET_FALLBACK_PACKAGES = ''
 
 try {
     New-Item -Path $nugetCache -ItemType Directory -Force | Out-Null
+    New-Item -Path $workspace -ItemType Directory -Force | Out-Null
     $nugetConfig = Join-Path $workspace 'NuGet.Config'
     @"
 <?xml version="1.0" encoding="utf-8"?>
@@ -188,6 +241,7 @@ try {
     'using System; Console.WriteLine("inert");' | Set-Content -Path (Join-Path $inertProjectDirectory 'Program.cs') -Encoding utf8
 
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $inertProject, '--configfile', $nugetConfig)
+    Assert-RestoredPackageMatchesInspectedNupkg -NugetCache $nugetCache -PackageId $packageId -PackageVersion $PackageVersion -InspectedPackagePath $package.FullName
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('build', $inertProject, '--no-restore', '-c', $Configuration)
     $inertNativeAsset = Join-Path $inertProjectDirectory "bin\$Configuration\net10.0\win-x64\multi-pwsh-sdk.dll"
     if (Test-Path $inertNativeAsset -PathType Leaf) {
@@ -581,6 +635,270 @@ async Task VerifySafeHandleDisposeRacesAsync()
     }
 }
 
+PowerShellValuePage WaitForTypedPage(
+    PowerShellTypedResultInvocation invocation,
+    ulong acknowledgedThrough,
+    int maximumRecords,
+    Func<PowerShellValuePage, bool> predicate,
+    string description)
+{
+    DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+    while (DateTime.UtcNow < deadline)
+    {
+        PowerShellValuePage page = invocation.Read(acknowledgedThrough, maximumRecords);
+        if (predicate(page))
+        {
+            return page;
+        }
+
+        Thread.Sleep(10);
+    }
+
+    throw new TimeoutException("Timed out waiting for " + description + ".");
+}
+
+PowerShell CreatePowerShellWhenAvailable(PowerShellRuntime runtime, string description)
+{
+    DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+    while (DateTime.UtcNow < deadline)
+    {
+        try
+        {
+            return runtime.Create();
+        }
+        catch (PowerShellFfiException exception)
+            when (exception.Status == PowerShellFfiStatus.Backpressure)
+        {
+            Thread.Sleep(10);
+        }
+    }
+
+    throw new TimeoutException("Timed out waiting for the typed result pipeline to release " + description + ".");
+}
+
+async Task VerifyTypedResultPagingAsync(PowerShellRuntime runtime)
+{
+    Require(
+        (runtime.FeatureFlags & (1UL << 21)) != 0,
+        "The packaged NativeAOT consumer did not negotiate typed result paging.");
+
+    using (PowerShell builder = CreatePowerShellWhenAvailable(runtime, "the first typed result builder"))
+    using (PowerShellTypedResultInvocation invocation = builder
+        .AddScript("1, 2, [pscustomobject]@{ Name = 'third'; Count = 3 }")
+        .BeginTypedResultInvocation(new PowerShellValuePagerOptions(
+            maximumBufferedRecords: 2,
+            maximumPageRecords: 2)))
+    {
+        PowerShellValuePage firstPage = WaitForTypedPage(
+            invocation,
+            acknowledgedThrough: 0,
+            maximumRecords: 2,
+            page => page.Records.Count == 2,
+            "the backpressure-limited first typed result page");
+        Require(
+            !firstPage.IsTerminal &&
+            firstPage.TotalRecordCount == 2 &&
+            firstPage.NextSequence == 2 &&
+            firstPage.Records[0].Value.TryGetSignedInteger(out long firstValue) &&
+            firstValue == 1 &&
+            firstPage.Records[1].Value.TryGetSignedInteger(out long secondValue) &&
+            secondValue == 2,
+            "Typed result paging did not retain the first bounded page before acknowledgement.");
+
+        PowerShellValuePage replayPage = invocation.Read(acknowledgedThrough: 0, maximumRecords: 2);
+        Require(
+            replayPage.AcknowledgedSequence == 0 &&
+            replayPage.Records.Select(record => record.Sequence).SequenceEqual(firstPage.Records.Select(record => record.Sequence)),
+            "Typed result paging implicitly acknowledged records without the caller cursor.");
+
+        PowerShellValuePage secondPage = WaitForTypedPage(
+            invocation,
+            acknowledgedThrough: firstPage.NextSequence,
+            maximumRecords: 1,
+            page => page.Records.Count == 1,
+            "the record released by typed result acknowledgement");
+        Require(
+            secondPage.AcknowledgedSequence == firstPage.NextSequence &&
+            secondPage.TotalRecordCount == 3 &&
+            secondPage.Records[0].Value.TryGetProperty("Name", out PowerShellValue? name) &&
+            name!.TryGetString(out string? nameText) &&
+            nameText == "third" &&
+            secondPage.Records[0].Value.TryGetProperty("Count", out PowerShellValue? count) &&
+            count!.TryGetSignedInteger(out long countValue) &&
+            countValue == 3,
+            "Acknowledging the first typed page did not release the blocked copied property-bag result.");
+
+        PowerShellValuePage completePage = WaitForTypedPage(
+            invocation,
+            acknowledgedThrough: secondPage.NextSequence,
+            maximumRecords: 1,
+            page => page.IsTerminal,
+            "typed result completion");
+        Require(
+            completePage.IsComplete &&
+            completePage.TerminalStatus == PowerShellFfiStatus.Success &&
+            completePage.TotalRecordCount == 3 &&
+            completePage.DroppedRecordCount == 0 &&
+            !completePage.IsTruncated,
+            "Typed result paging did not report fully acknowledged success.");
+    }
+
+    using (PowerShell unsupportedBuilder = CreatePowerShellWhenAvailable(runtime, "the unsupported result builder"))
+    using (PowerShellTypedResultInvocation unsupportedInvocation = unsupportedBuilder
+        .AddScript("Write-Output -NoEnumerate ([version]'1.2.3.4')")
+        .BeginTypedResultInvocation())
+    {
+        PowerShellValuePage unsupportedPage = WaitForTypedPage(
+            unsupportedInvocation,
+            acknowledgedThrough: 0,
+            maximumRecords: 1,
+            page => page.IsTerminal,
+            "an unsupported typed result terminal state");
+        Require(
+            unsupportedPage.TerminalStatus == PowerShellFfiStatus.UnsupportedValue &&
+            !unsupportedPage.IsComplete &&
+            unsupportedPage.Records.Count == 0,
+            "Unsupported typed PowerShell output was not surfaced as UnsupportedValue.");
+    }
+
+    using (PowerShell cancellationBuilder = CreatePowerShellWhenAvailable(runtime, "the cancellation builder"))
+    using (PowerShellTypedResultInvocation cancellationInvocation = cancellationBuilder
+        .AddScript("Start-Sleep -Seconds 5; 'must-not-complete'")
+        .BeginTypedResultInvocation())
+    {
+        Thread.Sleep(50);
+        cancellationInvocation.Stop();
+        cancellationInvocation.Stop();
+        PowerShellValuePage cancelledPage = WaitForTypedPage(
+            cancellationInvocation,
+            acknowledgedThrough: 0,
+            maximumRecords: 1,
+            page => page.IsTerminal,
+            "typed result cancellation");
+        Require(
+            cancelledPage.TerminalStatus == PowerShellFfiStatus.OperationCancelled &&
+            !cancelledPage.IsComplete,
+            "Stopping a typed result invocation did not produce the cancelled terminal state.");
+    }
+
+    for (int iteration = 0; iteration < 4; iteration++)
+    {
+        PowerShell lifecycleBuilder = CreatePowerShellWhenAvailable(runtime, "the lifecycle race builder")
+            .AddScript("Start-Sleep -Milliseconds 150; 'typed-safe-handle-lease'");
+        PowerShellTypedResultInvocation lifecycleInvocation = lifecycleBuilder.BeginTypedResultInvocation();
+        using var readStarted = new ManualResetEventSlim(false);
+        Task reader = Task.Run(() =>
+        {
+            readStarted.Set();
+            try
+            {
+                for (int read = 0; read < 32; read++)
+                {
+                    _ = lifecycleInvocation.Read(0, 1);
+                    Thread.Sleep(1);
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        });
+        Task disposer = Task.Run(() =>
+        {
+            readStarted.Wait();
+            Thread.Sleep(5);
+            lifecycleInvocation.Dispose();
+            lifecycleInvocation.Dispose();
+        });
+        await Task.WhenAll(reader, disposer).WaitAsync(TimeSpan.FromSeconds(10));
+        lifecycleBuilder.Dispose();
+    }
+
+    using PowerShell availabilityCheck = CreatePowerShellWhenAvailable(runtime, "subsequent facade calls");
+}
+
+void VerifyTransactionAndHostCapabilities(PowerShellSession session)
+{
+    var stagedIntent = new StagedIntentCapability();
+    var hostInteractions = new HostInteractionCapability();
+    PowerShellCapabilityDefinition stageIntentDefinition = new(
+        "example.stage-intent",
+        [new PowerShellCapabilityArgumentSchema([PowerShellValueKind.PropertyBag])],
+        [PowerShellValueKind.Null],
+        PowerShellCapabilityPermission.Write,
+        maximumInputBytes: 4096,
+        maximumOutputBytes: 64,
+        deadline: TimeSpan.FromSeconds(5));
+    using PowerShellCapabilitySet capabilities = PowerShellCapabilitySet.Register(
+    [
+        new PowerShellCapabilityBinding(stageIntentDefinition, stagedIntent),
+        new PowerShellCapabilityBinding(PowerShellHostInteraction.WriteText, hostInteractions),
+        new PowerShellCapabilityBinding(PowerShellHostInteraction.ReportProgress, hostInteractions),
+        new PowerShellCapabilityBinding(PowerShellHostInteraction.PromptChoice, hostInteractions),
+    ]);
+
+    using (PowerShell successful = session.CreatePowerShell())
+    {
+        PowerShellInvocationResult result = successful
+            .AddScript(
+                "`$null = `$DpsCapabilities.Invoke('example.stage-intent', [pscustomobject]@{ Id = 'intent-1'; Name = 'committed' })\n" +
+                "`$null = `$DpsCapabilities.Invoke('host.write-text', 'host-text')\n" +
+                "`$null = `$DpsCapabilities.Invoke('host.report-progress', [pscustomobject]@{ ActivityId = 9; ParentActivityId = -1; Activity = 'Copy'; StatusDescription = 'Running'; PercentComplete = 50; SecondsRemaining = 3; IsCompleted = `$false })\n" +
+                "`$DpsCapabilities.Invoke('host.prompt-choice', [pscustomobject]@{ Caption = 'Caption'; Message = 'Message'; Choices = @('first', 'second'); DefaultChoice = 0 })")
+            .WithCapabilities(capabilities)
+            .Invoke();
+        stagedIntent.CommitAfterSuccess(result);
+        Require(
+            result.Output.Records.Count == 1 &&
+            result.Output.Records[0].DisplayText == "1" &&
+            stagedIntent.CommittedName == "committed" &&
+            hostInteractions.Text == "host-text" &&
+            hostInteractions.Progress is { ActivityId: 9, PercentComplete: 50 } &&
+            hostInteractions.PromptCount == 1,
+            "Declared transaction and host capabilities did not round-trip through the copied capability bridge.");
+    }
+
+    using (PowerShell denied = session.CreatePowerShell())
+    {
+        int hostCalls = hostInteractions.CallCount;
+        try
+        {
+            denied
+                .AddScript("`$DpsCapabilities.Invoke('host.read-line', 'not-registered')")
+                .WithCapabilities(capabilities)
+                .Invoke();
+            throw new InvalidOperationException("An unregistered capability was accepted.");
+        }
+        catch (PowerShellInvocationException)
+        {
+        }
+
+        Require(
+            hostInteractions.CallCount == hostCalls,
+            "An unregistered capability reached a registered handler.");
+    }
+
+    using (PowerShell failed = session.CreatePowerShell())
+    {
+        try
+        {
+            failed
+                .AddScript("`$null = `$DpsCapabilities.Invoke('example.stage-intent', [pscustomobject]@{ Id = 'intent-2'; Name = 'discarded' }); throw 'rollback'")
+                .WithCapabilities(capabilities)
+                .Invoke();
+            throw new InvalidOperationException("A terminating transaction script returned successfully.");
+        }
+        catch (PowerShellInvocationException)
+        {
+            stagedIntent.Discard();
+        }
+
+        Require(
+            stagedIntent.CommittedName == "committed" &&
+            stagedIntent.StagedName is null,
+            "A failed invocation committed a staged capability intent.");
+    }
+}
+
 if (args.Length != 1)
 {
    return 2;
@@ -591,6 +909,7 @@ VerifyCopiedValueReaders();
 VerifyScriptParameterMetadata(runtime);
 VerifyProgressUpdate();
 await VerifyRecipesSchemasAndPoliciesAsync(runtime);
+await VerifyTypedResultPagingAsync(runtime);
 const string SecretMarker = "ffi-secret-marker-not-accepted";
 Require(
    PowerShellSecretTransfer.Policy == PowerShellSecretTransferPolicy.Rejected &&
@@ -963,7 +1282,11 @@ using (PowerShellInvocationOperation cancelledCapabilityOperation = cancelledCap
     Require(
         cancelledCapabilityOperation.Wait(TimeSpan.FromSeconds(5)).State == PowerShellOperationState.Cancelled,
         "Stopping an active capability invocation did not cancel the handler and operation.");
+    Require(
+        cancellableHandler.CancellationObserved,
+        "Stopping an active capability invocation did not signal the handler cancellation token.");
 }
+VerifyTransactionAndHostCapabilities(session);
 
 PowerShellValue copiedVariable = PowerShellValue.PropertyBag(new[]
 {
@@ -1250,6 +1573,8 @@ sealed class CancellableCapability : IPowerShellCapabilityHandler, IDisposable
 {
     public ManualResetEventSlim Started { get; } = new(false);
 
+    public bool CancellationObserved { get; private set; }
+
     public PowerShellValue Invoke(
         PowerShellCapabilityInvocation invocation,
         IReadOnlyList<PowerShellValue> arguments)
@@ -1260,6 +1585,7 @@ sealed class CancellableCapability : IPowerShellCapabilityHandler, IDisposable
             Thread.Sleep(10);
         }
 
+        CancellationObserved = true;
         invocation.CancellationToken.ThrowIfCancellationRequested();
         return PowerShellValue.Null;
     }
@@ -1269,10 +1595,110 @@ sealed class CancellableCapability : IPowerShellCapabilityHandler, IDisposable
         Started.Dispose();
     }
 }
+
+sealed class StagedIntentCapability : IPowerShellCapabilityHandler
+{
+    public string? StagedName { get; private set; }
+
+    public string? CommittedName { get; private set; }
+
+    public PowerShellValue Invoke(
+        PowerShellCapabilityInvocation invocation,
+        IReadOnlyList<PowerShellValue> arguments)
+    {
+        if (invocation.Definition.Name != "example.stage-intent" ||
+            arguments.Count != 1 ||
+            arguments[0].Kind != PowerShellValueKind.PropertyBag)
+        {
+            throw new ArgumentException("The staged intent capability contract was not preserved.");
+        }
+
+        IReadOnlyDictionary<string, PowerShellValue> properties = arguments[0].GetPropertyBag();
+        if (properties.Count != 2 ||
+            !properties.TryGetValue("Id", out PowerShellValue? identifier) ||
+            !identifier!.TryGetString(out string? identifierText) ||
+            identifierText != "intent-1" && identifierText != "intent-2" ||
+            !properties.TryGetValue("Name", out PowerShellValue? name) ||
+            !name!.TryGetString(out string? nameText) ||
+            string.IsNullOrWhiteSpace(nameText))
+        {
+            throw new ArgumentException("The staged intent payload is invalid.");
+        }
+
+        StagedName = nameText;
+        return PowerShellValue.Null;
+    }
+
+    public void CommitAfterSuccess(PowerShellInvocationResult result)
+    {
+        if (result.HadErrors || result.IsTerminatingFailure || StagedName is null)
+        {
+            throw new InvalidOperationException("Only a successful invocation can commit a staged intent.");
+        }
+
+        CommittedName = StagedName;
+        StagedName = null;
+    }
+
+    public void Discard()
+    {
+        StagedName = null;
+    }
+}
+
+sealed class HostInteractionCapability : IPowerShellCapabilityHandler
+{
+    public int CallCount { get; private set; }
+
+    public string? Text { get; private set; }
+
+    public PowerShellProgressUpdate? Progress { get; private set; }
+
+    public int PromptCount { get; private set; }
+
+    public PowerShellValue Invoke(
+        PowerShellCapabilityInvocation invocation,
+        IReadOnlyList<PowerShellValue> arguments)
+    {
+        CallCount++;
+        switch (invocation.Definition.Name)
+        {
+            case "host.write-text":
+                if (arguments.Count != 1 ||
+                    !arguments[0].TryGetString(out string? text) ||
+                    text != "host-text")
+                {
+                    throw new ArgumentException("The host text capability payload is invalid.");
+                }
+
+                Text = text;
+                return PowerShellValue.Null;
+            case "host.report-progress":
+                if (arguments.Count != 1)
+                {
+                    throw new ArgumentException("The host progress capability payload is invalid.");
+                }
+
+                Progress = PowerShellHostInteraction.ParseProgressUpdate(arguments[0]);
+                return PowerShellValue.Null;
+            case "host.prompt-choice":
+                if (arguments.Count != 1 || arguments[0].Kind != PowerShellValueKind.PropertyBag)
+                {
+                    throw new ArgumentException("The host choice capability payload is invalid.");
+                }
+
+                PromptCount++;
+                return PowerShellValue.SignedInteger(1);
+            default:
+                throw new ArgumentException("The host capability is not registered.");
+        }
+    }
+}
 "@ | Set-Content -Path (Join-Path $consumerDirectory 'Program.cs') -Encoding utf8
 
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $consumerProject, '--configfile', $nugetConfig)
-    Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('publish', $consumerProject, '--no-restore', '-c', $Configuration)
+        Assert-RestoredPackageMatchesInspectedNupkg -NugetCache $nugetCache -PackageId $packageId -PackageVersion $PackageVersion -InspectedPackagePath $package.FullName
+        Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('publish', $consumerProject, '--no-restore', '-c', $Configuration)
 
     $publishDirectory = Join-Path $consumerDirectory "bin\$Configuration\net10.0\win-x64\publish"
     $consumerExe = Join-Path $publishDirectory 'FfiPackageConsumer.exe'
@@ -1296,11 +1722,19 @@ finally {
     else {
         $env:NUGET_PACKAGES = $oldNugetPackages
     }
+    if ($null -eq $oldNugetFallbackPackages) {
+        Remove-Item Env:NUGET_FALLBACK_PACKAGES -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:NUGET_FALLBACK_PACKAGES = $oldNugetFallbackPackages
+    }
 
     if ($KeepWorkspace) {
         Write-Host "Kept smoke workspace: $workspace"
+            Write-Host "Kept isolated NuGet cache: $nugetCache"
+        }
+        else {
+            Remove-Item -Path $workspace -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $nugetCache -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
-    else {
-        Remove-Item -Path $workspace -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}

@@ -314,6 +314,10 @@ jobs:
           dotnet publish dotnet/nativeaot-sample/NativeAotFfiSample.csproj -c Release
           & dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe
           if ($LASTEXITCODE -ne 0) { throw "The PATH-resolved NativeAOT SDK sample failed with exit code $LASTEXITCODE." }
+          & dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe `
+            $payloadDirectory `
+            --expect-incompatible-contract-pack
+          if ($LASTEXITCODE -ne 0) { throw "The incompatible contract-pack NativeAOT sample failed with exit code $LASTEXITCODE." }
 
       - name: Dry-run pack NativeAOT SDK
         shell: pwsh

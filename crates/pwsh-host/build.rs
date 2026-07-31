@@ -42,7 +42,12 @@ fn main() {
     let managed_common_props = dotnet_dir.join("Managed.Common.props");
     let bindings_sources = [
         dotnet_dir.join("bindings").join("Bindings.cs"),
+        dotnet_dir.join("bindings").join("FfiBindings.cs"),
+        dotnet_dir.join("bindings").join("LiveObjectContractPackRegistry.cs"),
         dotnet_dir.join("bindings").join("Bindings.Generated.cs"),
+        dotnet_dir.join("interop").join("PowerShellLiveObjectContract.cs"),
+        dotnet_dir.join("interop").join("PowerShellLiveObjectProbeContract.cs"),
+        dotnet_dir.join("interop").join("PowerShellLiveObjectTestContract.cs"),
     ];
     let startup_hook_project = dotnet_dir
         .join("startup-hook")

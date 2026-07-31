@@ -1,6 +1,4 @@
-bindings:Bindings_GetFfiApiV2
-bindings:Bindings_GetFfiApiV3
-bindings:Bindings_GetFfiApiV4
+bindings:Bindings_GetFfiApiV1
 bindings:FfiInvocationResult_CopyStreamRecordFieldToUtf8
 bindings:FfiInvocationResult_CopyStreamRecordValue
 bindings:FfiInvocationResult_GetInfo

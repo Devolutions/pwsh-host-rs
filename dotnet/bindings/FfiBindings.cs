@@ -20,9 +20,7 @@ namespace NativeHost
 {
     public static partial class Bindings
     {
-        private const uint FfiBindingsAbiVersion = 2;
-        private const uint FfiBindingsLiveStreamAbiVersion = 3;
-        private const uint FfiBindingsTypedResultPagingAbiVersion = 4;
+        private const uint FfiBindingsAbiVersion = 1;
         private const uint FfiCallResultTruncatedDiagnostic = 1;
         private const int FfiStatusSuccess = 0;
         private const int FfiStatusInvalidArgument = -1;
@@ -110,7 +108,7 @@ namespace NativeHost
         }
 
         [StructLayout(LayoutKind.Sequential)]
-        private struct FfiApiV2
+        private struct FfiApiV1
         {
             public nuint Size;
             public uint AbiVersion;
@@ -165,14 +163,6 @@ namespace NativeHost
             public IntPtr LiveObjectContractPack_Register;
             public IntPtr PowerShellSession_SetLiveObjectContractVariable;
             public IntPtr LiveObjectContractPack_RegisterMany;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct FfiApiV3
-        {
-            public nuint Size;
-            public uint AbiVersion;
-            public ulong FeatureFlags;
             public IntPtr PowerShell_BeginLiveInvocation;
             public IntPtr LiveInvocation_Poll;
             public IntPtr LiveInvocation_ReadBatch;
@@ -183,14 +173,6 @@ namespace NativeHost
             public IntPtr LiveInvocation_Complete;
             public IntPtr LiveInvocation_Stop;
             public IntPtr LiveInvocation_Release;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct FfiApiV4
-        {
-            public nuint Size;
-            public uint AbiVersion;
-            public ulong FeatureFlags;
             public IntPtr PowerShell_BeginTypedResultInvocation;
             public IntPtr TypedResultInvocation_Poll;
             public IntPtr TypedResultInvocation_ReadPage;
@@ -270,7 +252,7 @@ namespace NativeHost
             throw new InvalidOperationException("An approved module import could not be resolved beneath an approved module path.");
         }
 
-        private static readonly object FfiApiV2Lock = new object();
+        private static readonly object FfiApiV1Lock = new object();
         private static readonly ConcurrentDictionary<IntPtr, InvocationResult> FfiInvocationResults =
             new ConcurrentDictionary<IntPtr, InvocationResult>();
         private static readonly ConcurrentDictionary<IntPtr, FfiInputBuffer> FfiInputBuffers =
@@ -287,25 +269,23 @@ namespace NativeHost
             FfiLiveObjectProbeContract,
             static pointer => new FfiManagedLiveObjectLease(FfiLiveSessionObjectProbeProxy.Create(pointer)));
         private static long FfiNextInvocationId;
-        private static IntPtr FfiApiV2Ptr = IntPtr.Zero;
-        private static IntPtr FfiApiV3Ptr = IntPtr.Zero;
-        private static IntPtr FfiApiV4Ptr = IntPtr.Zero;
+        private static IntPtr FfiApiV1Ptr = IntPtr.Zero;
 
         [UnmanagedCallersOnly]
-        public static IntPtr Bindings_GetFfiApiV2()
+        public static IntPtr Bindings_GetFfiApiV1()
         {
             try
             {
-                lock (FfiApiV2Lock)
+                lock (FfiApiV1Lock)
                 {
-                    if (FfiApiV2Ptr == IntPtr.Zero)
+                    if (FfiApiV1Ptr == IntPtr.Zero)
                     {
-                        FfiApiV2 api = CreateFfiApiV2();
-                        FfiApiV2Ptr = Marshal.AllocCoTaskMem(Marshal.SizeOf<FfiApiV2>());
-                        Marshal.StructureToPtr(api, FfiApiV2Ptr, false);
+                        FfiApiV1 api = CreateFfiApiV1();
+                        FfiApiV1Ptr = Marshal.AllocCoTaskMem(Marshal.SizeOf<FfiApiV1>());
+                        Marshal.StructureToPtr(api, FfiApiV1Ptr, false);
                     }
 
-                    return FfiApiV2Ptr;
+                    return FfiApiV1Ptr;
                 }
             }
             catch
@@ -314,62 +294,17 @@ namespace NativeHost
             }
         }
 
-        [UnmanagedCallersOnly]
-        public static IntPtr Bindings_GetFfiApiV3()
+        private static unsafe FfiApiV1 CreateFfiApiV1()
         {
-            try
+            return new FfiApiV1
             {
-                lock (FfiApiV2Lock)
-                {
-                    if (FfiApiV3Ptr == IntPtr.Zero)
-                    {
-                        FfiApiV3 api = CreateFfiApiV3();
-                        FfiApiV3Ptr = Marshal.AllocCoTaskMem(Marshal.SizeOf<FfiApiV3>());
-                        Marshal.StructureToPtr(api, FfiApiV3Ptr, false);
-                    }
-
-                    return FfiApiV3Ptr;
-                }
-            }
-            catch
-            {
-                return IntPtr.Zero;
-            }
-        }
-
-        [UnmanagedCallersOnly]
-        public static IntPtr Bindings_GetFfiApiV4()
-        {
-            try
-            {
-                lock (FfiApiV2Lock)
-                {
-                    if (FfiApiV4Ptr == IntPtr.Zero)
-                    {
-                        FfiApiV4 api = CreateFfiApiV4();
-                        FfiApiV4Ptr = Marshal.AllocCoTaskMem(Marshal.SizeOf<FfiApiV4>());
-                        Marshal.StructureToPtr(api, FfiApiV4Ptr, false);
-                    }
-
-                    return FfiApiV4Ptr;
-                }
-            }
-            catch
-            {
-                return IntPtr.Zero;
-            }
-        }
-
-        private static unsafe FfiApiV2 CreateFfiApiV2()
-        {
-            return new FfiApiV2
-            {
-                Size = (nuint)Marshal.SizeOf<FfiApiV2>(),
+                Size = (nuint)Marshal.SizeOf<FfiApiV1>(),
                 AbiVersion = FfiBindingsAbiVersion,
                 FeatureFlags = (1UL << 4) | (1UL << 5) | (1UL << 6) | FfiFeatureAsyncOperationPrimitives |
                     FfiFeatureSessionPrimitives | FfiFeatureSessionPolling | FfiFeatureSnapshotProjections |
                     FfiFeatureSessionConfiguration | FfiFeatureSessionVariables | FfiFeatureCapabilityRpc |
-                    FfiFeatureLiveObjectProbe | FfiFeatureLiveSessionObjectProbe | FfiFeatureLiveObjectContracts,
+                    FfiFeatureLiveObjectProbe | FfiFeatureLiveSessionObjectProbe | FfiFeatureLiveObjectContracts |
+                    FfiFeatureLiveStreamPolling | FfiFeatureTypedResultPaging,
                 PowerShell_Create = (IntPtr)(delegate* unmanaged<IntPtr*, FfiCallResult*, int>)&FfiPowerShell_Create,
                 PowerShell_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiPowerShell_Release,
                 PowerShell_AddArgumentUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, FfiCallResult*, int>)&FfiPowerShell_AddArgumentUtf8,
@@ -420,16 +355,6 @@ namespace NativeHost
                 LiveObjectContractPack_Register = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiLiveObjectContractPack_Register,
                 PowerShellSession_SetLiveObjectContractVariable = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, NativeLiveObjectContractDescriptor*, IntPtr, FfiCallResult*, int>)&FfiPowerShellSession_SetLiveObjectContractVariable,
                 LiveObjectContractPack_RegisterMany = (IntPtr)(delegate* unmanaged<IntPtr*, uint, FfiCallResult*, int>)&FfiLiveObjectContractPack_RegisterMany,
-            };
-        }
-
-        private static unsafe FfiApiV3 CreateFfiApiV3()
-        {
-            return new FfiApiV3
-            {
-                Size = (nuint)Marshal.SizeOf<FfiApiV3>(),
-                AbiVersion = FfiBindingsLiveStreamAbiVersion,
-                FeatureFlags = FfiFeatureLiveStreamPolling,
                 PowerShell_BeginLiveInvocation = (IntPtr)(delegate* unmanaged<IntPtr, IntPtr*, FfiCallResult*, int>)&FfiPowerShell_BeginLiveInvocation,
                 LiveInvocation_Poll = (IntPtr)(delegate* unmanaged<IntPtr, int*, FfiCallResult*, int>)&FfiLiveInvocation_Poll,
                 LiveInvocation_ReadBatch = (IntPtr)(delegate* unmanaged<IntPtr, long, int, IntPtr*, FfiCallResult*, int>)&FfiLiveInvocation_ReadBatch,
@@ -440,16 +365,6 @@ namespace NativeHost
                 LiveInvocation_Complete = (IntPtr)(delegate* unmanaged<IntPtr, IntPtr*, FfiCallResult*, int>)&FfiLiveInvocation_Complete,
                 LiveInvocation_Stop = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiLiveInvocation_Stop,
                 LiveInvocation_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiLiveInvocation_Release,
-            };
-        }
-
-        private static unsafe FfiApiV4 CreateFfiApiV4()
-        {
-            return new FfiApiV4
-            {
-                Size = (nuint)Marshal.SizeOf<FfiApiV4>(),
-                AbiVersion = FfiBindingsTypedResultPagingAbiVersion,
-                FeatureFlags = FfiFeatureTypedResultPaging,
                 PowerShell_BeginTypedResultInvocation = (IntPtr)(delegate* unmanaged<IntPtr, int, int, IntPtr*, FfiCallResult*, int>)&FfiPowerShell_BeginTypedResultInvocation,
                 TypedResultInvocation_Poll = (IntPtr)(delegate* unmanaged<IntPtr, int*, FfiCallResult*, int>)&FfiTypedResultInvocation_Poll,
                 TypedResultInvocation_ReadPage = (IntPtr)(delegate* unmanaged<IntPtr, long, int, IntPtr*, FfiCallResult*, int>)&FfiTypedResultInvocation_ReadPage,
