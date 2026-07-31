@@ -11,9 +11,17 @@ using NativeAotFfiSample;
 string contractPackPath = System.IO.Path.Combine(
     AppContext.BaseDirectory,
     "Devolutions.MultiPwsh.LiveObject.TestPack.dll");
+string incompatibleContractPackPath = System.IO.Path.Combine(
+    AppContext.BaseDirectory,
+    "Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.dll");
 if (!System.IO.File.Exists(contractPackPath))
 {
     Console.Error.WriteLine("NativeAOT facade did not publish the external live-object contract pack.");
+    return 1;
+}
+if (!System.IO.File.Exists(incompatibleContractPackPath))
+{
+    Console.Error.WriteLine("NativeAOT facade did not publish the incompatible live-object contract pack fixture.");
     return 1;
 }
 
@@ -23,6 +31,30 @@ PowerShellLiveObjectContractPack[] contractPacks =
         contractPackPath,
         "Devolutions.MultiPwsh.LiveObject.TestPack.LiveObjectTestPack, Devolutions.MultiPwsh.LiveObject.TestPack"),
 ];
+
+if (args.Length == 2 && args[1] == "--expect-incompatible-contract-pack")
+{
+    try
+    {
+        _ = PowerShellRuntime.Activate(
+            args[0],
+            [
+                contractPacks[0],
+                new PowerShellLiveObjectContractPack(
+                    incompatibleContractPackPath,
+                    "Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.IncompatibleLiveObjectTestPack, Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack"),
+            ]);
+        Console.Error.WriteLine("Incompatible live-object contract metadata was accepted.");
+        return 1;
+    }
+    catch (PowerShellFfiException exception)
+        when (exception.Status == PowerShellFfiStatus.HostFailure &&
+              exception.Message.Contains("interface identifier", StringComparison.Ordinal))
+    {
+        Console.WriteLine("Incompatible live-object contract metadata: Rejected");
+        return 0;
+    }
+}
 
 PowerShellRuntime runtime;
 switch (args.Length)

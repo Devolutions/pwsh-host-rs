@@ -112,9 +112,9 @@ static void ValidateAbiCompatibility(Assembly facadeAssembly, BindingFlags stati
         throw new InvalidOperationException("The facade must retain an ABI validation overload that accepts NativeAbiInfo.");
     }
 
-    const ulong allRequiredFeatures = 0xFFDFF;
+    const ulong allRequiredFeatures = 0x3FFDFF;
     ensureSupportedAbi.Invoke(null, [CreateAbiInfo(abiInfoType, allRequiredFeatures, abiVersion: 2, minimumCompatibleAbiVersion: 2)]);
-    for (int bit = 0; bit <= 19; bit++)
+    for (int bit = 0; bit <= 21; bit++)
     {
         if ((allRequiredFeatures & (1UL << bit)) == 0)
         {
@@ -144,31 +144,6 @@ static void ValidateAbiCompatibility(Assembly facadeAssembly, BindingFlags stati
         throw new InvalidOperationException("Facade ABI validation accepted an incompatible minimum ABI version.");
     }
 
-    MethodInfo? ensureTypedResultPagingSupported = powerShellType.GetMethod(
-        "EnsureTypedResultPagingSupported",
-        staticNonPublic,
-        binder: null,
-        types: [abiInfoType],
-        modifiers: null);
-    if (ensureTypedResultPagingSupported is null)
-    {
-        throw new InvalidOperationException("The facade must retain a typed result paging feature gate.");
-    }
-
-    const ulong typedResultPagingFeature = 1UL << 21;
-    ensureTypedResultPagingSupported.Invoke(
-        null,
-        [CreateAbiInfo(
-            abiInfoType,
-            allRequiredFeatures | typedResultPagingFeature,
-            abiVersion: 2,
-            minimumCompatibleAbiVersion: 2)]);
-    if (!IsUnsupportedCapability(
-            ensureTypedResultPagingSupported,
-            CreateAbiInfo(abiInfoType, allRequiredFeatures, abiVersion: 2, minimumCompatibleAbiVersion: 2)))
-    {
-        throw new InvalidOperationException("Facade typed result paging feature gate accepted an absent feature bit.");
-    }
 }
 
 static object CreateAbiInfo(Type abiInfoType, ulong featureFlags, uint abiVersion, uint minimumCompatibleAbiVersion)
@@ -191,21 +166,6 @@ static bool IsRejected(MethodInfo ensureSupportedAbi, object abiInfo)
         return false;
     }
     catch (TargetInvocationException exception) when (exception.InnerException is NotSupportedException)
-    {
-        return true;
-    }
-}
-
-static bool IsUnsupportedCapability(MethodInfo featureGate, object abiInfo)
-{
-    try
-    {
-        featureGate.Invoke(null, [abiInfo]);
-        return false;
-    }
-    catch (TargetInvocationException exception)
-        when (exception.InnerException is PowerShellFfiException ffiException &&
-              ffiException.Status == PowerShellFfiStatus.UnsupportedCapability)
     {
         return true;
     }

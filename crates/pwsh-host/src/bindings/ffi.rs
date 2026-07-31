@@ -11,9 +11,7 @@ use crate::pdcstring::{PdCStr, PdCString};
 
 use super::bindings_generated::PowerShellHandle;
 
-const FFI_BINDINGS_ABI_VERSION: u32 = 2;
-const FFI_BINDINGS_LIVE_STREAM_ABI_VERSION: u32 = 3;
-const FFI_BINDINGS_TYPED_RESULT_PAGING_ABI_VERSION: u32 = 4;
+const FFI_BINDINGS_ABI_VERSION: u32 = 1;
 const FFI_CALL_DIAGNOSTIC_CAPACITY: usize = 4096;
 const FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES: u64 = 1 << 8;
 const FFI_FEATURE_SESSION_PRIMITIVES: u64 = 1 << 10;
@@ -55,7 +53,7 @@ pub struct FfiLiveObjectContractDescriptor {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct FfiApiV2 {
+struct FfiApiV1 {
     size: usize,
     abi_version: u32,
     feature_flags: u64,
@@ -109,14 +107,6 @@ struct FfiApiV2 {
     live_object_contract_pack_register_fn: *const libc::c_void,
     power_shell_session_set_live_object_contract_variable_fn: *const libc::c_void,
     live_object_contract_pack_register_many_fn: *const libc::c_void,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct FfiApiV3 {
-    size: usize,
-    abi_version: u32,
-    feature_flags: u64,
     power_shell_begin_live_invocation_fn: *const libc::c_void,
     live_invocation_poll_fn: *const libc::c_void,
     live_invocation_read_batch_fn: *const libc::c_void,
@@ -127,14 +117,6 @@ struct FfiApiV3 {
     live_invocation_complete_fn: *const libc::c_void,
     live_invocation_stop_fn: *const libc::c_void,
     live_invocation_release_fn: *const libc::c_void,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct FfiApiV4 {
-    size: usize,
-    abi_version: u32,
-    feature_flags: u64,
     power_shell_begin_typed_result_invocation_fn: *const libc::c_void,
     typed_result_invocation_poll_fn: *const libc::c_void,
     typed_result_invocation_read_page_fn: *const libc::c_void,
@@ -147,9 +129,7 @@ struct FfiApiV4 {
     typed_result_page_release_fn: *const libc::c_void,
 }
 
-type FnBindingsGetFfiApiV2 = unsafe extern "system" fn() -> *const FfiApiV2;
-type FnBindingsGetFfiApiV3 = unsafe extern "system" fn() -> *const FfiApiV3;
-type FnBindingsGetFfiApiV4 = unsafe extern "system" fn() -> *const FfiApiV4;
+type FnBindingsGetFfiApiV1 = unsafe extern "system" fn() -> *const FfiApiV1;
 type FnFfiPowerShellCreate = unsafe extern "system" fn(*mut PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiPowerShellRelease = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiPowerShellAddUtf8 = unsafe extern "system" fn(PowerShellHandle, *const u8, i32, *mut FfiCallResult) -> i32;
@@ -387,8 +367,8 @@ pub(crate) struct FfiBindings {
     live_object_contract_pack_register_fn: FnFfiLiveObjectContractPackRegister,
     power_shell_session_set_live_object_contract_variable_fn: FnFfiPowerShellSessionSetLiveObjectContractVariable,
     live_object_contract_pack_register_many_fn: FnFfiLiveObjectContractPackRegisterMany,
-    live_stream: Option<FfiLiveStreamBindings>,
-    typed_result_paging: Option<FfiTypedResultPagingBindings>,
+    live_stream: FfiLiveStreamBindings,
+    typed_result_paging: FfiTypedResultPagingBindings,
 }
 
 #[derive(Clone, Copy)]
@@ -457,11 +437,11 @@ impl FfiBindings {
             fn_loader.get_function_pointer_for_unmanaged_callers_only_method(type_name, method_name)
         }
 
-        let get_api_fn: FnBindingsGetFfiApiV2 = {
+        let get_api_fn: FnBindingsGetFfiApiV1 = {
             let fn_ptr = get_function_pointer(
                 fn_loader,
                 pdcstr!("NativeHost.Bindings, Devolutions.PowerShell.SDK.Bindings"),
-                pdcstr!("Bindings_GetFfiApiV2"),
+                pdcstr!("Bindings_GetFfiApiV1"),
             )?;
             unsafe { mem::transmute(fn_ptr) }
         };
@@ -479,7 +459,7 @@ impl FfiBindings {
         };
 
         if api.abi_version != FFI_BINDINGS_ABI_VERSION
-            || api.size < mem::size_of::<FfiApiV2>()
+            || api.size < mem::size_of::<FfiApiV1>()
             || api.feature_flags
                 & (FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
                     | FFI_FEATURE_SESSION_PRIMITIVES
@@ -490,7 +470,9 @@ impl FfiBindings {
                     | FFI_FEATURE_CAPABILITY_RPC
                     | FFI_FEATURE_LIVE_OBJECT_PROBE
                     | FFI_FEATURE_LIVE_SESSION_OBJECT_PROBE
-                    | FFI_FEATURE_LIVE_OBJECT_CONTRACTS)
+                    | FFI_FEATURE_LIVE_OBJECT_CONTRACTS
+                    | FFI_FEATURE_LIVE_STREAM_POLLING
+                    | FFI_FEATURE_TYPED_RESULT_PAGING)
                 != (FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
                     | FFI_FEATURE_SESSION_PRIMITIVES
                     | FFI_FEATURE_SESSION_POLLING
@@ -500,7 +482,9 @@ impl FfiBindings {
                     | FFI_FEATURE_CAPABILITY_RPC
                     | FFI_FEATURE_LIVE_OBJECT_PROBE
                     | FFI_FEATURE_LIVE_SESSION_OBJECT_PROBE
-                    | FFI_FEATURE_LIVE_OBJECT_CONTRACTS)
+                    | FFI_FEATURE_LIVE_OBJECT_CONTRACTS
+                    | FFI_FEATURE_LIVE_STREAM_POLLING
+                    | FFI_FEATURE_TYPED_RESULT_PAGING)
         {
             return Err(Error::IO(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -559,6 +543,26 @@ impl FfiBindings {
             api.live_object_contract_pack_register_fn,
             api.power_shell_session_set_live_object_contract_variable_fn,
             api.live_object_contract_pack_register_many_fn,
+            api.power_shell_begin_live_invocation_fn,
+            api.live_invocation_poll_fn,
+            api.live_invocation_read_batch_fn,
+            api.live_invocation_batch_get_info_fn,
+            api.live_invocation_batch_get_record_info_fn,
+            api.live_invocation_batch_copy_record_text_to_utf8_fn,
+            api.live_invocation_batch_release_fn,
+            api.live_invocation_complete_fn,
+            api.live_invocation_stop_fn,
+            api.live_invocation_release_fn,
+            api.power_shell_begin_typed_result_invocation_fn,
+            api.typed_result_invocation_poll_fn,
+            api.typed_result_invocation_read_page_fn,
+            api.typed_result_invocation_complete_fn,
+            api.typed_result_invocation_stop_fn,
+            api.typed_result_invocation_release_fn,
+            api.typed_result_page_get_info_fn,
+            api.typed_result_page_get_record_info_fn,
+            api.typed_result_page_copy_record_value_fn,
+            api.typed_result_page_release_fn,
         ];
         if fields.iter().any(|field| field.is_null()) {
             return Err(Error::IO(std::io::Error::new(
@@ -567,188 +571,95 @@ impl FfiBindings {
             )));
         }
 
-        let live_stream = match get_function_pointer(
-            fn_loader,
-            pdcstr!("NativeHost.Bindings, Devolutions.PowerShell.SDK.Bindings"),
-            pdcstr!("Bindings_GetFfiApiV3"),
-        ) {
-            Ok(pointer) => {
-                let get_api_fn: FnBindingsGetFfiApiV3 = unsafe { mem::transmute(pointer) };
-                let api_ptr = unsafe { get_api_fn() };
-                if api_ptr.is_null() {
-                    return Err(Error::IO(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "managed live stream binding table is null",
-                    )));
-                }
-                let api = unsafe { *api_ptr };
-                let fields = [
+        let live_stream = FfiLiveStreamBindings {
+            power_shell_begin_live_invocation_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellBeginLiveInvocation>(
                     api.power_shell_begin_live_invocation_fn,
-                    api.live_invocation_poll_fn,
-                    api.live_invocation_read_batch_fn,
+                )
+            },
+            live_invocation_poll_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveInvocationPoll>(api.live_invocation_poll_fn)
+            },
+            live_invocation_read_batch_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveInvocationReadBatch>(api.live_invocation_read_batch_fn)
+            },
+            live_invocation_batch_get_info_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveInvocationBatchGetInfo>(
                     api.live_invocation_batch_get_info_fn,
+                )
+            },
+            live_invocation_batch_get_record_info_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveInvocationBatchGetRecordInfo>(
                     api.live_invocation_batch_get_record_info_fn,
+                )
+            },
+            live_invocation_batch_copy_record_text_to_utf8_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveInvocationBatchCopyRecordTextToUtf8>(
                     api.live_invocation_batch_copy_record_text_to_utf8_fn,
-                    api.live_invocation_batch_release_fn,
-                    api.live_invocation_complete_fn,
-                    api.live_invocation_stop_fn,
-                    api.live_invocation_release_fn,
-                ];
-                if api.abi_version != FFI_BINDINGS_LIVE_STREAM_ABI_VERSION
-                    || api.size < mem::size_of::<FfiApiV3>()
-                    || api.feature_flags & FFI_FEATURE_LIVE_STREAM_POLLING == 0
-                    || fields.iter().any(|field| field.is_null())
-                {
-                    return Err(Error::IO(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "managed live stream bindings are incompatible",
-                    )));
-                }
-
-                Some(FfiLiveStreamBindings {
-                    power_shell_begin_live_invocation_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiPowerShellBeginLiveInvocation>(
-                            api.power_shell_begin_live_invocation_fn,
-                        )
-                    },
-                    live_invocation_poll_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationPoll>(api.live_invocation_poll_fn)
-                    },
-                    live_invocation_read_batch_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationReadBatch>(
-                            api.live_invocation_read_batch_fn,
-                        )
-                    },
-                    live_invocation_batch_get_info_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationBatchGetInfo>(
-                            api.live_invocation_batch_get_info_fn,
-                        )
-                    },
-                    live_invocation_batch_get_record_info_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationBatchGetRecordInfo>(
-                            api.live_invocation_batch_get_record_info_fn,
-                        )
-                    },
-                    live_invocation_batch_copy_record_text_to_utf8_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationBatchCopyRecordTextToUtf8>(
-                            api.live_invocation_batch_copy_record_text_to_utf8_fn,
-                        )
-                    },
-                    live_invocation_batch_release_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationRelease>(
-                            api.live_invocation_batch_release_fn,
-                        )
-                    },
-                    live_invocation_complete_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationComplete>(
-                            api.live_invocation_complete_fn,
-                        )
-                    },
-                    live_invocation_stop_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationRelease>(api.live_invocation_stop_fn)
-                    },
-                    live_invocation_release_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiLiveInvocationRelease>(
-                            api.live_invocation_release_fn,
-                        )
-                    },
-                })
-            }
-            Err(_) => None,
+                )
+            },
+            live_invocation_batch_release_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveInvocationRelease>(api.live_invocation_batch_release_fn)
+            },
+            live_invocation_complete_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveInvocationComplete>(api.live_invocation_complete_fn)
+            },
+            live_invocation_stop_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveInvocationRelease>(api.live_invocation_stop_fn)
+            },
+            live_invocation_release_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiLiveInvocationRelease>(api.live_invocation_release_fn)
+            },
         };
-
-        let typed_result_paging = match get_function_pointer(
-            fn_loader,
-            pdcstr!("NativeHost.Bindings, Devolutions.PowerShell.SDK.Bindings"),
-            pdcstr!("Bindings_GetFfiApiV4"),
-        ) {
-            Ok(pointer) => {
-                let get_api_fn: FnBindingsGetFfiApiV4 = unsafe { mem::transmute(pointer) };
-                let api_ptr = unsafe { get_api_fn() };
-                if api_ptr.is_null() {
-                    return Err(Error::IO(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "managed typed result paging binding table is null",
-                    )));
-                }
-                let api = unsafe { *api_ptr };
-                let fields = [
+        let typed_result_paging = FfiTypedResultPagingBindings {
+            power_shell_begin_typed_result_invocation_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellBeginTypedResultInvocation>(
                     api.power_shell_begin_typed_result_invocation_fn,
+                )
+            },
+            typed_result_invocation_poll_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationPoll>(
                     api.typed_result_invocation_poll_fn,
+                )
+            },
+            typed_result_invocation_read_page_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationReadPage>(
                     api.typed_result_invocation_read_page_fn,
+                )
+            },
+            typed_result_invocation_complete_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationComplete>(
                     api.typed_result_invocation_complete_fn,
+                )
+            },
+            typed_result_invocation_stop_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationComplete>(
                     api.typed_result_invocation_stop_fn,
+                )
+            },
+            typed_result_invocation_release_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationComplete>(
                     api.typed_result_invocation_release_fn,
-                    api.typed_result_page_get_info_fn,
+                )
+            },
+            typed_result_page_get_info_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiTypedResultPageGetInfo>(api.typed_result_page_get_info_fn)
+            },
+            typed_result_page_get_record_info_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiTypedResultPageGetRecordInfo>(
                     api.typed_result_page_get_record_info_fn,
+                )
+            },
+            typed_result_page_copy_record_value_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiTypedResultPageCopyRecordValue>(
                     api.typed_result_page_copy_record_value_fn,
+                )
+            },
+            typed_result_page_release_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationComplete>(
                     api.typed_result_page_release_fn,
-                ];
-                if api.abi_version != FFI_BINDINGS_TYPED_RESULT_PAGING_ABI_VERSION
-                    || api.size < mem::size_of::<FfiApiV4>()
-                    || api.feature_flags & FFI_FEATURE_TYPED_RESULT_PAGING == 0
-                    || fields.iter().any(|field| field.is_null())
-                {
-                    return Err(Error::IO(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "managed typed result paging bindings are incompatible",
-                    )));
-                }
-
-                Some(FfiTypedResultPagingBindings {
-                    power_shell_begin_typed_result_invocation_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiPowerShellBeginTypedResultInvocation>(
-                            api.power_shell_begin_typed_result_invocation_fn,
-                        )
-                    },
-                    typed_result_invocation_poll_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationPoll>(
-                            api.typed_result_invocation_poll_fn,
-                        )
-                    },
-                    typed_result_invocation_read_page_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationReadPage>(
-                            api.typed_result_invocation_read_page_fn,
-                        )
-                    },
-                    typed_result_invocation_complete_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationComplete>(
-                            api.typed_result_invocation_complete_fn,
-                        )
-                    },
-                    typed_result_invocation_stop_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationComplete>(
-                            api.typed_result_invocation_stop_fn,
-                        )
-                    },
-                    typed_result_invocation_release_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationComplete>(
-                            api.typed_result_invocation_release_fn,
-                        )
-                    },
-                    typed_result_page_get_info_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiTypedResultPageGetInfo>(
-                            api.typed_result_page_get_info_fn,
-                        )
-                    },
-                    typed_result_page_get_record_info_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiTypedResultPageGetRecordInfo>(
-                            api.typed_result_page_get_record_info_fn,
-                        )
-                    },
-                    typed_result_page_copy_record_value_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiTypedResultPageCopyRecordValue>(
-                            api.typed_result_page_copy_record_value_fn,
-                        )
-                    },
-                    typed_result_page_release_fn: unsafe {
-                        mem::transmute::<*const libc::c_void, FnFfiTypedResultInvocationComplete>(
-                            api.typed_result_page_release_fn,
-                        )
-                    },
-                })
-            }
-            Err(_) => None,
+                )
+            },
         };
 
         Ok(Self {
@@ -1243,11 +1154,11 @@ impl FfiPowerShell {
     }
 
     pub fn supports_live_stream_polling(&self) -> bool {
-        self.bindings.live_stream.is_some()
+        true
     }
 
     pub fn supports_typed_result_paging(&self) -> bool {
-        self.bindings.typed_result_paging.is_some()
+        true
     }
 
     pub fn begin_typed_result_invocation(
@@ -1265,9 +1176,7 @@ impl FfiPowerShell {
                 "typed result invocation bounds are invalid".to_owned(),
             ));
         }
-        let typed_result_paging = self.bindings.typed_result_paging.ok_or_else(|| {
-            FfiBindingError::from_status(-17, "managed bindings do not support typed result paging".to_owned())
-        })?;
+        let typed_result_paging = self.bindings.typed_result_paging;
         let mut typed_result_handle = std::ptr::null_mut();
         self.call(|handle, result| unsafe {
             (typed_result_paging.power_shell_begin_typed_result_invocation_fn)(
@@ -1293,9 +1202,7 @@ impl FfiPowerShell {
     }
 
     pub fn begin_live_invocation(&self) -> Result<FfiLiveInvocation, FfiBindingError> {
-        let live_stream = self.bindings.live_stream.ok_or_else(|| {
-            FfiBindingError::from_status(-17, "managed bindings do not support live stream polling".to_owned())
-        })?;
+        let live_stream = self.bindings.live_stream;
         let mut live_handle = std::ptr::null_mut();
         self.call(|handle, result| unsafe {
             (live_stream.power_shell_begin_live_invocation_fn)(handle, &mut live_handle, result)
@@ -1468,7 +1375,7 @@ pub struct FfiLiveInvocation {
 
 impl FfiLiveInvocation {
     pub fn poll(&self) -> Result<bool, FfiBindingError> {
-        let live_stream = self.live_stream()?;
+        let live_stream = self.bindings.live_stream;
         let mut completed = 0_i32;
         self.call(|handle, result| unsafe { (live_stream.live_invocation_poll_fn)(handle, &mut completed, result) })?;
         match completed {
@@ -1493,7 +1400,7 @@ impl FfiLiveInvocation {
             ));
         }
 
-        let live_stream = self.live_stream()?;
+        let live_stream = self.bindings.live_stream;
         let mut batch_handle = std::ptr::null_mut();
         self.call(|handle, result| unsafe {
             (live_stream.live_invocation_read_batch_fn)(
@@ -1653,12 +1560,12 @@ impl FfiLiveInvocation {
     }
 
     pub fn stop(&self) -> Result<(), FfiBindingError> {
-        let live_stream = self.live_stream()?;
+        let live_stream = self.bindings.live_stream;
         self.call(|handle, result| unsafe { (live_stream.live_invocation_stop_fn)(handle, result) })
     }
 
     pub fn complete(&self) -> Result<FfiInvocationResult, FfiBindingError> {
-        let live_stream = self.live_stream()?;
+        let live_stream = self.bindings.live_stream;
         let mut result_handle = std::ptr::null_mut();
         self.call(|handle, result| unsafe {
             (live_stream.live_invocation_complete_fn)(handle, &mut result_handle, result)
@@ -1674,12 +1581,6 @@ impl FfiLiveInvocation {
             _runtime: Arc::clone(&self._runtime),
             bindings: self.bindings,
             handle: Some(result_handle),
-        })
-    }
-
-    fn live_stream(&self) -> Result<FfiLiveStreamBindings, FfiBindingError> {
-        self.bindings.live_stream.ok_or_else(|| {
-            FfiBindingError::from_status(-17, "managed bindings do not support live stream polling".to_owned())
         })
     }
 
@@ -1702,9 +1603,7 @@ impl Drop for FfiLiveInvocation {
         let Some(handle) = self.handle.take() else {
             return;
         };
-        let Some(live_stream) = self.bindings.live_stream else {
-            return;
-        };
+        let live_stream = self.bindings.live_stream;
         let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
         let mut call_result = new_call_result(&mut diagnostic);
         unsafe {
@@ -1741,7 +1640,7 @@ pub struct FfiTypedResultInvocation {
 
 impl FfiTypedResultInvocation {
     pub fn poll(&self) -> Result<bool, FfiBindingError> {
-        let typed_result_paging = self.typed_result_paging()?;
+        let typed_result_paging = self.bindings.typed_result_paging;
         let mut completed = 0_i32;
         self.call(|handle, result| unsafe {
             (typed_result_paging.typed_result_invocation_poll_fn)(handle, &mut completed, result)
@@ -1768,7 +1667,7 @@ impl FfiTypedResultInvocation {
             ));
         }
 
-        let typed_result_paging = self.typed_result_paging()?;
+        let typed_result_paging = self.bindings.typed_result_paging;
         let mut page_handle = std::ptr::null_mut();
         self.call(|handle, result| unsafe {
             (typed_result_paging.typed_result_invocation_read_page_fn)(
@@ -1961,19 +1860,13 @@ impl FfiTypedResultInvocation {
     }
 
     pub fn complete(&self) -> Result<(), FfiBindingError> {
-        let typed_result_paging = self.typed_result_paging()?;
+        let typed_result_paging = self.bindings.typed_result_paging;
         self.call(|handle, result| unsafe { (typed_result_paging.typed_result_invocation_complete_fn)(handle, result) })
     }
 
     pub fn stop(&self) -> Result<(), FfiBindingError> {
-        let typed_result_paging = self.typed_result_paging()?;
+        let typed_result_paging = self.bindings.typed_result_paging;
         self.call(|handle, result| unsafe { (typed_result_paging.typed_result_invocation_stop_fn)(handle, result) })
-    }
-
-    fn typed_result_paging(&self) -> Result<FfiTypedResultPagingBindings, FfiBindingError> {
-        self.bindings.typed_result_paging.ok_or_else(|| {
-            FfiBindingError::from_status(-17, "managed bindings do not support typed result paging".to_owned())
-        })
     }
 
     fn call<F>(&self, operation: F) -> Result<(), FfiBindingError>
@@ -1995,9 +1888,7 @@ impl Drop for FfiTypedResultInvocation {
         let Some(handle) = self.handle.take() else {
             return;
         };
-        let Some(typed_result_paging) = self.bindings.typed_result_paging else {
-            return;
-        };
+        let typed_result_paging = self.bindings.typed_result_paging;
         let mut diagnostic = [0_u8; FFI_CALL_DIAGNOSTIC_CAPACITY];
         let mut call_result = new_call_result(&mut diagnostic);
         unsafe {

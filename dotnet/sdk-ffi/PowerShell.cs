@@ -38,7 +38,8 @@ public sealed unsafe class PowerShell : IDisposable
         InvocationMetadataFeature | AsyncOperationsFeature | SessionsFeature |
         SessionPollingFeature | SessionPoolRejectionFeature | SnapshotProjectionsFeature |
         SessionConfigurationFeature | SessionVariablesFeature | CapabilityRpcFeature |
-        LiveObjectProbeFeature | LiveSessionObjectProbeFeature | LiveObjectContractsFeature;
+        LiveObjectProbeFeature | LiveSessionObjectProbeFeature | LiveObjectContractsFeature |
+        LiveStreamPollingFeature | TypedResultPagingFeature;
     private const uint ResultTerminatingFailure = 1;
     private const uint ResultSequenceTruncated = 1 << 1;
     private const uint StreamTruncated = 1;
