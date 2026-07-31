@@ -49,11 +49,13 @@ if (args.Length == 2 && args[1] == "--expect-incompatible-contract-pack")
     }
     catch (PowerShellFfiException exception)
         when (exception.Status == PowerShellFfiStatus.HostFailure &&
-              exception.Message.Contains("interface identifier", StringComparison.Ordinal))
-    {
-        Console.WriteLine("Incompatible live-object contract metadata: Rejected");
-        return 0;
-    }
+                  (exception.Message.Contains("interface identifier", StringComparison.Ordinal) ||
+                   exception.Message.Contains("unsupported direction", StringComparison.Ordinal) ||
+                   exception.Message.Contains("Live object contract packs", StringComparison.Ordinal)))
+        {
+            Console.WriteLine("Incompatible live-object contract metadata: Rejected");
+            return 0;
+        }
 }
 
 PowerShellRuntime runtime;

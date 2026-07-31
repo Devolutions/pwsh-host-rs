@@ -33,20 +33,41 @@ function Get-MultiPwshVersion {
     return $match.Matches[0].Groups[1].Value
 }
 
-function Get-GlobalNuGetPackagesPath {
-    $line = & dotnet nuget locals global-packages --list |
-        Where-Object { $_ -like 'global-packages:*' } |
-        Select-Object -First 1
-    if ([string]::IsNullOrWhiteSpace($line)) {
-        throw 'Unable to resolve the global NuGet packages path.'
+function Assert-RestoredPackageMatchesInspectedNupkg {
+    param(
+        [Parameter(Mandatory)][string]$NugetCache,
+        [Parameter(Mandatory)][string]$PackageId,
+        [Parameter(Mandatory)][string]$PackageVersion,
+        [Parameter(Mandatory)][string]$InspectedPackagePath
+    )
+
+    $restoredRoot = Join-Path $NugetCache ("{0}\{1}" -f $PackageId.ToLowerInvariant(), $PackageVersion)
+    if (-not (Test-Path -LiteralPath $restoredRoot -PathType Container)) {
+        throw "Restore did not install $PackageId $PackageVersion into the isolated NuGet cache at $restoredRoot."
     }
 
-    $path = $line.Substring('global-packages:'.Length).Trim()
-    if (-not (Test-Path $path -PathType Container)) {
-        throw "The global NuGet packages path does not exist: $path"
+    $expectedHash = (Get-FileHash -Algorithm SHA512 -LiteralPath $InspectedPackagePath).Hash
+    $shaFile = Join-Path $restoredRoot "$PackageId.$PackageVersion.nupkg.sha512"
+    if (Test-Path -LiteralPath $shaFile -PathType Leaf) {
+        $actualBase64 = (Get-Content -LiteralPath $shaFile -Raw).Trim()
+        $actualBytes = [Convert]::FromBase64String($actualBase64)
+        $actualHash = [BitConverter]::ToString($actualBytes).Replace('-', '')
+        if (-not $actualHash.Equals($expectedHash, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Restored $PackageId $PackageVersion does not match the inspected local nupkg hash."
+        }
+
+        return
     }
 
-    return $path
+    $restoredNupkg = Join-Path $restoredRoot "$PackageId.$PackageVersion.nupkg"
+    if (-not (Test-Path -LiteralPath $restoredNupkg -PathType Leaf)) {
+        throw "Restore did not materialize $PackageId $PackageVersion nupkg metadata for hash verification."
+    }
+
+    $actualHash = (Get-FileHash -Algorithm SHA512 -LiteralPath $restoredNupkg).Hash
+    if (-not $actualHash.Equals($expectedHash, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Restored $PackageId $PackageVersion does not match the inspected local nupkg hash."
+    }
 }
 
 $multiPwshVersion = Get-MultiPwshVersion
@@ -174,21 +195,22 @@ finally {
 }
 
 $payloadDirectory = Resolve-PowerShellPayloadDirectory -Path $PowerShellPayloadDirectory
-$workspace = Join-Path (Join-Path $repoRoot 'artifacts') "ffi-package-smoke-$([guid]::NewGuid().ToString('N'))"
-$nugetCache = Join-Path $workspace 'nuget-cache'
+$smokeId = [guid]::NewGuid().ToString('N')
+$workspace = Join-Path (Join-Path $repoRoot 'artifacts') "ffi-package-smoke-$smokeId"
+# Keep the isolated package cache on a short path so NativeAOT link inputs stay well
+# under legacy MAX_PATH limits while still excluding every fallback folder.
+$nugetCache = Join-Path ([System.IO.Path]::GetTempPath()) "mpwsh-nupkg-$smokeId"
 $oldNugetPackages = $env:NUGET_PACKAGES
 $oldNugetFallbackPackages = $env:NUGET_FALLBACK_PACKAGES
-$globalNugetPackages = Get-GlobalNuGetPackagesPath
 $env:NUGET_PACKAGES = $nugetCache
-$env:NUGET_FALLBACK_PACKAGES = if ([string]::IsNullOrWhiteSpace($oldNugetFallbackPackages)) {
-    $globalNugetPackages
-}
-else {
-    $globalNugetPackages + [System.IO.Path]::PathSeparator + $oldNugetFallbackPackages
-}
+# Do not point fallback folders at the user global cache: a pre-existing
+# Devolutions.MultiPwsh.Sdk/<version> copy there would satisfy restore without
+# exercising the inspected local nupkg.
+$env:NUGET_FALLBACK_PACKAGES = ''
 
 try {
     New-Item -Path $nugetCache -ItemType Directory -Force | Out-Null
+    New-Item -Path $workspace -ItemType Directory -Force | Out-Null
     $nugetConfig = Join-Path $workspace 'NuGet.Config'
     @"
 <?xml version="1.0" encoding="utf-8"?>
@@ -219,6 +241,7 @@ try {
     'using System; Console.WriteLine("inert");' | Set-Content -Path (Join-Path $inertProjectDirectory 'Program.cs') -Encoding utf8
 
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $inertProject, '--configfile', $nugetConfig)
+    Assert-RestoredPackageMatchesInspectedNupkg -NugetCache $nugetCache -PackageId $packageId -PackageVersion $PackageVersion -InspectedPackagePath $package.FullName
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('build', $inertProject, '--no-restore', '-c', $Configuration)
     $inertNativeAsset = Join-Path $inertProjectDirectory "bin\$Configuration\net10.0\win-x64\multi-pwsh-sdk.dll"
     if (Test-Path $inertNativeAsset -PathType Leaf) {
@@ -1674,7 +1697,8 @@ sealed class HostInteractionCapability : IPowerShellCapabilityHandler
 "@ | Set-Content -Path (Join-Path $consumerDirectory 'Program.cs') -Encoding utf8
 
     Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $consumerProject, '--configfile', $nugetConfig)
-    Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('publish', $consumerProject, '--no-restore', '-c', $Configuration)
+        Assert-RestoredPackageMatchesInspectedNupkg -NugetCache $nugetCache -PackageId $packageId -PackageVersion $PackageVersion -InspectedPackagePath $package.FullName
+        Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('publish', $consumerProject, '--no-restore', '-c', $Configuration)
 
     $publishDirectory = Join-Path $consumerDirectory "bin\$Configuration\net10.0\win-x64\publish"
     $consumerExe = Join-Path $publishDirectory 'FfiPackageConsumer.exe'
@@ -1707,8 +1731,10 @@ finally {
 
     if ($KeepWorkspace) {
         Write-Host "Kept smoke workspace: $workspace"
+            Write-Host "Kept isolated NuGet cache: $nugetCache"
+        }
+        else {
+            Remove-Item -Path $workspace -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $nugetCache -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
-    else {
-        Remove-Item -Path $workspace -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}

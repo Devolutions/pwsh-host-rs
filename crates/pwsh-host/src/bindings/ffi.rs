@@ -488,7 +488,7 @@ impl FfiBindings {
         {
             return Err(Error::IO(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "managed FFI bindings do not support async operation and session primitives",
+                "managed FFI bindings report an incompatible ABI version, table size, or required feature set",
             )));
         }
 

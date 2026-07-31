@@ -141,13 +141,23 @@ internal unsafe sealed class FfiLiveObjectContractPackRegistry
             {
                 PowerShellLiveObjectContract contract =
                     PowerShellLiveObjectContract.FromNative(api.Contracts[contractIndex]);
-                if ((contract.Directions & PowerShellLiveObjectDirection.ConsumerToSession) == 0 ||
-                    !interfaceIds.Add(contract.InterfaceId) ||
-                    !additions.TryAdd(contract, Registration.CreateExternal(create, release)))
-                {
-                    throw new InvalidOperationException(
-                        "Live object contract packs contain duplicate or incompatible interface identifiers.");
-                }
+                                if ((contract.Directions & PowerShellLiveObjectDirection.ConsumerToSession) == 0)
+                                {
+                                    throw new InvalidOperationException(
+                                        "Live object contract packs contain a contract with an unsupported direction.");
+                                }
+
+                                if (!interfaceIds.Add(contract.InterfaceId))
+                                {
+                                    throw new InvalidOperationException(
+                                        "Live object contract packs contain duplicate interface identifiers.");
+                                }
+
+                                if (!additions.TryAdd(contract, Registration.CreateExternal(create, release)))
+                                {
+                                    throw new InvalidOperationException(
+                                        "Live object contract packs contain incompatible interface identifiers.");
+                                }
             }
         }
 
