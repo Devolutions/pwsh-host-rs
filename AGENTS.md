@@ -15,6 +15,17 @@ This file is guidance for AI/code agents working in this repository.
   payload-local bindings remain `net8.0` for PowerShell 7.4 compatibility.
 - Rust crate uses edition 2018.
 
+## FFI ABI policy
+
+- The payload-local binding table is one required **V1** ABI. Keep it as V1;
+  do not add V2/V3 tables, optional slot negotiation, compatibility manifests,
+  or version ranges unless the user explicitly instructs otherwise.
+- The Rust FFI DLL and C# consumer are built and packaged together. Add a
+  capability by extending the current V1 table and its feature flags on both
+  sides, rather than introducing a parallel ABI version.
+- Preserve header-first table-size validation before accessing appended slots,
+  so a smaller table is rejected safely.
+
 ## PR preparation policy (mandatory)
 
 - During local iteration, it is acceptable to skip lint/test commands for speed.
