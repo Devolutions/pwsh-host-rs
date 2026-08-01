@@ -6,49 +6,102 @@ using Devolutions.PowerShell.Ffi;
 
 namespace NativeAotFfiSample;
 
-internal sealed class ConnectionPatchIntentHandler : IPowerShellCapabilityHandler
+internal sealed class ConnectionPatchIntentHandler : IPowerShellStagedIntentHandler
 {
     private readonly object gate = new();
-    private ConnectionPatchIntent? intent;
+    private readonly Dictionary<string, ConnectionPatchIntent> staged = new(StringComparer.Ordinal);
+    private string? abortedStageIdentifier;
+    private ConnectionPatchIntent? committedIntent;
 
-    internal ConnectionPatchIntent? Intent
+    internal ConnectionPatchIntent? CommittedIntent
     {
         get
         {
             lock (gate)
             {
-                return intent;
+                return committedIntent;
             }
         }
     }
 
-    public PowerShellValue Invoke(
-        PowerShellCapabilityInvocation invocation,
-        IReadOnlyList<PowerShellValue> arguments)
+    internal string? AbortedStageIdentifier
+    {
+        get
+        {
+            lock (gate)
+            {
+                return abortedStageIdentifier;
+            }
+        }
+    }
+
+    public PowerShellStagedIntentHandlerResult Invoke(PowerShellStagedIntentInvocation invocation)
     {
         invocation.CancellationToken.ThrowIfCancellationRequested();
-        if (arguments.Count != 1 || arguments[0].Kind != PowerShellValueKind.PropertyBag)
+        if (invocation.Intent.OperationName != "rdm.connection-patch")
         {
-            throw new ArgumentException("The connection patch intent must be one property bag.", nameof(arguments));
+            throw new ArgumentException("The connection patch intent operation is invalid.", nameof(invocation));
         }
 
-        IReadOnlyDictionary<string, PowerShellValue> properties = arguments[0].GetPropertyBag();
+        IReadOnlyDictionary<string, PowerShellValue> properties = invocation.Intent.Intent.GetPropertyBag();
         string connectionId = GetRequiredString(properties, "ConnectionId");
         string displayName = GetRequiredString(properties, "DisplayName");
         if (properties.Count != 2)
         {
-            throw new ArgumentException("The connection patch intent contains an unsupported property.", nameof(arguments));
+            throw new ArgumentException("The connection patch intent contains an unsupported property.", nameof(invocation));
         }
 
+        var intent = new ConnectionPatchIntent(invocation.Intent.StageIdentifier, connectionId, displayName);
         lock (gate)
         {
-            intent = new ConnectionPatchIntent(connectionId, displayName);
+            return invocation.Operation switch
+            {
+                PowerShellStagedIntentOperation.Stage => Stage(intent),
+                PowerShellStagedIntentOperation.Validate => Validate(intent),
+                PowerShellStagedIntentOperation.Commit => Commit(intent),
+                PowerShellStagedIntentOperation.Abort => Abort(intent),
+                _ => throw new ArgumentOutOfRangeException(nameof(invocation)),
+            };
+        }
+    }
+
+    private PowerShellStagedIntentHandlerResult Stage(ConnectionPatchIntent intent)
+    {
+        if (!staged.TryAdd(intent.StageIdentifier, intent))
+        {
+            return PowerShellStagedIntentHandlerResult.Reject("The patch is already staged.");
         }
 
-        return PowerShellValue.PropertyBag(
-        [
-            new("Accepted", PowerShellValue.Boolean(true)),
-        ]);
+        return PowerShellStagedIntentHandlerResult.Accept("The patch is staged for review.");
+    }
+
+    private PowerShellStagedIntentHandlerResult Validate(ConnectionPatchIntent intent)
+    {
+        return staged.TryGetValue(intent.StageIdentifier, out ConnectionPatchIntent? stagedIntent) &&
+            stagedIntent == intent
+            ? PowerShellStagedIntentHandlerResult.Accept("The patch is approved.")
+            : PowerShellStagedIntentHandlerResult.Reject("The patch is no longer staged.");
+    }
+
+    private PowerShellStagedIntentHandlerResult Commit(ConnectionPatchIntent intent)
+    {
+        if (!staged.Remove(intent.StageIdentifier))
+        {
+            return PowerShellStagedIntentHandlerResult.Reject("The patch is no longer staged.");
+        }
+
+        committedIntent = intent;
+        return PowerShellStagedIntentHandlerResult.Accept("The host accepted the patch.");
+    }
+
+    private PowerShellStagedIntentHandlerResult Abort(ConnectionPatchIntent intent)
+    {
+        if (staged.Remove(intent.StageIdentifier))
+        {
+            abortedStageIdentifier = intent.StageIdentifier;
+        }
+
+        return PowerShellStagedIntentHandlerResult.Accept("The patch was discarded or already released.");
     }
 
     private static string GetRequiredString(
@@ -67,4 +120,4 @@ internal sealed class ConnectionPatchIntentHandler : IPowerShellCapabilityHandle
     }
 }
 
-internal sealed record ConnectionPatchIntent(string ConnectionId, string DisplayName);
+internal sealed record ConnectionPatchIntent(string StageIdentifier, string ConnectionId, string DisplayName);

@@ -147,9 +147,20 @@ if (-not $IsWindows) {
 
 New-PwshShim -PwshExe $pwshExe -Version $version -TempRoot $tempRoot
 
+$reportedVersion = (& $pwshExe -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()').Trim()
+if ($reportedVersion -ne $version) {
+    throw "The installed PowerShell reported version '$reportedVersion' but release '$version' was requested."
+}
+
 if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_ENV)) {
     "PwshExePath=$pwshExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+    "PwshQualifiedVersion=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+}
+
+if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) {
+    "Qualified against PowerShell $version (latest released 7.4.x) at ``$pwshExe``." |
+        Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 }
 
 Write-Host "Installed PowerShell $version for binding discovery: $pwshExe"
-& $pwshExe -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+Write-Host "Qualified PowerShell version: $reportedVersion"

@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -13,6 +14,7 @@ using System.Threading;
 using System.Text;
 using System.Management.Automation;
 using System.Management.Automation.Host;
+using System.Management.Automation.Language;
 using System.Management.Automation.Runspaces;
 using Devolutions.PowerShell.Ffi.LiveObjects;
 
@@ -63,6 +65,9 @@ namespace NativeHost
         private const ulong FfiFeatureLiveObjectContracts = 1UL << 19;
         private const ulong FfiFeatureLiveStreamPolling = 1UL << 20;
         private const ulong FfiFeatureTypedResultPaging = 1UL << 21;
+        private const ulong FfiFeatureObservedInvocation = 1UL << 22;
+        private const ulong FfiFeatureSessionPreflight = 1UL << 23;
+        private const ulong FfiFeatureRuntimeDiagnostics = 1UL << 24;
         private const uint FfiTypedResultPageTerminal = 1;
         private const uint FfiTypedResultPageTruncated = 1 << 1;
         private const uint FfiTypedResultPageComplete = 1 << 2;
@@ -183,73 +188,894 @@ namespace NativeHost
             public IntPtr TypedResultPage_GetRecordInfo;
             public IntPtr TypedResultPage_CopyRecordValue;
             public IntPtr TypedResultPage_Release;
+            public IntPtr PowerShell_BeginObservedInvocation;
+            public IntPtr ObservedInvocation_Poll;
+            public IntPtr ObservedInvocation_ReadResultPage;
+            public IntPtr ObservedInvocation_ReadDiagnosticPage;
+            public IntPtr ObservedInvocation_Complete;
+            public IntPtr ObservedInvocation_Stop;
+            public IntPtr ObservedInvocation_Release;
+            public IntPtr ObservedDiagnosticPage_GetInfo;
+            public IntPtr ObservedDiagnosticPage_GetRecordInfo;
+            public IntPtr ObservedDiagnosticPage_CopyRecordTextToUtf8;
+            public IntPtr ObservedDiagnosticPage_Release;
+            public IntPtr PowerShellSession_PreflightConfigured;
+            public IntPtr RuntimeDiagnostics_CopyPowerShellFileVersionUtf8;
+        }
+
+        private const int FfiPreflightMaximumTextLength = 128;
+        private const int FfiPreflightMaximumPathLength = 256;
+        private const int FfiPreflightMaximumDeclaredCommands = 4;
+        private const int FfiPreflightMaximumDeclaredCommandLength = 64;
+        private const int FfiPreflightMaximumVersionLength = 128;
+        private const int FfiPreflightMaximumManifestBytes = 64 * 1024;
+
+        private const uint FfiPreflightValid = 0;
+        private const uint FfiPreflightInvalidConfiguration = 1;
+        private const uint FfiPreflightInvalidModuleRoots = 2;
+        private const uint FfiPreflightUnresolvableModuleImports = 3;
+        private const uint FfiPreflightInvalidModuleManifest = 4;
+        private const uint FfiPreflightExternalModuleDeclarations = 5;
+        private const uint FfiPreflightInvalidWorkingDirectory = 6;
+
+        private const uint FfiModuleRootValid = 0;
+        private const uint FfiModuleRootMissing = 1;
+        private const uint FfiModuleRootInvalid = 2;
+
+        private const uint FfiModuleImportResolved = 0;
+        private const uint FfiModuleImportUnresolvable = 1;
+        private const uint FfiModuleImportManifestInvalid = 2;
+        private const uint FfiModuleImportManifestUnreadable = 3;
+        private const uint FfiModuleImportManifestDeclarationsUnavailable = 4;
+        private const uint FfiModuleImportManifestDeclaresExternalPath = 5;
+
+        // Manifest keys whose values name files that PowerShell loads while importing the
+        // module. Path-like entries must resolve beneath the same approved module root as
+        // the manifest, otherwise importing the module would load code the application never
+        // approved. Name-only entries are resolved by PowerShell from its module path and are
+        // deliberately left alone.
+        private static readonly string[] FfiModuleLoadManifestKeys =
+        {
+            "RootModule",
+            "ModuleToProcess",
+            "NestedModules",
+            "RequiredModules",
+            "RequiredAssemblies",
+            "ScriptsToProcess",
+            "TypesToProcess",
+            "FormatsToProcess",
+        };
+
+        private static readonly string[] FfiModuleLoadExtensions =
+        {
+            ".psd1",
+            ".psm1",
+            ".ps1",
+            ".dll",
+            ".exe",
+            ".ps1xml",
+            ".cdxml",
+        };
+
+        private sealed class FfiModuleRootResolution
+        {
+            public FfiModuleRootResolution(string path, string canonicalPath, uint status, string diagnostic)
+            {
+                Path = path;
+                CanonicalPath = canonicalPath;
+                Status = status;
+                Diagnostic = diagnostic;
+            }
+
+            public string Path { get; }
+
+            public string CanonicalPath { get; }
+
+            public uint Status { get; }
+
+            public string Diagnostic { get; }
+        }
+
+        private sealed class FfiModuleImportResolution
+        {
+            public FfiModuleImportResolution(
+                string moduleImport,
+                string resolvedPath,
+                string manifestPath,
+                uint status,
+                string declaredVersion,
+                string[] declaredCommands,
+                bool declaredCommandsTruncated,
+                string diagnostic)
+            {
+                ModuleImport = moduleImport;
+                ResolvedPath = resolvedPath;
+                ManifestPath = manifestPath;
+                Status = status;
+                DeclaredVersion = declaredVersion;
+                DeclaredCommands = declaredCommands;
+                DeclaredCommandsTruncated = declaredCommandsTruncated;
+                Diagnostic = diagnostic;
+            }
+
+            public string ModuleImport { get; }
+
+            public string ResolvedPath { get; }
+
+            public string ManifestPath { get; }
+
+            public uint Status { get; }
+
+            public string DeclaredVersion { get; }
+
+            public string[] DeclaredCommands { get; }
+
+            public bool DeclaredCommandsTruncated { get; }
+
+            public string Diagnostic { get; }
+        }
+
+        private sealed class FfiSessionPreflightPayload
+        {
+            public FfiSessionPreflightPayload(
+                uint status,
+                string diagnostic,
+                FfiModuleRootResolution[] moduleRoots,
+                FfiModuleImportResolution[] moduleImports)
+            {
+                Status = status;
+                Diagnostic = diagnostic;
+                ModuleRoots = moduleRoots;
+                ModuleImports = moduleImports;
+            }
+
+            public uint Status { get; }
+
+            public string Diagnostic { get; }
+
+            public FfiModuleRootResolution[] ModuleRoots { get; }
+
+            public FfiModuleImportResolution[] ModuleImports { get; }
+        }
+
+        private sealed class FfiManifestDeclaration
+        {
+            public FfiManifestDeclaration(
+                uint status,
+                string version,
+                string[] commands,
+                bool commandsTruncated,
+                string diagnostic)
+            {
+                Status = status;
+                Version = version;
+                Commands = commands;
+                CommandsTruncated = commandsTruncated;
+                Diagnostic = diagnostic;
+            }
+
+            public uint Status { get; }
+
+            public string Version { get; }
+
+            public string[] Commands { get; }
+
+            public bool CommandsTruncated { get; }
+
+            public string Diagnostic { get; }
         }
 
         private static string[] NormalizeDirectories(string[] directories, string description)
         {
-            if (directories.Length > FfiMaxSessionEvents)
+            FfiModuleRootResolution[] resolutions = ResolveModuleRoots(directories, description);
+            if (resolutions.Any(resolution => resolution.Status != FfiModuleRootValid))
+            {
+                throw new InvalidOperationException($"{description} must name unique existing directories.");
+            }
+
+            return resolutions.Select(static resolution => resolution.CanonicalPath).ToArray();
+        }
+
+        private static FfiModuleRootResolution[] ResolveModuleRoots(string[] directories, string description)
+        {
+            if (directories is null || directories.Length > FfiMaxSessionEvents)
             {
                 throw new InvalidOperationException($"{description} count exceeds its bound.");
             }
-            var normalized = new string[directories.Length];
+
+            var resolutions = new FfiModuleRootResolution[directories.Length];
             var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (int index = 0; index < directories.Length; index++)
             {
                 string directory = directories[index];
                 if (string.IsNullOrWhiteSpace(directory) || !Path.IsPathFullyQualified(directory))
                 {
-                    throw new InvalidOperationException($"{description} must be an absolute directory.");
+                    resolutions[index] = new FfiModuleRootResolution(
+                        directory ?? string.Empty,
+                        string.Empty,
+                        FfiModuleRootInvalid,
+                        "Module root must be an absolute directory.");
+                    continue;
                 }
-                string fullPath = Path.GetFullPath(directory);
-                if (!Directory.Exists(fullPath) || !unique.Add(fullPath))
+
+                try
                 {
-                    throw new InvalidOperationException($"{description} must name unique existing directories.");
+                    string fullPath = Path.GetFullPath(directory);
+                    if (!Directory.Exists(fullPath))
+                    {
+                        resolutions[index] = new FfiModuleRootResolution(
+                            directory,
+                            string.Empty,
+                            FfiModuleRootMissing,
+                            "Module root does not exist.");
+                        continue;
+                    }
+
+                    string canonicalPath = CanonicalizeExistingPath(fullPath, isDirectory: true);
+                    if (!unique.Add(canonicalPath))
+                    {
+                        resolutions[index] = new FfiModuleRootResolution(
+                            directory,
+                            canonicalPath,
+                            FfiModuleRootInvalid,
+                            "Module roots must be unique after canonicalization.");
+                        continue;
+                    }
+
+                    resolutions[index] = new FfiModuleRootResolution(
+                        directory,
+                        canonicalPath,
+                        FfiModuleRootValid,
+                        string.Empty);
                 }
-                normalized[index] = fullPath;
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+                {
+                    resolutions[index] = new FfiModuleRootResolution(
+                        directory,
+                        string.Empty,
+                        FfiModuleRootInvalid,
+                        "Module root cannot be canonicalized.");
+                }
             }
-            return normalized;
+
+            return resolutions;
         }
 
         private static string ResolveModuleImport(string[] allowedModulePaths, string moduleImport)
         {
-            if (File.Exists(moduleImport))
+            FfiModuleRootResolution[] roots = allowedModulePaths
+                .Select(path => new FfiModuleRootResolution(path, path, FfiModuleRootValid, string.Empty))
+                .ToArray();
+            FfiModuleImportResolution resolution = ResolveModuleImport(roots, moduleImport);
+            if (resolution.Status != FfiModuleImportResolved &&
+                resolution.Status != FfiModuleImportManifestDeclarationsUnavailable)
             {
-                string manifestPath = Path.GetFullPath(moduleImport);
-                if (!string.Equals(Path.GetExtension(manifestPath), ".psd1", StringComparison.OrdinalIgnoreCase) ||
-                    !File.Exists(manifestPath))
-                {
-                    throw new InvalidOperationException("An approved module manifest path is invalid.");
-                }
-
-                return manifestPath;
+                throw new InvalidOperationException(resolution.Diagnostic.Length != 0
+                    ? $"An approved module import could not be resolved beneath an approved module path. {resolution.Diagnostic}"
+                    : "An approved module import could not be resolved beneath an approved module path.");
             }
 
+            return resolution.ResolvedPath;
+        }
+
+        private static FfiModuleImportResolution ResolveModuleImport(
+            FfiModuleRootResolution[] allowedModulePaths,
+            string moduleImport)
+        {
             if (string.IsNullOrWhiteSpace(moduleImport) ||
                 moduleImport.Length > 128 ||
                 !moduleImport.All(character => char.IsLetterOrDigit(character) || character is '.' or '_' or '-'))
             {
-                throw new InvalidOperationException("Module import name is invalid.");
+                return new FfiModuleImportResolution(
+                    moduleImport ?? string.Empty,
+                    string.Empty,
+                    string.Empty,
+                    FfiModuleImportUnresolvable,
+                    string.Empty,
+                    Array.Empty<string>(),
+                    false,
+                    "Module import name is invalid.");
             }
 
-            foreach (string root in NormalizeDirectories(allowedModulePaths, "Allowed module path"))
+            foreach (FfiModuleRootResolution root in allowedModulePaths)
             {
+                if (root.Status != FfiModuleRootValid)
+                {
+                    continue;
+                }
+
                 foreach (string candidate in new[]
                 {
-                    Path.Combine(root, moduleImport, $"{moduleImport}.psd1"),
-                    Path.Combine(root, moduleImport, $"{moduleImport}.psm1"),
-                    Path.Combine(root, $"{moduleImport}.psd1"),
-                    Path.Combine(root, $"{moduleImport}.psm1"),
-                    Path.Combine(root, $"{moduleImport}.dll"),
+                    Path.Combine(root.CanonicalPath, moduleImport, $"{moduleImport}.psd1"),
+                    Path.Combine(root.CanonicalPath, moduleImport, $"{moduleImport}.psm1"),
+                    Path.Combine(root.CanonicalPath, $"{moduleImport}.psd1"),
+                    Path.Combine(root.CanonicalPath, $"{moduleImport}.psm1"),
+                    Path.Combine(root.CanonicalPath, $"{moduleImport}.dll"),
                 })
                 {
-                    if (File.Exists(candidate))
+                    if (!File.Exists(candidate))
                     {
-                        return candidate;
+                        continue;
                     }
+
+                    string canonicalCandidate;
+                    try
+                    {
+                        canonicalCandidate = CanonicalizeExistingPath(candidate, isDirectory: false);
+                    }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+                    {
+                        continue;
+                    }
+
+                    if (!IsBeneathRoot(root.CanonicalPath, canonicalCandidate))
+                    {
+                        continue;
+                    }
+
+                    return DescribeModuleImport(moduleImport, canonicalCandidate, root.CanonicalPath);
                 }
             }
 
-            throw new InvalidOperationException("An approved module import could not be resolved beneath an approved module path.");
+            return new FfiModuleImportResolution(
+                moduleImport,
+                string.Empty,
+                string.Empty,
+                FfiModuleImportUnresolvable,
+                string.Empty,
+                Array.Empty<string>(),
+                false,
+                "Module import could not be resolved beneath an approved module root.");
+        }
+
+        private static FfiModuleImportResolution DescribeModuleImport(
+            string moduleImport,
+            string resolvedPath,
+            string root)
+        {
+            string manifestPath = string.Equals(Path.GetExtension(resolvedPath), ".psd1", StringComparison.OrdinalIgnoreCase)
+                ? resolvedPath
+                : Path.ChangeExtension(resolvedPath, ".psd1");
+            if (!File.Exists(manifestPath))
+            {
+                return new FfiModuleImportResolution(
+                    moduleImport,
+                    resolvedPath,
+                    string.Empty,
+                    FfiModuleImportResolved,
+                    string.Empty,
+                    Array.Empty<string>(),
+                    false,
+                    string.Empty);
+            }
+
+            try
+            {
+                manifestPath = CanonicalizeExistingPath(manifestPath, isDirectory: false);
+                if (!IsBeneathRoot(root, manifestPath))
+                {
+                    return new FfiModuleImportResolution(
+                        moduleImport,
+                        resolvedPath,
+                        string.Empty,
+                        FfiModuleImportManifestInvalid,
+                        string.Empty,
+                        Array.Empty<string>(),
+                        false,
+                        "Module manifest resolves outside its approved module root.");
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                return new FfiModuleImportResolution(
+                    moduleImport,
+                    resolvedPath,
+                    string.Empty,
+                    FfiModuleImportManifestUnreadable,
+                    string.Empty,
+                    Array.Empty<string>(),
+                    false,
+                    "Module manifest cannot be read.");
+            }
+
+            FfiManifestDeclaration declaration = ReadManifestDeclaration(manifestPath, root);
+            return new FfiModuleImportResolution(
+                moduleImport,
+                resolvedPath,
+                manifestPath,
+                declaration.Status,
+                declaration.Version,
+                declaration.Commands,
+                declaration.CommandsTruncated,
+                declaration.Diagnostic);
+        }
+
+        private static FfiManifestDeclaration ReadManifestDeclaration(string manifestPath, string root)
+        {
+            try
+            {
+                FileInfo info = new FileInfo(manifestPath);
+                if (info.Length > FfiPreflightMaximumManifestBytes)
+                {
+                    return InvalidManifest("Module manifest exceeds the preflight size bound.");
+                }
+
+                string source = File.ReadAllText(manifestPath);
+                Token[] tokens;
+                ParseError[] errors;
+                ScriptBlockAst script = Parser.ParseInput(source, out tokens, out errors);
+                if (errors.Length != 0 || !TryGetManifestHashtable(script, out HashtableAst manifest))
+                {
+                    return InvalidManifest("Module manifest is not a valid static data file.");
+                }
+
+                string version = string.Empty;
+                var commands = new List<string>(FfiPreflightMaximumDeclaredCommands);
+                bool commandsTruncated = false;
+                bool declarationsUnavailable = false;
+                string manifestDirectory = Path.GetDirectoryName(manifestPath) ?? string.Empty;
+                string externalDeclaration = string.Empty;
+                foreach (Tuple<ExpressionAst, StatementAst> pair in manifest.KeyValuePairs)
+                {
+                    if (pair.Item1 is not StringConstantExpressionAst key)
+                    {
+                        continue;
+                    }
+
+                    if (string.Equals(key.Value, "ModuleVersion", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!TryGetManifestString(pair.Item2, out string declaredVersion))
+                        {
+                            declarationsUnavailable = true;
+                            continue;
+                        }
+
+                        version = BoundPreflightText(declaredVersion, FfiPreflightMaximumVersionLength);
+                        continue;
+                    }
+
+                    if (IsModuleLoadManifestKey(key.Value))
+                    {
+                        if (!TryGetManifestLoadPaths(pair.Item2, out string[] declaredPaths))
+                        {
+                            return InvalidManifest(
+                                $"Module manifest has a non-static '{key.Value}' module-loading declaration.");
+                        }
+
+                        foreach (string declaredPath in declaredPaths)
+                        {
+                            if (externalDeclaration.Length != 0 ||
+                                !IsPathLikeModuleDeclaration(declaredPath) ||
+                                DeclarationResolvesBeneathRoot(manifestDirectory, root, declaredPath))
+                            {
+                                continue;
+                            }
+
+                            externalDeclaration = BoundPreflightText(declaredPath, FfiPreflightMaximumDeclaredCommandLength);
+                        }
+
+                        continue;
+                    }
+
+                    if (!string.Equals(key.Value, "FunctionsToExport", StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(key.Value, "CmdletsToExport", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (!TryGetManifestStringArray(pair.Item2, out string[] declaredCommands))
+                    {
+                        declarationsUnavailable = true;
+                        continue;
+                    }
+
+                    foreach (string command in declaredCommands)
+                    {
+                        if (commands.Count == FfiPreflightMaximumDeclaredCommands)
+                        {
+                            commandsTruncated = true;
+                            continue;
+                        }
+
+                        commands.Add(BoundPreflightText(command, FfiPreflightMaximumDeclaredCommandLength));
+                    }
+                }
+
+                return externalDeclaration.Length != 0
+                    ? new FfiManifestDeclaration(
+                        FfiModuleImportManifestDeclaresExternalPath,
+                        version,
+                        commands.ToArray(),
+                        commandsTruncated,
+                        $"Module manifest loads '{externalDeclaration}' from outside its approved module root.")
+                    : new FfiManifestDeclaration(
+                        declarationsUnavailable ? FfiModuleImportManifestDeclarationsUnavailable : FfiModuleImportResolved,
+                        version,
+                        commands.ToArray(),
+                        commandsTruncated,
+                        declarationsUnavailable ? "Module manifest declarations are not entirely static." : string.Empty);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                return new FfiManifestDeclaration(
+                    FfiModuleImportManifestUnreadable,
+                    string.Empty,
+                    Array.Empty<string>(),
+                    false,
+                    "Module manifest cannot be read.");
+            }
+        }
+
+        private static FfiManifestDeclaration InvalidManifest(string diagnostic)
+        {
+            return new FfiManifestDeclaration(
+                FfiModuleImportManifestInvalid,
+                string.Empty,
+                Array.Empty<string>(),
+                false,
+                diagnostic);
+        }
+
+        private static bool TryGetManifestHashtable(ScriptBlockAst script, out HashtableAst manifest)
+        {
+            manifest = null;
+            if (script.EndBlock.Statements.Count != 1 ||
+                script.EndBlock.Statements[0] is not PipelineAst pipeline ||
+                pipeline.PipelineElements.Count != 1 ||
+                pipeline.PipelineElements[0] is not CommandExpressionAst command ||
+                command.Expression is not HashtableAst hashtable)
+            {
+                return false;
+            }
+
+            manifest = hashtable;
+            return true;
+        }
+
+        private static bool TryGetManifestString(StatementAst statement, out string value)
+        {
+            value = string.Empty;
+            return TryGetManifestExpression(statement, out ExpressionAst expression) &&
+                expression is StringConstantExpressionAst stringExpression &&
+                (value = stringExpression.Value) is not null;
+        }
+
+        private static bool TryGetManifestStringArray(StatementAst statement, out string[] values)
+        {
+            values = Array.Empty<string>();
+            if (!TryGetManifestExpression(statement, out ExpressionAst expression))
+            {
+                return false;
+            }
+
+            if (expression is StringConstantExpressionAst stringExpression)
+            {
+                values = [stringExpression.Value];
+                return true;
+            }
+
+            if (expression is ArrayExpressionAst arrayExpression)
+            {
+                if (arrayExpression.SubExpression.Statements.Count == 0)
+                {
+                    return true;
+                }
+
+                if (arrayExpression.SubExpression.Statements.Count != 1 ||
+                    arrayExpression.SubExpression.Statements[0] is not PipelineAst arrayPipeline ||
+                    arrayPipeline.PipelineElements.Count != 1 ||
+                    arrayPipeline.PipelineElements[0] is not CommandExpressionAst arrayCommand)
+                {
+                    return false;
+                }
+
+                // A single-element array literal such as @('Get-Thing') parses as the element
+                // expression itself rather than as an ArrayLiteralAst.
+                if (arrayCommand.Expression is StringConstantExpressionAst singleElement)
+                {
+                    values = [singleElement.Value];
+                    return true;
+                }
+
+                if (arrayCommand.Expression is not ArrayLiteralAst nestedArray)
+                {
+                    return false;
+                }
+
+                expression = nestedArray;
+            }
+
+            if (expression is not ArrayLiteralAst array)
+            {
+                return false;
+            }
+
+            var result = new List<string>();
+            foreach (ExpressionAst element in array.Elements)
+            {
+                if (element is not StringConstantExpressionAst stringElement)
+                {
+                    return false;
+                }
+
+                result.Add(stringElement.Value);
+            }
+
+            values = result.ToArray();
+            return true;
+        }
+
+        private static bool TryGetManifestExpression(StatementAst statement, out ExpressionAst expression)
+        {
+            expression = null;
+            if (statement is not PipelineAst pipeline ||
+                pipeline.PipelineElements.Count != 1 ||
+                pipeline.PipelineElements[0] is not CommandExpressionAst command)
+            {
+                return false;
+            }
+
+            expression = command.Expression;
+            return true;
+        }
+
+        private static bool IsModuleLoadManifestKey(string key)
+        {
+            return FfiModuleLoadManifestKeys.Any(candidate => string.Equals(candidate, key, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool IsPathLikeModuleDeclaration(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            if (value.IndexOf(Path.DirectorySeparatorChar) >= 0 ||
+                value.IndexOf(Path.AltDirectorySeparatorChar) >= 0 ||
+                Path.IsPathRooted(value))
+            {
+                return true;
+            }
+
+            string extension = Path.GetExtension(value);
+            return extension.Length != 0 &&
+                FfiModuleLoadExtensions.Any(candidate => string.Equals(candidate, extension, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool DeclarationResolvesBeneathRoot(string manifestDirectory, string root, string declaredPath)
+        {
+            if (root.Length == 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                string resolvedPath = Path.IsPathRooted(declaredPath)
+                    ? Path.GetFullPath(declaredPath)
+                    : Path.GetFullPath(Path.Combine(manifestDirectory, declaredPath));
+                if (File.Exists(resolvedPath))
+                {
+                    resolvedPath = CanonicalizeExistingPath(resolvedPath, isDirectory: false);
+                }
+
+                return IsBeneathRoot(root, resolvedPath);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Reads statically declared module-loading entries. Non-string elements such as the
+        /// module specification hashtables accepted by RequiredModules name a module rather
+        /// than a path, so they are skipped instead of failing the whole declaration.
+        /// </summary>
+        private static bool TryGetManifestLoadPaths(StatementAst statement, out string[] values)
+        {
+            values = Array.Empty<string>();
+            if (!TryGetManifestExpression(statement, out ExpressionAst expression))
+            {
+                return false;
+            }
+
+            if (expression is StringConstantExpressionAst stringExpression)
+            {
+                values = [stringExpression.Value];
+                return true;
+            }
+
+            if (expression is ArrayExpressionAst arrayExpression)
+            {
+                if (arrayExpression.SubExpression.Statements.Count == 0)
+                {
+                    return true;
+                }
+
+                if (arrayExpression.SubExpression.Statements.Count != 1 ||
+                    arrayExpression.SubExpression.Statements[0] is not PipelineAst arrayPipeline ||
+                    arrayPipeline.PipelineElements.Count != 1 ||
+                    arrayPipeline.PipelineElements[0] is not CommandExpressionAst arrayCommand)
+                {
+                    return false;
+                }
+
+                if (arrayCommand.Expression is StringConstantExpressionAst singleElement)
+                {
+                    values = [singleElement.Value];
+                    return true;
+                }
+
+                if (arrayCommand.Expression is HashtableAst)
+                {
+                    return true;
+                }
+
+                if (arrayCommand.Expression is not ArrayLiteralAst nestedArray)
+                {
+                    return false;
+                }
+
+                expression = nestedArray;
+            }
+
+            if (expression is not ArrayLiteralAst array)
+            {
+                return false;
+            }
+
+            var result = new List<string>();
+            foreach (ExpressionAst element in array.Elements)
+            {
+                if (element is HashtableAst)
+                {
+                    continue;
+                }
+
+                if (element is not StringConstantExpressionAst stringElement)
+                {
+                    return false;
+                }
+
+                result.Add(stringElement.Value);
+            }
+
+            values = result.ToArray();
+            return true;
+        }
+
+        private static string CanonicalizeExistingPath(string path, bool isDirectory)
+        {
+            string fullPath = Path.GetFullPath(path);
+            if (isDirectory)
+            {
+                fullPath = Path.TrimEndingDirectorySeparator(fullPath);
+            }
+
+            string root = Path.GetPathRoot(fullPath)
+                ?? throw new ArgumentException("The path has no filesystem root.", nameof(path));
+            string canonicalPath = root;
+            foreach (string component in fullPath[root.Length..].Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries))
+            {
+                canonicalPath = Path.Combine(canonicalPath, component);
+                FileSystemInfo info = Directory.Exists(canonicalPath)
+                    ? new DirectoryInfo(canonicalPath)
+                    : new FileInfo(canonicalPath);
+                if (!info.Exists)
+                {
+                    throw new IOException("The path does not exist.");
+                }
+
+                // Resolve every existing component, not just the final entry. A regular
+                // module file beneath a junction can otherwise pass a lexical root check
+                // while its actual storage lies outside the approved root.
+                FileSystemInfo target = info.ResolveLinkTarget(returnFinalTarget: true);
+                if (target is not null)
+                {
+                    canonicalPath = Path.GetFullPath(target.FullName);
+                }
+            }
+
+            if (!isDirectory)
+            {
+                return canonicalPath;
+            }
+
+            while (canonicalPath.EndsWith($"{Path.DirectorySeparatorChar}.", StringComparison.Ordinal) ||
+                canonicalPath.EndsWith($"{Path.AltDirectorySeparatorChar}.", StringComparison.Ordinal))
+            {
+                canonicalPath = canonicalPath.Substring(0, canonicalPath.Length - 2) + Path.DirectorySeparatorChar;
+            }
+
+            return Path.TrimEndingDirectorySeparator(canonicalPath);
+        }
+
+        private static bool IsBeneathRoot(string root, string path)
+        {
+            try
+            {
+                string relative = Path.GetRelativePath(root, path);
+                return relative.Length != 0 &&
+                    !Path.IsPathFullyQualified(relative) &&
+                    relative != ".." &&
+                    !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal);
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
+        }
+
+        private static string BoundPreflightText(string value, int maximumLength)
+        {
+            value ??= string.Empty;
+            if (value.Length <= maximumLength)
+            {
+                return value;
+            }
+
+            int length = maximumLength;
+            if (length != 0 &&
+                char.IsHighSurrogate(value[length - 1]) &&
+                length < value.Length &&
+                char.IsLowSurrogate(value[length]))
+            {
+                length--;
+            }
+
+            return value.Substring(0, length);
+        }
+
+        private static class FfiPreflightValueEncoder
+        {
+            public static byte[] Encode(FfiSessionPreflightPayload report)
+            {
+                ArgumentNullException.ThrowIfNull(report);
+                object[] roots = report.ModuleRoots.Select(static root => CreatePropertyBag(
+                    ("Path", BoundPreflightText(root.Path, FfiPreflightMaximumPathLength)),
+                    ("CanonicalPath", BoundPreflightText(root.CanonicalPath, FfiPreflightMaximumPathLength)),
+                    ("Status", root.Status),
+                    ("Diagnostic", BoundPreflightText(root.Diagnostic, FfiPreflightMaximumTextLength)))).Cast<object>().ToArray();
+                object[] imports = report.ModuleImports.Select(static import => CreatePropertyBag(
+                    ("ModuleImport", BoundPreflightText(import.ModuleImport, FfiPreflightMaximumTextLength)),
+                    ("ResolvedPath", BoundPreflightText(import.ResolvedPath, FfiPreflightMaximumPathLength)),
+                    ("ManifestPath", BoundPreflightText(import.ManifestPath, FfiPreflightMaximumPathLength)),
+                    ("Status", import.Status),
+                    ("DeclaredVersion", BoundPreflightText(import.DeclaredVersion, FfiPreflightMaximumVersionLength)),
+                    ("DeclaredCommands", import.DeclaredCommands
+                        .Select(static command => (object)BoundPreflightText(command, FfiPreflightMaximumDeclaredCommandLength))
+                        .ToArray()),
+                    ("DeclaredCommandsTruncated", import.DeclaredCommandsTruncated),
+                    ("Diagnostic", BoundPreflightText(import.Diagnostic, FfiPreflightMaximumTextLength)))).Cast<object>().ToArray();
+                PSObject value = CreatePropertyBag(
+                    ("Status", report.Status),
+                    ("Diagnostic", BoundPreflightText(report.Diagnostic, FfiPreflightMaximumTextLength)),
+                    ("ModuleRoots", roots),
+                    ("ModuleImports", imports));
+                if (!FfiSnapshotCollector.TryEncodeCopiedValue(value, depth: 0, out FfiSnapshotValue encoded) ||
+                    encoded.Kind != (uint)FfiValueKind.PropertyBag ||
+                    encoded.Payload.Length > FfiMaxValuePayloadLength)
+                {
+                    throw new InvalidOperationException("PowerShell session preflight report exceeds its copied-value bounds.");
+                }
+
+                return encoded.Payload;
+            }
+
+            private static PSObject CreatePropertyBag(params (string Name, object Value)[] properties)
+            {
+                var propertyBag = new PSObject();
+                foreach ((string name, object value) in properties)
+                {
+                    propertyBag.Properties.Add(new PSNoteProperty(name, value));
+                }
+
+                return propertyBag;
+            }
         }
 
         private static readonly object FfiApiV1Lock = new object();
@@ -304,7 +1130,8 @@ namespace NativeHost
                     FfiFeatureSessionPrimitives | FfiFeatureSessionPolling | FfiFeatureSnapshotProjections |
                     FfiFeatureSessionConfiguration | FfiFeatureSessionVariables | FfiFeatureCapabilityRpc |
                     FfiFeatureLiveObjectProbe | FfiFeatureLiveSessionObjectProbe | FfiFeatureLiveObjectContracts |
-                    FfiFeatureLiveStreamPolling | FfiFeatureTypedResultPaging,
+                    FfiFeatureLiveStreamPolling | FfiFeatureTypedResultPaging | FfiFeatureObservedInvocation |
+                    FfiFeatureSessionPreflight | FfiFeatureRuntimeDiagnostics,
                 PowerShell_Create = (IntPtr)(delegate* unmanaged<IntPtr*, FfiCallResult*, int>)&FfiPowerShell_Create,
                 PowerShell_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiPowerShell_Release,
                 PowerShell_AddArgumentUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, FfiCallResult*, int>)&FfiPowerShell_AddArgumentUtf8,
@@ -375,7 +1202,55 @@ namespace NativeHost
                 TypedResultPage_GetRecordInfo = (IntPtr)(delegate* unmanaged<IntPtr, int, long*, uint*, FfiCallResult*, int>)&FfiTypedResultPage_GetRecordInfo,
                 TypedResultPage_CopyRecordValue = (IntPtr)(delegate* unmanaged<IntPtr, int, uint*, byte*, int, int*, FfiCallResult*, int>)&FfiTypedResultPage_CopyRecordValue,
                 TypedResultPage_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiTypedResultPage_Release,
+                PowerShell_BeginObservedInvocation = (IntPtr)(delegate* unmanaged<IntPtr, int, int, int, int, IntPtr*, FfiCallResult*, int>)&FfiPowerShell_BeginObservedInvocation,
+                ObservedInvocation_Poll = (IntPtr)(delegate* unmanaged<IntPtr, int*, FfiCallResult*, int>)&FfiObservedInvocation_Poll,
+                ObservedInvocation_ReadResultPage = (IntPtr)(delegate* unmanaged<IntPtr, long, int, IntPtr*, FfiCallResult*, int>)&FfiObservedInvocation_ReadResultPage,
+                ObservedInvocation_ReadDiagnosticPage = (IntPtr)(delegate* unmanaged<IntPtr, long, int, IntPtr*, FfiCallResult*, int>)&FfiObservedInvocation_ReadDiagnosticPage,
+                ObservedInvocation_Complete = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiObservedInvocation_Complete,
+                ObservedInvocation_Stop = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiObservedInvocation_Stop,
+                ObservedInvocation_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiObservedInvocation_Release,
+                ObservedDiagnosticPage_GetInfo = (IntPtr)(delegate* unmanaged<IntPtr, long*, long*, long*, long*, int*, uint*, int*, FfiCallResult*, int>)&FfiObservedDiagnosticPage_GetInfo,
+                ObservedDiagnosticPage_GetRecordInfo = (IntPtr)(delegate* unmanaged<IntPtr, int, int*, long*, FfiCallResult*, int>)&FfiObservedDiagnosticPage_GetRecordInfo,
+                ObservedDiagnosticPage_CopyRecordTextToUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, int, byte*, int, int*, FfiCallResult*, int>)&FfiObservedDiagnosticPage_CopyRecordTextToUtf8,
+                ObservedDiagnosticPage_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiObservedDiagnosticPage_Release,
+                PowerShellSession_PreflightConfigured = (IntPtr)(delegate* unmanaged<uint, uint, uint, uint, uint, uint, uint, uint, uint, byte*, int, byte*, int, byte*, int, byte*, int, byte*, int, byte*, int, int*, FfiCallResult*, int>)&FfiPowerShellSession_PreflightConfigured,
+                RuntimeDiagnostics_CopyPowerShellFileVersionUtf8 = (IntPtr)(delegate* unmanaged<byte*, int, int*, int*, FfiCallResult*, int>)&FfiRuntimeDiagnostics_CopyPowerShellFileVersionUtf8,
             };
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiRuntimeDiagnostics_CopyPowerShellFileVersionUtf8(
+            byte* buffer,
+            int bufferLength,
+            int* requiredLength,
+            int* available,
+            FfiCallResult* result)
+        {
+            if (requiredLength == null || available == null || bufferLength < 0 || (buffer == null && bufferLength != 0))
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Runtime diagnostic output buffer arguments are invalid.");
+            }
+
+            IntPtr outputBuffer = (IntPtr)buffer;
+            IntPtr outputRequiredLength = (IntPtr)requiredLength;
+            IntPtr outputAvailable = (IntPtr)available;
+            return Execute(result, () =>
+            {
+                string fileVersion = TryGetPowerShellFileVersion();
+                Marshal.WriteInt32(outputAvailable, fileVersion.Length == 0 ? 0 : 1);
+                int required = Encoding.UTF8.GetByteCount(fileVersion);
+                Marshal.WriteInt32(outputRequiredLength, required);
+                if (bufferLength < required)
+                {
+                    throw new BufferTooSmallException();
+                }
+
+                if (required > 0)
+                {
+                    byte[] versionBytes = Encoding.UTF8.GetBytes(fileVersion);
+                    Marshal.Copy(versionBytes, 0, outputBuffer, required);
+                }
+            }, bufferTooSmallIsSuccess: true);
         }
 
         [UnmanagedCallersOnly]
@@ -503,6 +1378,169 @@ namespace NativeHost
                 return WriteFailure(result, FfiStatusInvalidArgument, "PowerShell session handle output pointer is null.");
             }
 
+            int status = ReadSessionConfiguration(
+                initialVariables,
+                initialVariablesLength,
+                moduleImports,
+                moduleImportsLength,
+                allowedModulePaths,
+                allowedModulePathsLength,
+                workingDirectory,
+                workingDirectoryLength,
+                environment,
+                environmentLength,
+                result,
+                out FfiSessionConfigurationInput configuration);
+            if (status != FfiStatusSuccess)
+            {
+                return status;
+            }
+
+            return Execute(result, () =>
+            {
+                var session = FfiPowerShellSession.CreateConfigured(
+                    runspaceMode,
+                    initialConfiguration,
+                    historyMode,
+                    errorPreference,
+                    warningPreference,
+                    verbosePreference,
+                    debugPreference,
+                    informationPreference,
+                    executionPolicy,
+                    configuration.InitialVariables,
+                    configuration.ModuleImports,
+                    configuration.AllowedModulePaths,
+                    configuration.WorkingDirectory,
+                    configuration.Environment);
+                GCHandle handle = GCHandle.Alloc(session, GCHandleType.Normal);
+                *ptrSessionHandle = GCHandle.ToIntPtr(handle);
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiPowerShellSession_PreflightConfigured(
+            uint runspaceMode,
+            uint initialConfiguration,
+            uint historyMode,
+            uint errorPreference,
+            uint warningPreference,
+            uint verbosePreference,
+            uint debugPreference,
+            uint informationPreference,
+            uint executionPolicy,
+            byte* initialVariables,
+            int initialVariablesLength,
+            byte* moduleImports,
+            int moduleImportsLength,
+            byte* allowedModulePaths,
+            int allowedModulePathsLength,
+            byte* workingDirectory,
+            int workingDirectoryLength,
+            byte* environment,
+            int environmentLength,
+            byte* buffer,
+            int bufferLength,
+            int* requiredLength,
+            FfiCallResult* result)
+        {
+            if (requiredLength == null || bufferLength < 0)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "PowerShell session preflight output arguments are invalid.");
+            }
+
+            int status = ReadSessionConfiguration(
+                initialVariables,
+                initialVariablesLength,
+                moduleImports,
+                moduleImportsLength,
+                allowedModulePaths,
+                allowedModulePathsLength,
+                workingDirectory,
+                workingDirectoryLength,
+                environment,
+                environmentLength,
+                result,
+                out FfiSessionConfigurationInput configuration);
+            if (status != FfiStatusSuccess)
+            {
+                return status;
+            }
+
+            IntPtr outputBuffer = (IntPtr)buffer;
+            IntPtr outputRequiredLength = (IntPtr)requiredLength;
+            return Execute(result, () =>
+            {
+                byte[] payload = FfiPreflightValueEncoder.Encode(FfiPowerShellSession.PreflightConfigured(
+                    runspaceMode,
+                    initialConfiguration,
+                    historyMode,
+                    errorPreference,
+                    warningPreference,
+                    verbosePreference,
+                    debugPreference,
+                    informationPreference,
+                    executionPolicy,
+                    configuration.InitialVariables,
+                    configuration.ModuleImports,
+                    configuration.AllowedModulePaths,
+                    configuration.WorkingDirectory,
+                    configuration.Environment));
+                Marshal.WriteInt32(outputRequiredLength, payload.Length);
+                if (bufferLength < payload.Length)
+                {
+                    throw new BufferTooSmallException();
+                }
+
+                if (payload.Length != 0)
+                {
+                    Marshal.Copy(payload, 0, outputBuffer, payload.Length);
+                }
+            }, bufferTooSmallIsSuccess: true);
+        }
+
+        private sealed class FfiSessionConfigurationInput
+        {
+            public FfiSessionConfigurationInput(
+                PSObject initialVariables,
+                string[] moduleImports,
+                string[] allowedModulePaths,
+                string workingDirectory,
+                PSObject environment)
+            {
+                InitialVariables = initialVariables;
+                ModuleImports = moduleImports;
+                AllowedModulePaths = allowedModulePaths;
+                WorkingDirectory = workingDirectory;
+                Environment = environment;
+            }
+
+            public PSObject InitialVariables { get; }
+
+            public string[] ModuleImports { get; }
+
+            public string[] AllowedModulePaths { get; }
+
+            public string WorkingDirectory { get; }
+
+            public PSObject Environment { get; }
+        }
+
+        private static unsafe int ReadSessionConfiguration(
+            byte* initialVariables,
+            int initialVariablesLength,
+            byte* moduleImports,
+            int moduleImportsLength,
+            byte* allowedModulePaths,
+            int allowedModulePathsLength,
+            byte* workingDirectory,
+            int workingDirectoryLength,
+            byte* environment,
+            int environmentLength,
+            FfiCallResult* result,
+            out FfiSessionConfigurationInput configuration)
+        {
+            configuration = null;
             int status = ReadValue((uint)FfiValueKind.PropertyBag, initialVariables, initialVariablesLength, result, out object initialVariablesValue);
             if (status != FfiStatusSuccess)
             {
@@ -541,26 +1579,13 @@ namespace NativeHost
                 return WriteFailure(result, FfiStatusInvalidArgument, "PowerShell session module configuration must contain only strings.");
             }
 
-            return Execute(result, () =>
-            {
-                var session = FfiPowerShellSession.CreateConfigured(
-                    runspaceMode,
-                    initialConfiguration,
-                    historyMode,
-                    errorPreference,
-                    warningPreference,
-                    verbosePreference,
-                    debugPreference,
-                    informationPreference,
-                    executionPolicy,
-                    initialVariablesObject,
-                    moduleImportNames,
-                    modulePathNames,
-                    workingDirectoryValue,
-                    environmentObject);
-                GCHandle handle = GCHandle.Alloc(session, GCHandleType.Normal);
-                *ptrSessionHandle = GCHandle.ToIntPtr(handle);
-            });
+            configuration = new FfiSessionConfigurationInput(
+                initialVariablesObject,
+                moduleImportNames,
+                modulePathNames,
+                workingDirectoryValue,
+                environmentObject);
+            return FfiStatusSuccess;
         }
 
         [UnmanagedCallersOnly]
@@ -1594,6 +2619,265 @@ namespace NativeHost
         }
 
         [UnmanagedCallersOnly]
+        public static unsafe int FfiPowerShell_BeginObservedInvocation(
+            IntPtr ptrHandle,
+            int maximumBufferedResultRecords,
+            int maximumResultPageRecords,
+            int maximumBufferedDiagnosticRecords,
+            int maximumDiagnosticPageRecords,
+            IntPtr* ptrObservedInvocationHandle,
+            FfiCallResult* result)
+        {
+            if (ptrObservedInvocationHandle == null ||
+                maximumBufferedResultRecords < 1 ||
+                maximumBufferedResultRecords > FfiMaxValueContainerEntries ||
+                maximumResultPageRecords < 1 ||
+                maximumResultPageRecords > maximumBufferedResultRecords ||
+                maximumBufferedDiagnosticRecords < 1 ||
+                maximumBufferedDiagnosticRecords > FfiMaxValueContainerEntries ||
+                maximumDiagnosticPageRecords < 1 ||
+                maximumDiagnosticPageRecords > maximumBufferedDiagnosticRecords)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Observed invocation bounds or output pointer are invalid.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                FfiInvocationResults.TryRemove(ptrHandle, out _);
+                var typedResults = new FfiTypedResultQueue(
+                    maximumBufferedResultRecords,
+                    maximumResultPageRecords);
+                var diagnostics = new FfiObservedDiagnosticQueue(
+                    maximumBufferedDiagnosticRecords,
+                    maximumDiagnosticPageRecords);
+                var liveInvocation = new FfiLiveInvocation(
+                    pipeline.PowerShell,
+                    TakeCompletedInput(ptrHandle),
+                    pipeline.Session,
+                    pipeline.TakeCapabilityContext(),
+                    typedResults,
+                    diagnostics);
+                try
+                {
+                    liveInvocation.Start();
+                    GCHandle handle = GCHandle.Alloc(liveInvocation, GCHandleType.Normal);
+                    *ptrObservedInvocationHandle = GCHandle.ToIntPtr(handle);
+                }
+                catch
+                {
+                    liveInvocation.Dispose();
+                    throw;
+                }
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiObservedInvocation_Poll(
+            IntPtr ptrObservedInvocationHandle,
+            int* isCompleted,
+            FfiCallResult* result)
+        {
+            if (isCompleted == null)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Observed invocation completion output pointer is null.");
+            }
+
+            return Execute(result, () =>
+            {
+                *isCompleted = GetLiveInvocation(ptrObservedInvocationHandle).IsCompleted ? 1 : 0;
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiObservedInvocation_ReadResultPage(
+            IntPtr ptrObservedInvocationHandle,
+            long acknowledgedThrough,
+            int maximumRecords,
+            IntPtr* ptrPageHandle,
+            FfiCallResult* result)
+        {
+            if (ptrPageHandle == null || acknowledgedThrough < 0 || maximumRecords < 1 || maximumRecords > FfiMaxValueContainerEntries)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Observed result page arguments are invalid.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiTypedResultPage page = GetLiveInvocation(ptrObservedInvocationHandle)
+                    .ReadObservedResultPage(acknowledgedThrough, maximumRecords);
+                GCHandle handle = GCHandle.Alloc(page, GCHandleType.Normal);
+                *ptrPageHandle = GCHandle.ToIntPtr(handle);
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiObservedInvocation_ReadDiagnosticPage(
+            IntPtr ptrObservedInvocationHandle,
+            long acknowledgedThrough,
+            int maximumRecords,
+            IntPtr* ptrPageHandle,
+            FfiCallResult* result)
+        {
+            if (ptrPageHandle == null || acknowledgedThrough < 0 || maximumRecords < 1 || maximumRecords > FfiMaxValueContainerEntries)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Observed diagnostic page arguments are invalid.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiObservedDiagnosticPage page = GetLiveInvocation(ptrObservedInvocationHandle)
+                    .ReadObservedDiagnosticPage(acknowledgedThrough, maximumRecords);
+                GCHandle handle = GCHandle.Alloc(page, GCHandleType.Normal);
+                *ptrPageHandle = GCHandle.ToIntPtr(handle);
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiObservedInvocation_Complete(
+            IntPtr ptrObservedInvocationHandle,
+            FfiCallResult* result)
+        {
+            return Execute(result, () => GetLiveInvocation(ptrObservedInvocationHandle).CompleteObservedInvocation());
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiObservedInvocation_Stop(
+            IntPtr ptrObservedInvocationHandle,
+            FfiCallResult* result)
+        {
+            return Execute(result, () => GetLiveInvocation(ptrObservedInvocationHandle).Stop());
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiObservedInvocation_Release(
+            IntPtr ptrObservedInvocationHandle,
+            FfiCallResult* result)
+        {
+            if (!TryInitializeResult(result))
+            {
+                return FfiStatusInvalidArgument;
+            }
+
+            try
+            {
+                GCHandle handle = GCHandle.FromIntPtr(ptrObservedInvocationHandle);
+                if (!handle.IsAllocated || handle.Target is not FfiLiveInvocation invocation)
+                {
+                    return WriteFailure(result, FfiStatusInvalidHandle, "Observed invocation handle is invalid.");
+                }
+
+                handle.Free();
+                invocation.Dispose();
+                return WriteSuccess(result);
+            }
+            catch (Exception exception)
+            {
+                return WriteFailure(result, FfiStatusInvalidHandle, exception);
+            }
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiObservedDiagnosticPage_GetInfo(
+            IntPtr ptrPageHandle,
+            long* acknowledgedSequence,
+            long* nextSequence,
+            long* totalRecordCount,
+            long* droppedRecordCount,
+            int* terminalStatus,
+            uint* flags,
+            int* recordCount,
+            FfiCallResult* result)
+        {
+            if (acknowledgedSequence == null ||
+                nextSequence == null ||
+                totalRecordCount == null ||
+                droppedRecordCount == null ||
+                terminalStatus == null ||
+                flags == null ||
+                recordCount == null)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Observed diagnostic page info output pointer is null.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiObservedDiagnosticPage page = GetObservedDiagnosticPage(ptrPageHandle);
+                *acknowledgedSequence = page.AcknowledgedSequence;
+                *nextSequence = page.NextSequence;
+                *totalRecordCount = page.TotalRecordCount;
+                *droppedRecordCount = page.DroppedRecordCount;
+                *terminalStatus = page.TerminalStatus;
+                *flags = page.Flags;
+                *recordCount = page.Records.Length;
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiObservedDiagnosticPage_GetRecordInfo(
+            IntPtr ptrPageHandle,
+            int recordIndex,
+            int* stream,
+            long* sequence,
+            FfiCallResult* result)
+        {
+            if (stream == null || sequence == null)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Observed diagnostic page record output pointer is null.");
+            }
+
+            return Execute(result, () =>
+            {
+                FfiObservedDiagnosticRecord record = GetObservedDiagnosticPage(ptrPageHandle).GetRecord(recordIndex);
+                *stream = record.Stream;
+                *sequence = record.Sequence;
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiObservedDiagnosticPage_CopyRecordTextToUtf8(
+            IntPtr ptrPageHandle,
+            int recordIndex,
+            byte* buffer,
+            int bufferLength,
+            int* requiredLength,
+            FfiCallResult* result)
+        {
+            if (requiredLength == null || bufferLength < 0)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Observed diagnostic page text buffer arguments are invalid.");
+            }
+
+            IntPtr outputBuffer = (IntPtr)buffer;
+            IntPtr outputRequiredLength = (IntPtr)requiredLength;
+            return Execute(result, () =>
+            {
+                string value = GetObservedDiagnosticPage(ptrPageHandle).GetRecord(recordIndex).Text;
+                int required = Encoding.UTF8.GetByteCount(value);
+                Marshal.WriteInt32(outputRequiredLength, required);
+                if (bufferLength < required)
+                {
+                    throw new BufferTooSmallException();
+                }
+
+                if (required > 0)
+                {
+                    byte[] valueBytes = Encoding.UTF8.GetBytes(value);
+                    Marshal.Copy(valueBytes, 0, outputBuffer, required);
+                }
+            }, bufferTooSmallIsSuccess: true);
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiObservedDiagnosticPage_Release(IntPtr ptrPageHandle, FfiCallResult* result)
+        {
+            return ReleaseLiveHandle<FfiObservedDiagnosticPage>(
+                ptrPageHandle,
+                result,
+                "Observed diagnostic page handle is invalid.");
+        }
+
+        [UnmanagedCallersOnly]
         public static unsafe int FfiLiveInvocation_Poll(
             IntPtr ptrLiveInvocationHandle,
             int* isCompleted,
@@ -2429,42 +3713,38 @@ namespace NativeHost
                 string workingDirectory,
                 PSObject environment)
             {
-                if (runspaceMode is not (CurrentRunspace or NewRunspace))
-                {
-                    throw new InvalidOperationException("PowerShell session runspace mode is invalid.");
-                }
-                if (initialConfiguration is not (DefaultConfiguration or ConstrainedLanguageConfiguration) ||
-                    historyMode is not (HistoryDisabled or HistoryEnabled) ||
-                    executionPolicy is > 1)
-                {
-                    throw new InvalidOperationException("PowerShell session configuration is invalid.");
-                }
-                ArgumentNullException.ThrowIfNull(initialVariables);
-                ArgumentNullException.ThrowIfNull(moduleImports);
-                ArgumentNullException.ThrowIfNull(allowedModulePaths);
-                ArgumentNullException.ThrowIfNull(workingDirectory);
-                ArgumentNullException.ThrowIfNull(environment);
-                ValidatePreference(errorPreference, "error");
-                ValidatePreference(warningPreference, "warning");
-                ValidatePreference(verbosePreference, "verbose");
-                ValidatePreference(debugPreference, "debug");
-                ValidatePreference(informationPreference, "information");
+                ValidateConfigurationInputs(
+                    runspaceMode,
+                    initialConfiguration,
+                    historyMode,
+                    errorPreference,
+                    warningPreference,
+                    verbosePreference,
+                    debugPreference,
+                    informationPreference,
+                    executionPolicy,
+                    initialVariables,
+                    moduleImports,
+                    allowedModulePaths,
+                    workingDirectory,
+                    environment);
 
                 if (runspaceMode == CurrentRunspace)
                 {
-                    if (initialConfiguration != DefaultConfiguration ||
-                        historyMode != HistoryDisabled ||
-                        errorPreference != PreferenceInherit ||
-                        warningPreference != PreferenceInherit ||
-                        verbosePreference != PreferenceInherit ||
-                        debugPreference != PreferenceInherit ||
-                        informationPreference != PreferenceInherit ||
-                        executionPolicy != 0 ||
-                        initialVariables.Properties.Count() != 0 ||
-                        moduleImports.Length != 0 ||
-                        allowedModulePaths.Length != 0 ||
-                        !string.IsNullOrEmpty(workingDirectory) ||
-                        environment.Properties.Count() != 0)
+                    if (HasCurrentRunspaceConfiguration(
+                        initialConfiguration,
+                        historyMode,
+                        errorPreference,
+                        warningPreference,
+                        verbosePreference,
+                        debugPreference,
+                        informationPreference,
+                        executionPolicy,
+                        initialVariables,
+                        moduleImports,
+                        allowedModulePaths,
+                        workingDirectory,
+                        environment))
                     {
                         throw new InvalidOperationException(
                             "Current-runspace sessions cannot change configuration, history, preferences, variables, imports, paths, working directory, or environment.");
@@ -2546,6 +3826,187 @@ namespace NativeHost
                     runspace.Dispose();
                     throw;
                 }
+            }
+
+            public static FfiSessionPreflightPayload PreflightConfigured(
+                uint runspaceMode,
+                uint initialConfiguration,
+                uint historyMode,
+                uint errorPreference,
+                uint warningPreference,
+                uint verbosePreference,
+                uint debugPreference,
+                uint informationPreference,
+                uint executionPolicy,
+                PSObject initialVariables,
+                string[] moduleImports,
+                string[] allowedModulePaths,
+                string workingDirectory,
+                PSObject environment)
+            {
+                try
+                {
+                    ValidateConfigurationInputs(
+                        runspaceMode,
+                        initialConfiguration,
+                        historyMode,
+                        errorPreference,
+                        warningPreference,
+                        verbosePreference,
+                        debugPreference,
+                        informationPreference,
+                        executionPolicy,
+                        initialVariables,
+                        moduleImports,
+                        allowedModulePaths,
+                        workingDirectory,
+                        environment);
+                }
+                catch (InvalidOperationException)
+                {
+                    return new FfiSessionPreflightPayload(
+                        FfiPreflightInvalidConfiguration,
+                        "PowerShell session configuration is invalid.",
+                        Array.Empty<FfiModuleRootResolution>(),
+                        Array.Empty<FfiModuleImportResolution>());
+                }
+
+                if (runspaceMode == CurrentRunspace)
+                {
+                    return HasCurrentRunspaceConfiguration(
+                        initialConfiguration,
+                        historyMode,
+                        errorPreference,
+                        warningPreference,
+                        verbosePreference,
+                        debugPreference,
+                        informationPreference,
+                        executionPolicy,
+                        initialVariables,
+                        moduleImports,
+                        allowedModulePaths,
+                        workingDirectory,
+                        environment)
+                        ? new FfiSessionPreflightPayload(
+                            FfiPreflightInvalidConfiguration,
+                            "Current-runspace sessions cannot change configuration.",
+                            Array.Empty<FfiModuleRootResolution>(),
+                            Array.Empty<FfiModuleImportResolution>())
+                        : new FfiSessionPreflightPayload(
+                            FfiPreflightValid,
+                            string.Empty,
+                            Array.Empty<FfiModuleRootResolution>(),
+                            Array.Empty<FfiModuleImportResolution>());
+                }
+
+                FfiModuleRootResolution[] moduleRoots = ResolveModuleRoots(allowedModulePaths, "Allowed module path");
+                FfiModuleImportResolution[] moduleImportDiagnostics = moduleImports
+                    .Select(moduleImport => ResolveModuleImport(moduleRoots, moduleImport))
+                    .ToArray();
+                if (moduleRoots.Any(root => root.Status != FfiModuleRootValid))
+                {
+                    return new FfiSessionPreflightPayload(
+                        FfiPreflightInvalidModuleRoots,
+                        string.Empty,
+                        moduleRoots,
+                        moduleImportDiagnostics);
+                }
+
+                if (!string.IsNullOrEmpty(workingDirectory))
+                {
+                    FfiModuleRootResolution workingDirectoryResolution =
+                        ResolveModuleRoots(new[] { workingDirectory }, "Working directory")[0];
+                    if (workingDirectoryResolution.Status != FfiModuleRootValid)
+                    {
+                        return new FfiSessionPreflightPayload(
+                            FfiPreflightInvalidWorkingDirectory,
+                            "Working directory must be an existing absolute directory.",
+                            moduleRoots,
+                            moduleImportDiagnostics);
+                    }
+                }
+
+                uint status = moduleImportDiagnostics.Any(import => import.Status == FfiModuleImportUnresolvable)
+                    ? FfiPreflightUnresolvableModuleImports
+                    : moduleImportDiagnostics.Any(import =>
+                        import.Status is FfiModuleImportManifestInvalid or FfiModuleImportManifestUnreadable)
+                        ? FfiPreflightInvalidModuleManifest
+                        : moduleImportDiagnostics.Any(import => import.Status == FfiModuleImportManifestDeclaresExternalPath)
+                            ? FfiPreflightExternalModuleDeclarations
+                            : FfiPreflightValid;
+                return new FfiSessionPreflightPayload(
+                    status,
+                    string.Empty,
+                    moduleRoots,
+                    moduleImportDiagnostics);
+            }
+
+            private static void ValidateConfigurationInputs(
+                uint runspaceMode,
+                uint initialConfiguration,
+                uint historyMode,
+                uint errorPreference,
+                uint warningPreference,
+                uint verbosePreference,
+                uint debugPreference,
+                uint informationPreference,
+                uint executionPolicy,
+                PSObject initialVariables,
+                string[] moduleImports,
+                string[] allowedModulePaths,
+                string workingDirectory,
+                PSObject environment)
+            {
+                if (runspaceMode is not (CurrentRunspace or NewRunspace))
+                {
+                    throw new InvalidOperationException("PowerShell session runspace mode is invalid.");
+                }
+                if (initialConfiguration is not (DefaultConfiguration or ConstrainedLanguageConfiguration) ||
+                    historyMode is not (HistoryDisabled or HistoryEnabled) ||
+                    executionPolicy is > 1)
+                {
+                    throw new InvalidOperationException("PowerShell session configuration is invalid.");
+                }
+                ArgumentNullException.ThrowIfNull(initialVariables);
+                ArgumentNullException.ThrowIfNull(moduleImports);
+                ArgumentNullException.ThrowIfNull(allowedModulePaths);
+                ArgumentNullException.ThrowIfNull(workingDirectory);
+                ArgumentNullException.ThrowIfNull(environment);
+                ValidatePreference(errorPreference, "error");
+                ValidatePreference(warningPreference, "warning");
+                ValidatePreference(verbosePreference, "verbose");
+                ValidatePreference(debugPreference, "debug");
+                ValidatePreference(informationPreference, "information");
+            }
+
+            private static bool HasCurrentRunspaceConfiguration(
+                uint initialConfiguration,
+                uint historyMode,
+                uint errorPreference,
+                uint warningPreference,
+                uint verbosePreference,
+                uint debugPreference,
+                uint informationPreference,
+                uint executionPolicy,
+                PSObject initialVariables,
+                string[] moduleImports,
+                string[] allowedModulePaths,
+                string workingDirectory,
+                PSObject environment)
+            {
+                return initialConfiguration != DefaultConfiguration ||
+                    historyMode != HistoryDisabled ||
+                    errorPreference != PreferenceInherit ||
+                    warningPreference != PreferenceInherit ||
+                    verbosePreference != PreferenceInherit ||
+                    debugPreference != PreferenceInherit ||
+                    informationPreference != PreferenceInherit ||
+                    executionPolicy != 0 ||
+                    initialVariables.Properties.Count() != 0 ||
+                    moduleImports.Length != 0 ||
+                    allowedModulePaths.Length != 0 ||
+                    !string.IsNullOrEmpty(workingDirectory) ||
+                    environment.Properties.Count() != 0;
             }
 
             public FfiPowerShellPipeline CreatePipeline()
@@ -3664,6 +5125,97 @@ namespace NativeHost
 
                 return Records[index];
             }
+
+            public FfiTypedResultPage WithComplete(bool isComplete)
+            {
+                uint flags = isComplete
+                    ? Flags | FfiTypedResultPageComplete
+                    : Flags & ~FfiTypedResultPageComplete;
+                return new FfiTypedResultPage(
+                    Records,
+                    AcknowledgedSequence,
+                    NextSequence,
+                    TotalRecordCount,
+                    DroppedRecordCount,
+                    TerminalStatus,
+                    flags);
+            }
+        }
+
+        private sealed class FfiObservedDiagnosticRecord
+        {
+            public FfiObservedDiagnosticRecord(int stream, long sequence, string text)
+            {
+                Stream = stream;
+                Sequence = sequence;
+                Text = text;
+            }
+
+            public int Stream { get; }
+
+            public long Sequence { get; }
+
+            public string Text { get; }
+        }
+
+        private sealed class FfiObservedDiagnosticPage
+        {
+            public FfiObservedDiagnosticPage(
+                FfiObservedDiagnosticRecord[] records,
+                long acknowledgedSequence,
+                long nextSequence,
+                long totalRecordCount,
+                long droppedRecordCount,
+                int terminalStatus,
+                uint flags)
+            {
+                Records = records;
+                AcknowledgedSequence = acknowledgedSequence;
+                NextSequence = nextSequence;
+                TotalRecordCount = totalRecordCount;
+                DroppedRecordCount = droppedRecordCount;
+                TerminalStatus = terminalStatus;
+                Flags = flags;
+            }
+
+            public FfiObservedDiagnosticRecord[] Records { get; }
+
+            public long AcknowledgedSequence { get; }
+
+            public long NextSequence { get; }
+
+            public long TotalRecordCount { get; }
+
+            public long DroppedRecordCount { get; }
+
+            public int TerminalStatus { get; }
+
+            public uint Flags { get; }
+
+            public FfiObservedDiagnosticRecord GetRecord(int index)
+            {
+                if (index < 0 || index >= Records.Length)
+                {
+                    throw new InvalidOperationException("Observed diagnostic page record index is invalid.");
+                }
+
+                return Records[index];
+            }
+
+            public FfiObservedDiagnosticPage WithComplete(bool isComplete)
+            {
+                uint flags = isComplete
+                    ? Flags | FfiTypedResultPageComplete
+                    : Flags & ~FfiTypedResultPageComplete;
+                return new FfiObservedDiagnosticPage(
+                    Records,
+                    AcknowledgedSequence,
+                    NextSequence,
+                    TotalRecordCount,
+                    DroppedRecordCount,
+                    TerminalStatus,
+                    flags);
+            }
         }
 
         private sealed class FfiTypedResultQueue : IDisposable
@@ -3818,6 +5370,19 @@ namespace NativeHost
                 Monitor.PulseAll(gate);
             }
 
+            public bool IsSuccessfullyAcknowledged
+            {
+                get
+                {
+                    lock (gate)
+                    {
+                        return terminal &&
+                            terminalStatus == FfiStatusSuccess &&
+                            totalRecordCount == acknowledgedSequence;
+                    }
+                }
+            }
+
             public void Dispose()
             {
                 lock (gate)
@@ -3840,6 +5405,197 @@ namespace NativeHost
                 if (disposed)
                 {
                     throw new ObjectDisposedException(nameof(FfiTypedResultQueue));
+                }
+            }
+        }
+
+        private sealed class FfiObservedDiagnosticQueue : IDisposable
+        {
+            private readonly object gate = new object();
+            private readonly Queue<FfiObservedDiagnosticRecord> records;
+            private readonly int maximumBufferedRecords;
+            private readonly int maximumPageRecords;
+            private long nextSequence = 1;
+            private long acknowledgedSequence;
+            private long maximumAcknowledgableSequence;
+            private long totalRecordCount;
+            private int terminalStatus = FfiStatusSuccess;
+            private bool terminal;
+            private bool disposed;
+
+            public FfiObservedDiagnosticQueue(int maximumBufferedRecords, int maximumPageRecords)
+            {
+                this.maximumBufferedRecords = maximumBufferedRecords;
+                this.maximumPageRecords = maximumPageRecords;
+                records = new Queue<FfiObservedDiagnosticRecord>(maximumBufferedRecords);
+            }
+
+            public bool Write(int stream, string text)
+            {
+                if (stream < 0 || stream >= FfiStreamCount || text is null ||
+                    Encoding.UTF8.GetByteCount(text) > FfiMaxValuePayloadLength)
+                {
+                    Fail(FfiStatusUnsupportedValue);
+                    return false;
+                }
+
+                lock (gate)
+                {
+                    while (!terminal && !disposed && records.Count == maximumBufferedRecords)
+                    {
+                        Monitor.Wait(gate, TimeSpan.FromMilliseconds(50));
+                    }
+
+                    if (terminal || disposed)
+                    {
+                        return false;
+                    }
+
+                    if (nextSequence == long.MaxValue || totalRecordCount == long.MaxValue)
+                    {
+                        Fail(FfiStatusManagedFailure);
+                        return false;
+                    }
+
+                    records.Enqueue(new FfiObservedDiagnosticRecord(
+                        stream,
+                        nextSequence++,
+                        text));
+                    totalRecordCount++;
+                    Monitor.PulseAll(gate);
+                    return true;
+                }
+            }
+
+            public void Fail(int status)
+            {
+                lock (gate)
+                {
+                    if (disposed || terminal)
+                    {
+                        return;
+                    }
+
+                    terminal = true;
+                    terminalStatus = status;
+                    Monitor.PulseAll(gate);
+                }
+            }
+
+            public FfiObservedDiagnosticPage Read(long acknowledgedThrough, int maximumRecords)
+            {
+                lock (gate)
+                {
+                    ThrowIfDisposed();
+                    if (maximumRecords < 1 || maximumRecords > maximumPageRecords)
+                    {
+                        throw new InvalidOperationException("Observed diagnostic page limit exceeds the invocation bound.");
+                    }
+
+                    if (acknowledgedThrough < acknowledgedSequence ||
+                        acknowledgedThrough > maximumAcknowledgableSequence)
+                    {
+                        throw new InvalidOperationException("Observed diagnostic acknowledgement is outside the most recently returned page.");
+                    }
+
+                    Acknowledge(acknowledgedThrough);
+                    FfiObservedDiagnosticRecord[] page = records.Take(maximumRecords).ToArray();
+                    long next = page.Length == 0 ? acknowledgedSequence : page[^1].Sequence;
+                    maximumAcknowledgableSequence = next;
+                    uint flags = terminal ? FfiTypedResultPageTerminal : 0;
+                    return new FfiObservedDiagnosticPage(
+                        page,
+                        acknowledgedSequence,
+                        next,
+                        totalRecordCount,
+                        0,
+                        terminalStatus,
+                        flags);
+                }
+            }
+
+            public void Complete(int status)
+            {
+                lock (gate)
+                {
+                    if (disposed || terminal)
+                    {
+                        return;
+                    }
+
+                    terminal = true;
+                    terminalStatus = status;
+                    Monitor.PulseAll(gate);
+                }
+            }
+
+            public void Cancel()
+            {
+                lock (gate)
+                {
+                    if (disposed || terminal)
+                    {
+                        return;
+                    }
+
+                    terminal = true;
+                    terminalStatus = FfiStatusOperationCancelled;
+                    Monitor.PulseAll(gate);
+                }
+            }
+
+            public bool IsSuccessfullyAcknowledged
+            {
+                get
+                {
+                    lock (gate)
+                    {
+                        return terminal &&
+                            terminalStatus == FfiStatusSuccess &&
+                            totalRecordCount == acknowledgedSequence;
+                    }
+                }
+            }
+
+            public void Dispose()
+            {
+                lock (gate)
+                {
+                    if (disposed)
+                    {
+                        return;
+                    }
+
+                    disposed = true;
+                    terminal = true;
+                    terminalStatus = FfiStatusOperationCancelled;
+                    records.Clear();
+                    Monitor.PulseAll(gate);
+                }
+            }
+
+            private void Acknowledge(long sequence)
+            {
+                if (sequence < acknowledgedSequence || sequence > maximumAcknowledgableSequence)
+                {
+                    throw new InvalidOperationException("Observed diagnostic acknowledgement is outside the most recently returned page.");
+                }
+
+                while (records.Count != 0 && records.Peek().Sequence <= sequence)
+                {
+                    records.Dequeue();
+                }
+
+                acknowledgedSequence = sequence;
+                maximumAcknowledgableSequence = acknowledgedSequence;
+                Monitor.PulseAll(gate);
+            }
+
+            private void ThrowIfDisposed()
+            {
+                if (disposed)
+                {
+                    throw new ObjectDisposedException(nameof(FfiObservedDiagnosticQueue));
                 }
             }
         }
@@ -4730,6 +6486,7 @@ namespace NativeHost
             private readonly FfiCapabilityContext capabilityContext;
             private readonly FfiSnapshotCollector collector = new FfiSnapshotCollector();
             private readonly FfiTypedResultQueue typedResults;
+            private readonly FfiObservedDiagnosticQueue observedDiagnostics;
             private PSDataCollection<PSObject> output;
             private PSDataCollection<object> inputCollection;
             private IAsyncResult asyncResult;
@@ -4748,19 +6505,22 @@ namespace NativeHost
             private bool cleanedUp;
             private bool disposed;
             private bool sessionInvocationStarted;
+            private bool observedError;
 
             public FfiLiveInvocation(
                 PowerShell powerShell,
                 object[] input,
                 FfiPowerShellSession session,
                 FfiCapabilityContext capabilityContext,
-                FfiTypedResultQueue typedResults = null)
+                FfiTypedResultQueue typedResults = null,
+                FfiObservedDiagnosticQueue observedDiagnostics = null)
             {
                 this.powerShell = powerShell ?? throw new ArgumentNullException(nameof(powerShell));
                 this.input = input;
                 this.session = session;
                 this.capabilityContext = capabilityContext;
                 this.typedResults = typedResults;
+                this.observedDiagnostics = observedDiagnostics;
             }
 
             public bool IsCompleted
@@ -4860,9 +6620,34 @@ namespace NativeHost
                 return queue.Read(acknowledgedThrough, maximumRecords);
             }
 
+            public FfiTypedResultPage ReadObservedResultPage(long acknowledgedThrough, int maximumRecords)
+            {
+                FfiTypedResultQueue resultQueue = typedResults ?? throw new InvalidOperationException(
+                    "Live invocation does not have an observed result queue.");
+                FfiObservedDiagnosticQueue diagnosticQueue = observedDiagnostics ?? throw new InvalidOperationException(
+                    "Live invocation does not have an observed diagnostic queue.");
+                FfiTypedResultPage page = resultQueue.Read(acknowledgedThrough, maximumRecords);
+                return page.WithComplete(
+                    resultQueue.IsSuccessfullyAcknowledged &&
+                    diagnosticQueue.IsSuccessfullyAcknowledged);
+            }
+
+            public FfiObservedDiagnosticPage ReadObservedDiagnosticPage(long acknowledgedThrough, int maximumRecords)
+            {
+                FfiTypedResultQueue resultQueue = typedResults ?? throw new InvalidOperationException(
+                    "Live invocation does not have an observed result queue.");
+                FfiObservedDiagnosticQueue diagnosticQueue = observedDiagnostics ?? throw new InvalidOperationException(
+                    "Live invocation does not have an observed diagnostic queue.");
+                FfiObservedDiagnosticPage page = diagnosticQueue.Read(acknowledgedThrough, maximumRecords);
+                return page.WithComplete(
+                    resultQueue.IsSuccessfullyAcknowledged &&
+                    diagnosticQueue.IsSuccessfullyAcknowledged);
+            }
+
             public void Stop()
             {
                 typedResults?.Cancel();
+                observedDiagnostics?.Cancel();
                 powerShell.Stop();
             }
 
@@ -4906,10 +6691,12 @@ namespace NativeHost
                     }
 
                     snapshot = collector.Build();
-                    typedResults?.Complete(
-                        (snapshot.Flags & FfiResultTerminatingFailure) != 0
-                            ? FfiStatusManagedFailure
-                            : FfiStatusSuccess);
+                    int terminalStatus = (snapshot.Flags & FfiResultTerminatingFailure) != 0 ||
+                        (observedDiagnostics is not null && observedError)
+                        ? FfiStatusManagedFailure
+                        : FfiStatusSuccess;
+                    typedResults?.Complete(terminalStatus);
+                    observedDiagnostics?.Complete(terminalStatus);
                     return snapshot;
                 }
             }
@@ -4919,6 +6706,16 @@ namespace NativeHost
                 if (typedResults is null)
                 {
                     throw new InvalidOperationException("Live invocation does not have a typed result queue.");
+                }
+
+                _ = Complete();
+            }
+
+            public void CompleteObservedInvocation()
+            {
+                if (typedResults is null || observedDiagnostics is null)
+                {
+                    throw new InvalidOperationException("Live invocation does not have observed invocation queues.");
                 }
 
                 _ = Complete();
@@ -4936,6 +6733,7 @@ namespace NativeHost
 
                     disposed = true;
                     typedResults?.Dispose();
+                    observedDiagnostics?.Dispose();
                     if (asyncResult is null)
                     {
                         Cleanup();
@@ -4956,28 +6754,35 @@ namespace NativeHost
 
             private void AddError(int index)
             {
+                ErrorRecord record;
                 lock (gate)
                 {
-                    collector.AddError(powerShell.Streams.Error[index]);
+                    record = powerShell.Streams.Error[index];
+                    collector.AddError(record);
+                    observedError = true;
                     powerShell.Streams.Error.Clear();
                 }
+
+                AddObservedDiagnostic(FfiStreamKind.Error, record);
             }
 
             private void AddOutput(int index)
             {
                 FfiSnapshotValue typedValue = null;
                 bool typedValueSupported = typedResults is null;
+                PSObject diagnosticValue;
                 lock (gate)
                 {
-                    PSObject value = output[index];
-                    collector.AddOutput(value);
+                    diagnosticValue = output[index];
+                    collector.AddOutput(diagnosticValue);
                     if (typedResults is not null)
                     {
-                        typedValueSupported = TryEncodeTypedResultValue(value, out typedValue);
+                        typedValueSupported = TryEncodeTypedResultValue(diagnosticValue, out typedValue);
                     }
                     output.Clear();
                 }
 
+                AddObservedDiagnostic(FfiStreamKind.Output, diagnosticValue);
                 if (typedResults is null)
                 {
                     return;
@@ -4994,10 +6799,32 @@ namespace NativeHost
 
             private void AddText<T>(FfiStreamKind stream, PSDataCollection<T> records, int index)
             {
+                T record;
                 lock (gate)
                 {
-                    collector.AddText(stream, records[index]);
+                    record = records[index];
+                    collector.AddText(stream, record);
                     records.Clear();
+                }
+
+                AddObservedDiagnostic(stream, record);
+            }
+
+            private void AddObservedDiagnostic(FfiStreamKind stream, object record)
+            {
+                if (observedDiagnostics is null)
+                {
+                    return;
+                }
+
+                try
+                {
+                    string text = record?.ToString() ?? string.Empty;
+                    _ = observedDiagnostics.Write((int)stream, text);
+                }
+                catch
+                {
+                    observedDiagnostics.Fail(FfiStatusUnsupportedValue);
                 }
             }
 
@@ -5046,6 +6873,8 @@ namespace NativeHost
                 if (terminatingException != null && collector.ErrorCount == 0)
                 {
                     collector.AddError(terminatingError, terminatingException);
+                    observedError = true;
+                    AddObservedDiagnostic(FfiStreamKind.Error, terminatingError ?? (object)terminatingException);
                 }
 
                 output?.Clear();
@@ -5314,6 +7143,22 @@ namespace NativeHost
             return page;
         }
 
+        private static FfiObservedDiagnosticPage GetObservedDiagnosticPage(IntPtr ptrPageHandle)
+        {
+            if (ptrPageHandle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Observed diagnostic page handle is invalid.");
+            }
+
+            GCHandle handle = GCHandle.FromIntPtr(ptrPageHandle);
+            if (!handle.IsAllocated || handle.Target is not FfiObservedDiagnosticPage page)
+            {
+                throw new InvalidOperationException("Observed diagnostic page handle is invalid.");
+            }
+
+            return page;
+        }
+
         private static unsafe int ReleaseLiveHandle<T>(IntPtr ptrHandle, FfiCallResult* result, string invalidMessage)
             where T : class
         {
@@ -5452,6 +7297,29 @@ namespace NativeHost
             result->DiagnosticRequiredLength = 0;
             result->DiagnosticWrittenLength = 0;
             return true;
+        }
+
+        private static string TryGetPowerShellFileVersion()
+        {
+            try
+            {
+                string location = typeof(PowerShell).Assembly.Location;
+                if (string.IsNullOrWhiteSpace(location))
+                {
+                    return string.Empty;
+                }
+
+                string version = FileVersionInfo.GetVersionInfo(location).FileVersion;
+                return string.IsNullOrWhiteSpace(version) ||
+                       version.IndexOf('\0') >= 0 ||
+                       Encoding.UTF8.GetByteCount(version) > 128
+                    ? string.Empty
+                    : version;
+            }
+            catch
+            {
+                return string.Empty;
+            }
         }
 
         private static unsafe int WriteSuccess(FfiCallResult* result)

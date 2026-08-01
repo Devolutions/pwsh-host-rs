@@ -314,10 +314,17 @@ jobs:
           dotnet publish dotnet/nativeaot-sample/NativeAotFfiSample.csproj -c Release
           & dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe
           if ($LASTEXITCODE -ne 0) { throw "The PATH-resolved NativeAOT SDK sample failed with exit code $LASTEXITCODE." }
-          & dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe `
-            $payloadDirectory `
-            --expect-incompatible-contract-pack
-          if ($LASTEXITCODE -ne 0) { throw "The incompatible contract-pack NativeAOT sample failed with exit code $LASTEXITCODE." }
+          foreach ($contractPackFixture in @(
+            'duplicate-across-packs',
+            'duplicate-within-pack',
+            'direction-violation',
+            'reserved-identifier',
+            'unsupported-pack-abi')) {
+            & dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe `
+              $payloadDirectory `
+              "--expect-rejected-contract-pack:$contractPackFixture"
+            if ($LASTEXITCODE -ne 0) { throw "The '$contractPackFixture' contract-pack rejection sample failed with exit code $LASTEXITCODE." }
+          }
 
       - name: Dry-run pack NativeAOT SDK
         shell: pwsh

@@ -32,6 +32,9 @@ public sealed unsafe class PowerShell : IDisposable
     private const ulong LiveObjectContractsFeature = 1UL << 19;
     private const ulong LiveStreamPollingFeature = 1UL << 20;
     private const ulong TypedResultPagingFeature = 1UL << 21;
+    private const ulong ObservedInvocationFeature = 1UL << 22;
+    private const ulong SessionPreflightFeature = 1UL << 23;
+    private const ulong RuntimeDiagnosticsFeature = 1UL << 24;
     private const ulong RequiredFeatures =
         StructuredInvocationErrorsFeature | PerCallDiagnosticsFeature | Utf8SpansFeature |
         ImmutableResultsFeature | TaggedValuesFeature | CommandOptionsFeature | BoundedInputFeature |
@@ -39,7 +42,8 @@ public sealed unsafe class PowerShell : IDisposable
         SessionPollingFeature | SessionPoolRejectionFeature | SnapshotProjectionsFeature |
         SessionConfigurationFeature | SessionVariablesFeature | CapabilityRpcFeature |
         LiveObjectProbeFeature | LiveSessionObjectProbeFeature | LiveObjectContractsFeature |
-        LiveStreamPollingFeature | TypedResultPagingFeature;
+        LiveStreamPollingFeature | TypedResultPagingFeature | ObservedInvocationFeature |
+        SessionPreflightFeature | RuntimeDiagnosticsFeature;
     private const uint ResultTerminatingFailure = 1;
     private const uint ResultSequenceTruncated = 1 << 1;
     private const uint StreamTruncated = 1;
@@ -576,6 +580,37 @@ public sealed unsafe class PowerShell : IDisposable
         return new PowerShellTypedResultInvocation(nativeTypedResultHandle, options);
     }
 
+    /// <summary>
+    /// Starts one bounded invocation with independently acknowledged copied result and diagnostic pages.
+    /// </summary>
+    public PowerShellObservedInvocation BeginObservedInvocation(
+        PowerShellObservedInvocationOptions? options = null)
+    {
+        EnsureObservedInvocationSupported();
+        options ??= new PowerShellObservedInvocationOptions();
+        using PowerShellHandle.HandleLease lease = handle.Borrow();
+        byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+        NativeCallResult result = NativeCall.CreateResult(diagnostic);
+        ulong nativeObservedHandle = 0;
+        int status = NativeMethods.BeginObservedInvocation(
+            lease.Value,
+            checked((uint)options.MaximumBufferedResultRecords),
+            checked((uint)options.MaximumResultPageRecords),
+            checked((uint)options.MaximumBufferedDiagnosticRecords),
+            checked((uint)options.MaximumDiagnosticPageRecords),
+            &nativeObservedHandle,
+            &result);
+        NativeCall.ThrowIfFailed(status, result, diagnostic);
+        if (nativeObservedHandle == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned an invalid observed invocation handle.");
+        }
+
+        return new PowerShellObservedInvocation(nativeObservedHandle, options);
+    }
+
     public Task<PowerShellInvocationResult> InvokeAsync(CancellationToken cancellationToken = default)
     {
         return PowerShellAsyncOperationAwaiter.GetResultAsync(BeginInvoke(), cancellationToken, releaseWhenComplete: true);
@@ -689,6 +724,30 @@ public sealed unsafe class PowerShell : IDisposable
             throw new PowerShellFfiException(
                 PowerShellFfiStatus.UnsupportedCapability,
                 "The selected PowerShell native asset does not support typed result paging.");
+        }
+    }
+
+    internal static void EnsureObservedInvocationSupported()
+    {
+        NativeAbiInfo info = GetAbiInfo();
+        EnsureSupportedAbi(info);
+        if ((info.FeatureFlags & ObservedInvocationFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell native asset does not support observed invocations.");
+        }
+    }
+
+    internal static void EnsureSessionPreflightSupported()
+    {
+        NativeAbiInfo info = GetAbiInfo();
+        EnsureSupportedAbi(info);
+        if ((info.FeatureFlags & SessionPreflightFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell native asset does not support session preflight.");
         }
     }
 

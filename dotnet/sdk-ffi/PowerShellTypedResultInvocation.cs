@@ -148,7 +148,7 @@ public sealed unsafe class PowerShellTypedResultInvocation : IDisposable
         handle.Dispose();
     }
 
-    private static PowerShellValue ReadValue(
+    internal static PowerShellValue ReadValue(
         ulong pageHandle,
         uint recordIndex,
         uint expectedKind,

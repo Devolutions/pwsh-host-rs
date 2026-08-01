@@ -32,30 +32,71 @@ PowerShellLiveObjectContractPack[] contractPacks =
         "Devolutions.MultiPwsh.LiveObject.TestPack.LiveObjectTestPack, Devolutions.MultiPwsh.LiveObject.TestPack"),
 ];
 
-if (args.Length == 2 && args[1] == "--expect-incompatible-contract-pack")
+if (args.Length == 2 && args[1].StartsWith("--expect-rejected-contract-pack:", StringComparison.Ordinal))
 {
+    string fixtureName = args[1]["--expect-rejected-contract-pack:".Length..];
+    (string TypeName, string ExpectedReason)? scenario = fixtureName switch
+    {
+        "duplicate-across-packs" => (
+            "Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.IncompatibleLiveObjectTestPack",
+            "duplicate interface identifiers"),
+        "duplicate-within-pack" => (
+            "Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.DuplicateContractLiveObjectTestPack",
+            "duplicate interface identifiers"),
+        "direction-violation" => (
+            "Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.DirectionViolationLiveObjectTestPack",
+            "unsupported direction"),
+        "reserved-identifier" => (
+            "Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.ReservedContractLiveObjectTestPack",
+            "has already been registered"),
+        "unsupported-pack-abi" => (
+            "Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.UnsupportedAbiLiveObjectTestPack",
+            "contract pack API is invalid"),
+        _ => null,
+    };
+
+    if (scenario is null)
+    {
+        Console.Error.WriteLine($"Unknown contract-pack rejection fixture '{fixtureName}'.");
+        return 2;
+    }
+
+    // The duplicate-across-packs fixture only collides once the compatible pack is
+    // already present in the same registration batch.
+    PowerShellLiveObjectContractPack[] rejectedPacks = fixtureName == "duplicate-across-packs"
+        ?
+        [
+            contractPacks[0],
+            new PowerShellLiveObjectContractPack(
+                incompatibleContractPackPath,
+                $"{scenario.Value.TypeName}, Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack"),
+        ]
+        :
+        [
+            new PowerShellLiveObjectContractPack(
+                incompatibleContractPackPath,
+                $"{scenario.Value.TypeName}, Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack"),
+        ];
+
     try
     {
-        _ = PowerShellRuntime.Activate(
-            args[0],
-            [
-                contractPacks[0],
-                new PowerShellLiveObjectContractPack(
-                    incompatibleContractPackPath,
-                    "Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.IncompatibleLiveObjectTestPack, Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack"),
-            ]);
-        Console.Error.WriteLine("Incompatible live-object contract metadata was accepted.");
-        return 1;
+        _ = PowerShellRuntime.Activate(args[0], rejectedPacks);
     }
-    catch (PowerShellFfiException exception)
-        when (exception.Status == PowerShellFfiStatus.HostFailure &&
-                  (exception.Message.Contains("interface identifier", StringComparison.Ordinal) ||
-                   exception.Message.Contains("unsupported direction", StringComparison.Ordinal) ||
-                   exception.Message.Contains("Live object contract packs", StringComparison.Ordinal)))
+    catch (PowerShellFfiException exception) when (exception.Status == PowerShellFfiStatus.HostFailure)
+    {
+        if (!exception.Message.Contains(scenario.Value.ExpectedReason, StringComparison.Ordinal))
         {
-            Console.WriteLine("Incompatible live-object contract metadata: Rejected");
-            return 0;
+            Console.Error.WriteLine(
+                $"Contract pack '{fixtureName}' was rejected for the wrong reason: {exception.Message}");
+            return 1;
         }
+
+        Console.WriteLine($"Rejected live-object contract pack '{fixtureName}': {scenario.Value.ExpectedReason}");
+        return 0;
+    }
+
+    Console.Error.WriteLine($"Contract pack '{fixtureName}' was accepted.");
+    return 1;
 }
 
 PowerShellRuntime runtime;
@@ -157,16 +198,18 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
     }
 
     var patchHandler = new ConnectionPatchIntentHandler();
-    var stagePatch = new PowerShellCapabilityDefinition(
-        "rdm.stage-connection-patch",
-        [new PowerShellCapabilityArgumentSchema([PowerShellValueKind.PropertyBag])],
-        [PowerShellValueKind.PropertyBag],
-        PowerShellCapabilityPermission.Write,
-        maximumInputBytes: 256,
-        maximumOutputBytes: 64,
-        deadline: TimeSpan.FromSeconds(2));
-    using (PowerShellCapabilitySet capabilities = runtime.RegisterCapabilities(
-        [new PowerShellCapabilityBinding(stagePatch, patchHandler)]))
+    var patchSchema = new PowerShellStagedIntentSchema(
+        [
+            new PowerShellStagedIntentProperty("ConnectionId", [PowerShellValueKind.String]),
+            new PowerShellStagedIntentProperty("DisplayName", [PowerShellValueKind.String]),
+        ],
+        maximumPayloadBytes: 256);
+    var patchDefinition = new PowerShellStagedIntentDefinition(
+        "rdm.connection-patch",
+        patchSchema,
+        patchHandler,
+        deadline: TimeSpan.FromSeconds(30));
+    using (PowerShellStagedIntentCoordinator intents = runtime.RegisterStagedIntents([patchDefinition]))
     {
         session.SetPropertyBag(
             "connection",
@@ -178,24 +221,48 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
         using PowerShell stageConnectionPatch = session.CreatePowerShell();
         PowerShellInvocationResult stagedPatchOutput = stageConnectionPatch
             .AddScript(@"
-                $intent = [pscustomobject]@{
-                    ConnectionId = $connection.Id
-                    DisplayName = ""$($connection.Name)-reviewed""
-                }
-                $DpsCapabilities.Invoke('rdm.stage-connection-patch', $intent).Accepted
+                $stage = $DpsCapabilities.Invoke('rdm.connection-patch.stage', [pscustomobject]@{
+                    stageId = 'connection-42-review'
+                    intent = [pscustomobject]@{
+                        ConnectionId = $connection.Id
+                        DisplayName = ""$($connection.Name)-reviewed""
+                    }
+                })
+                $validation = $DpsCapabilities.Invoke('rdm.connection-patch.validate', 'connection-42-review')
+                $commit = $DpsCapabilities.Invoke('rdm.connection-patch.commit', 'connection-42-review')
+                ""$($stage.status)|$($validation.status)|$($commit.status)""
             ")
-            .WithCapabilities(capabilities)
+            .WithCapabilities(intents.Capabilities)
+            .Invoke();
+        using PowerShell abortConnectionPatch = session.CreatePowerShell();
+        PowerShellInvocationResult abortedPatchOutput = abortConnectionPatch
+            .AddScript(@"
+                $stage = $DpsCapabilities.Invoke('rdm.connection-patch.stage', [pscustomobject]@{
+                    stageId = 'connection-42-discard'
+                    intent = [pscustomobject]@{
+                        ConnectionId = $connection.Id
+                        DisplayName = 'Discarded'
+                    }
+                })
+                $abort = $DpsCapabilities.Invoke('rdm.connection-patch.abort', 'connection-42-discard')
+                ""$($stage.status)|$($abort.status)""
+            ")
+            .WithCapabilities(intents.Capabilities)
             .Invoke();
         if (stagedPatchOutput.Output.Records.Count != 1 ||
-            stagedPatchOutput.Output.Records[0].DisplayText != "True" ||
-            patchHandler.Intent is not
+            stagedPatchOutput.Output.Records[0].DisplayText != "staged|validated|committed" ||
+            abortedPatchOutput.Output.Records.Count != 1 ||
+            abortedPatchOutput.Output.Records[0].DisplayText != "staged|aborted" ||
+            patchHandler.CommittedIntent is not
             {
+                StageIdentifier: "connection-42-review",
                 ConnectionId: "connection-42",
                 DisplayName: "Production-reviewed",
             } ||
+            patchHandler.AbortedStageIdentifier != "connection-42-discard" ||
             !session.RemoveVariable("connection"))
         {
-            Console.Error.WriteLine("NativeAOT facade did not stage the bounded connection patch intent.");
+            Console.Error.WriteLine("NativeAOT facade did not coordinate the bounded connection patch intent lifecycle.");
             return 1;
         }
     }

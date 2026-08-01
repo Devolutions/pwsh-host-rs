@@ -13,8 +13,9 @@ use self::bindings_generated::PowerShellHandle;
 pub(crate) use self::ffi::FfiBindings;
 pub use self::ffi::{
     FfiBindingError, FfiInvocationResult, FfiLiveInvocation, FfiLiveObjectContractDescriptor, FfiLiveStreamBatch,
-    FfiLiveStreamRecord, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue,
-    FfiTypedResultInvocation, FfiTypedResultPage, FfiTypedResultRecord,
+    FfiLiveStreamRecord, FfiObservedDiagnosticPage, FfiObservedDiagnosticRecord, FfiObservedInvocation,
+    FfiPayloadRuntimeDiagnostics, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot,
+    FfiSnapshotValue, FfiTypedResultInvocation, FfiTypedResultPage, FfiTypedResultRecord,
 };
 use crate::loader::HostedRuntime;
 

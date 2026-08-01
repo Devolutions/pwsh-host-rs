@@ -29,6 +29,29 @@ dotnet build dotnet\bindings\Devolutions.PowerShell.SDK.Bindings.csproj -p:PwshE
 dotnet test dotnet\bindings\Devolutions.PowerShell.SDK.Bindings.csproj --no-build -p:PwshExePath="pwsh-7.4"
 ```
 
+If the release changes the in-process FFI SDK (`Devolutions.MultiPwsh.Sdk`),
+also run the API baseline verifier and the self-contained Win-x64 NativeAOT
+package harness described in [testing](docs/testing.md#in-process-ffi-sdk-package-tests):
+
+```powershell
+pwsh -NoLogo -NoProfile -File .\tests\Verify-PwshFfiApiBaseline.ps1
+dotnet pack dotnet\sdk-ffi\Devolutions.MultiPwsh.Sdk.csproj -c Release -o artifacts\sdk-nuget
+pwsh -NoLogo -NoProfile -File .\tests\Test-PwshFfiPackage.ps1 `
+    -PackageSource artifacts\sdk-nuget `
+    -PowerShellPayloadDirectory <payload-root>
+```
+
+The SDK is qualified against the **latest released PowerShell 7.4.x**, not a
+fixed patch. Record the exact version the harness prints
+(`Qualified PowerShell payload: <version>`) in the release notes; CI also
+exports it as `PwshQualifiedVersion` and writes it to the job summary. Do not
+state a patch that was not exercised.
+
+Live-object contract packs are a coordinated breaking release: an interface
+identifier, version, direction, operation shape, or pack ABI change requires
+shipping the consumer and its payload adapter together. There is no version
+negotiation or compatibility range.
+
 ## 3. Publish the release
 
 Dispatch `.github/workflows/release.yml` from the branch or commit you want to release.
