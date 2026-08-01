@@ -1267,6 +1267,7 @@ async Task VerifyObservedInvocationAsync(PowerShellRuntime runtime)
 void VerifyTransactionAndHostCapabilities(PowerShellSession session)
 {
     using var stagedIntent = new StagedIntentHandler();
+    using var alternateStagedIntent = new StagedIntentHandler();
     var stagedSchema = new PowerShellStagedIntentSchema(
     [
         new PowerShellStagedIntentProperty("Id", [PowerShellValueKind.String]),
@@ -1278,8 +1279,36 @@ void VerifyTransactionAndHostCapabilities(PowerShellSession session)
         stagedSchema,
         stagedIntent,
         deadline: TimeSpan.FromSeconds(2));
+    var alternateStagedDefinition = new PowerShellStagedIntentDefinition(
+        "example.intent-alternate",
+        stagedSchema,
+        alternateStagedIntent,
+        deadline: TimeSpan.FromSeconds(2));
     using PowerShellStagedIntentCoordinator stagedIntents =
-        PowerShellStagedIntentCoordinator.Register([stagedDefinition]);
+        PowerShellStagedIntentCoordinator.Register([stagedDefinition, alternateStagedDefinition]);
+
+    using (PowerShell isolated = session.CreatePowerShell())
+    {
+        PowerShellInvocationResult result = isolated
+            .AddScript(@"
+                `$stage = `$DpsCapabilities.Invoke('example.intent.stage', [pscustomobject]@{
+                    stageId = 'intent-isolated'
+                    intent = [pscustomobject]@{ Id = 'intent-isolated'; Name = 'owned-by-primary' }
+                })
+                `$wrongActive = `$DpsCapabilities.Invoke('example.intent-alternate.validate', 'intent-isolated')
+                `$validation = `$DpsCapabilities.Invoke('example.intent.validate', 'intent-isolated')
+                `$commit = `$DpsCapabilities.Invoke('example.intent.commit', 'intent-isolated')
+                `$wrongTerminal = `$DpsCapabilities.Invoke('example.intent-alternate.abort', 'intent-isolated')
+                ""`$(`$stage.status)|`$(`$wrongActive.status)|`$(`$validation.status)|`$(`$commit.status)|`$(`$wrongTerminal.status)""
+            ")
+            .WithCapabilities(stagedIntents.Capabilities)
+            .Invoke();
+        Require(
+            result.Output.Records.Count == 1 &&
+            result.Output.Records[0].DisplayText == "staged|unknown-stage|validated|committed|unknown-stage" &&
+            alternateStagedIntent.RetainedStageCount == 0,
+            "A staged intent was visible to a capability definition that does not own it.");
+    }
 
     using (PowerShell successful = session.CreatePowerShell())
     {
@@ -1825,6 +1854,67 @@ try
     }
     catch (PowerShellFfiException)
     {
+    }
+
+    string dynamicDeclarationName = "DynamicDeclarationPreflightModule";
+    string dynamicDeclarationDirectory = Path.Combine(preflightRoot, dynamicDeclarationName);
+    Directory.CreateDirectory(dynamicDeclarationDirectory);
+    File.WriteAllText(
+        Path.Combine(dynamicDeclarationDirectory, $"{dynamicDeclarationName}.psd1"),
+        "@{ ModuleVersion = '1.0'; RootModule = `$PSScriptRoot + '\\dynamic-preflight.psm1' }");
+    PowerShellSessionPreflightReport dynamicDeclaration = runtime.ValidateSessionConfiguration(
+        new PowerShellSessionConfiguration(
+            moduleImports: new[] { dynamicDeclarationName },
+            allowedModulePaths: new[] { preflightRoot }));
+    Require(
+        dynamicDeclaration.Status == PowerShellSessionPreflightStatus.InvalidModuleManifest &&
+        dynamicDeclaration.ModuleImports.Single().Status == PowerShellSessionModuleImportStatus.ManifestInvalid,
+        "Session preflight accepted a non-static module-loading declaration.");
+
+    string junctionModuleName = "JunctionEscapePreflightModule";
+    string junctionModuleDirectory = Path.Combine(preflightRoot, junctionModuleName);
+    string junctionPath = Path.Combine(junctionModuleDirectory, "linked");
+    string junctionTargetDirectory = Path.Combine(Path.GetTempPath(), $"pwsh-sdk-ffi-junction-{Guid.NewGuid():N}");
+    try
+    {
+        Directory.CreateDirectory(junctionModuleDirectory);
+        Directory.CreateDirectory(junctionTargetDirectory);
+        File.WriteAllText(Path.Combine(junctionTargetDirectory, "outside.psm1"), "function Get-JunctionEscape { 1 }");
+        using (System.Diagnostics.Process junctionProcess = System.Diagnostics.Process.Start(
+            new System.Diagnostics.ProcessStartInfo(
+                "cmd.exe",
+                $"/d /c mklink /J \"{junctionPath}\" \"{junctionTargetDirectory}\"")
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false,
+            }) ?? throw new InvalidOperationException("Could not create the junction test process."))
+        {
+            junctionProcess.WaitForExit();
+            Require(junctionProcess.ExitCode == 0, "Could not create the junction fixture for module-root validation.");
+        }
+
+        File.WriteAllText(
+            Path.Combine(junctionModuleDirectory, $"{junctionModuleName}.psd1"),
+            "@{ ModuleVersion = '1.0'; RootModule = 'linked\\outside.psm1' }");
+        PowerShellSessionPreflightReport junctionEscape = runtime.ValidateSessionConfiguration(
+            new PowerShellSessionConfiguration(
+                moduleImports: new[] { junctionModuleName },
+                allowedModulePaths: new[] { preflightRoot }));
+        Require(
+            junctionEscape.Status == PowerShellSessionPreflightStatus.ExternalModuleDeclarations &&
+            junctionEscape.ModuleImports.Single().Status == PowerShellSessionModuleImportStatus.ManifestDeclaresExternalPath,
+            "Session preflight accepted a module-loading path beneath an in-root junction that targets an external directory.");
+    }
+    finally
+    {
+        if (Directory.Exists(junctionPath))
+        {
+            Directory.Delete(junctionPath);
+        }
+        if (Directory.Exists(junctionTargetDirectory))
+        {
+            Directory.Delete(junctionTargetDirectory, recursive: true);
+        }
     }
 
     string nestedEscapeName = "NestedEscapePreflightModule";
@@ -2697,7 +2787,9 @@ sealed class HostInteractionCapability : IPowerShellCapabilityHandler
     }
 
     $reportedVersion = $reportedVersionLine.Substring('FFI package consumer PowerShell file version: '.Length).Trim()
-    if ($reportedVersion -ne 'unreported' -and -not $reportedVersion.StartsWith($script:QualifiedPowerShellVersion, [StringComparison]::Ordinal)) {
+    if ($reportedVersion -ne 'unreported' -and
+        $reportedVersion -ne $script:QualifiedPowerShellVersion -and
+        -not $reportedVersion.StartsWith("$($script:QualifiedPowerShellVersion).", [StringComparison]::Ordinal)) {
         throw "Runtime diagnostics reported PowerShell '$reportedVersion' but the qualified payload is $($script:QualifiedPowerShellVersion)."
     }
 

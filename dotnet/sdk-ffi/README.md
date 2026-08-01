@@ -214,10 +214,12 @@ with an active pipeline.
 `ValidateSessionConfiguration` preflights the same module-root and import
 resolution rules without creating a runspace, importing a module, or executing
 PowerShell/module code. Its immutable copied report identifies invalid or
-missing roots, unresolvable imports, and invalid/unreadable manifests. For
-static manifests it reports a bounded declared version and up to four bounded
-declared commands; declaration extraction is informational and is not module
-authorization or execution.
+missing roots, unresolvable imports, and invalid/unreadable manifests. Module-
+loading manifest declarations must be static and any path-like declaration must
+resolve beneath its approved root (including through reparse-point ancestors);
+otherwise preflight rejects it. For static manifests it reports a bounded
+declared version and up to four bounded declared commands; declaration
+extraction is informational and is not module authorization or execution.
 
 `PowerShellRuntime.Diagnostics` is an immutable, descriptive deployment report.
 It exposes the canonical active payload directory, an explicitly nullable

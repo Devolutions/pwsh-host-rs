@@ -237,6 +237,7 @@ public sealed class PowerShellStagedIntentCoordinator : IDisposable
                 if (!stages.TryGetValue(stageIdentifier!, out StageEntry? current) || !ReferenceEquals(current, entry))
                 {
                     response = CreateTerminalResult(
+                        definition,
                         PowerShellStagedIntentOperation.Stage,
                         stageIdentifier!,
                         expiresAt);
@@ -365,7 +366,11 @@ public sealed class PowerShellStagedIntentCoordinator : IDisposable
         {
             if (!stages.TryGetValue(stageIdentifier!, out entry))
             {
-                return CreateMissingResult(operation, stageIdentifier!);
+                return CreateMissingResult(definition, operation, stageIdentifier!);
+            }
+            if (!ReferenceEquals(entry.Definition, definition))
+            {
+                return CreateMissingResult(definition, operation, stageIdentifier!);
             }
             if (DateTimeOffset.UtcNow >= entry.Intent.ExpiresAt)
             {
@@ -423,7 +428,7 @@ public sealed class PowerShellStagedIntentCoordinator : IDisposable
             {
                 if (!stages.TryGetValue(stageIdentifier!, out StageEntry? current) || !ReferenceEquals(current, entry))
                 {
-                    response = CreateTerminalResult(operation, stageIdentifier!, entry.Intent.ExpiresAt);
+                    response = CreateTerminalResult(definition, operation, stageIdentifier!, entry.Intent.ExpiresAt);
                 }
                 else if (!result.IsAccepted)
                 {
@@ -608,9 +613,13 @@ public sealed class PowerShellStagedIntentCoordinator : IDisposable
             Encoding.UTF8.GetByteCount(value) <= MaximumStageIdentifierBytes;
     }
 
-    private PowerShellValue CreateMissingResult(PowerShellStagedIntentOperation operation, string stageIdentifier)
+    private PowerShellValue CreateMissingResult(
+        PowerShellStagedIntentDefinition definition,
+        PowerShellStagedIntentOperation operation,
+        string stageIdentifier)
     {
-        if (terminalStages.TryGetValue(stageIdentifier, out TerminalEntry? terminal))
+        if (terminalStages.TryGetValue(stageIdentifier, out TerminalEntry? terminal) &&
+            ReferenceEquals(terminal.Definition, definition))
         {
             return CreateResult(
                 operation,
@@ -633,14 +642,16 @@ public sealed class PowerShellStagedIntentCoordinator : IDisposable
     }
 
     private PowerShellValue CreateTerminalResult(
+        PowerShellStagedIntentDefinition definition,
         PowerShellStagedIntentOperation operation,
         string stageIdentifier,
         DateTimeOffset expiresAt)
     {
         lock (gate)
         {
-            return terminalStages.TryGetValue(stageIdentifier, out TerminalEntry? terminal)
-                ? CreateMissingResult(operation, stageIdentifier)
+            return terminalStages.TryGetValue(stageIdentifier, out TerminalEntry? terminal) &&
+                ReferenceEquals(terminal.Definition, definition)
+                ? CreateMissingResult(definition, operation, stageIdentifier)
                 : CreateResult(
                     operation,
                     PowerShellStagedIntentStatus.Cancelled,
@@ -752,7 +763,11 @@ public sealed class PowerShellStagedIntentCoordinator : IDisposable
     {
         stages.Remove(stageIdentifier);
         entry.Timer?.Dispose();
-        terminalStages[stageIdentifier] = new TerminalEntry(terminalStatus, inactiveStatus, entry.Intent.ExpiresAt);
+        terminalStages[stageIdentifier] = new TerminalEntry(
+            entry.Definition,
+            terminalStatus,
+            inactiveStatus,
+            entry.Intent.ExpiresAt);
         terminalStageOrder.Enqueue(stageIdentifier);
         while (terminalStageOrder.Count > MaximumTerminalStages)
         {
@@ -836,6 +851,7 @@ public sealed class PowerShellStagedIntentCoordinator : IDisposable
     }
 
     private sealed record TerminalEntry(
+        PowerShellStagedIntentDefinition Definition,
         PowerShellStagedIntentStatus TerminalStatus,
         PowerShellStagedIntentStatus? InactiveStatus,
         DateTimeOffset ExpiresAt);

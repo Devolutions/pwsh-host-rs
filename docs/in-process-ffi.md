@@ -648,9 +648,12 @@ behavior has passed a separate application-owned validation.
 import resolution before session creation without creating a runspace, importing
 or loading a module, or executing PowerShell/module code. It returns immutable,
 bounded copied diagnostics for missing/invalid roots, unresolvable imports, and
-invalid/unreadable manifests. Static manifest declarations may expose a bounded
-module version and command list; they are parsed as data only and do not
-authorize or execute a module.
+invalid/unreadable manifests. Module-loading declarations must be static and
+path-like declarations must resolve beneath their approved root after resolving
+reparse-point ancestors; a dynamic declaration or a junction/symlink escape is
+rejected. Static manifest declarations may expose a bounded module version and
+command list; they are parsed as data only and do not authorize or execute a
+module.
 
 ### Declarative recipes and result schemas
 

@@ -638,8 +638,8 @@ namespace NativeHost
                     {
                         if (!TryGetManifestLoadPaths(pair.Item2, out string[] declaredPaths))
                         {
-                            declarationsUnavailable = true;
-                            continue;
+                            return InvalidManifest(
+                                $"Module manifest has a non-static '{key.Value}' module-loading declaration.");
                         }
 
                         foreach (string declaredPath in declaredPaths)
@@ -954,9 +954,32 @@ namespace NativeHost
                 fullPath = Path.TrimEndingDirectorySeparator(fullPath);
             }
 
-            FileSystemInfo info = isDirectory ? new DirectoryInfo(fullPath) : new FileInfo(fullPath);
-            FileSystemInfo target = info.ResolveLinkTarget(returnFinalTarget: true);
-            string canonicalPath = Path.GetFullPath(target?.FullName ?? info.FullName);
+            string root = Path.GetPathRoot(fullPath)
+                ?? throw new ArgumentException("The path has no filesystem root.", nameof(path));
+            string canonicalPath = root;
+            foreach (string component in fullPath[root.Length..].Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries))
+            {
+                canonicalPath = Path.Combine(canonicalPath, component);
+                FileSystemInfo info = Directory.Exists(canonicalPath)
+                    ? new DirectoryInfo(canonicalPath)
+                    : new FileInfo(canonicalPath);
+                if (!info.Exists)
+                {
+                    throw new IOException("The path does not exist.");
+                }
+
+                // Resolve every existing component, not just the final entry. A regular
+                // module file beneath a junction can otherwise pass a lexical root check
+                // while its actual storage lies outside the approved root.
+                FileSystemInfo target = info.ResolveLinkTarget(returnFinalTarget: true);
+                if (target is not null)
+                {
+                    canonicalPath = Path.GetFullPath(target.FullName);
+                }
+            }
+
             if (!isDirectory)
             {
                 return canonicalPath;
