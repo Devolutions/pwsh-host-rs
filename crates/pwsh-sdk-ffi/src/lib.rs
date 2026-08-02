@@ -695,8 +695,7 @@ impl Session {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(attachment) = active.take() {
-            attachment.active.store(false, Ordering::Release);
-            broker_unregister_attachment(attachment.generation);
+            broker_deactivate_attachment(&attachment);
         }
     }
 }
@@ -917,6 +916,10 @@ impl Operation {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *active = false;
         }
+        drop(active);
+        // Invalidate the broker generation so a captured \ cannot
+        // reach the channel after this invocation terminates.
+        self.session.deactivate_broker();
     }
 
     fn cancel_capability(&self) {
@@ -1051,6 +1054,10 @@ impl TypedResultOperation {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *active = false;
         }
+        drop(active);
+        // Invalidate the broker generation so a captured \ cannot
+        // reach the channel after this invocation terminates.
+        self.session.deactivate_broker();
     }
 
     fn cancel_capability(&self) {
@@ -1234,6 +1241,10 @@ impl ObservedInvocationOperation {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *active = false;
         }
+        drop(active);
+        // Invalidate the broker generation so a captured \ cannot
+        // reach the channel after this invocation terminates.
+        self.session.deactivate_broker();
     }
 
     fn cancel_capability(&self) {
@@ -2958,7 +2969,12 @@ fn start_operation(handle: u64) -> Result<u64, (Status, String)> {
             .unwrap_or(1_u64 << 62);
         let capability = take_session_capability(&session)?;
         let broker = take_session_broker(&session);
-        configure_broker(&session, broker.as_ref()).map_err(managed_failure)?;
+        if let Err(error) = configure_broker(&session, broker.as_ref()) {
+            // Match the sibling start paths: a failure here must not leave the
+            // builder and its runspace session permanently backpressured.
+            session.clear_operation_active();
+            return Err(managed_failure(error));
+        }
         let operation = Arc::new(Operation::new(handle, session, capability));
         state.operations.insert(operation_handle, Arc::clone(&operation));
         (operation_handle, operation)
@@ -3972,8 +3988,17 @@ static NEXT_BROKER_FRAME_HANDLE: AtomicU64 = AtomicU64::new(1_u64 << 53);
 static NEXT_BROKER_OWNER_TOKEN: AtomicU64 = AtomicU64::new(1);
 static NEXT_BROKER_GENERATION: AtomicU64 = AtomicU64::new(1);
 
-/// Delivery handle -> (owning channel, correlation).
-type BrokerFrameRegistry = Option<HashMap<u64, (Arc<BrokerChannel>, u64)>>;
+/// One delivery of a frame to one pump thread. The owner token is recorded
+/// here, not on the frame, so releasing a delivery handle still succeeds after
+/// its request has already reached a terminal state and been removed.
+struct BrokerDelivery {
+    channel: Arc<BrokerChannel>,
+    correlation: u64,
+    owner_token: u64,
+}
+
+/// Delivery handle -> delivery record.
+type BrokerFrameRegistry = Option<HashMap<u64, BrokerDelivery>>;
 /// Generation -> the attachment that owns it.
 type BrokerAttachmentRegistry = Option<HashMap<u64, Arc<BrokerAttachment>>>;
 
@@ -4065,6 +4090,12 @@ fn broker_expire_due_frames(inner: &mut BrokerChannelInner, now_ms: u64) -> bool
         broker_finish_frame(inner, correlation, BROKER_FRAME_STATE_TIMED_OUT);
         inner.queue.retain(|queued| *queued != correlation);
     }
+    // A one-way frame has no blocked raiser to collect it, so an expired event
+    // that no consumer ever received would otherwise be retained forever.
+    // Only drop the ones nobody currently holds a delivery handle for.
+    inner
+        .frames
+        .retain(|_, frame| !(frame.is_terminal() && frame.is_one_way() && frame.owner_token == 0));
     changed
 }
 
@@ -4176,7 +4207,7 @@ fn broker_close(handle: u64) -> Result<Status, (Status, String)> {
     // Reclaim any delivery handles whose owning thread never released them.
     let mut registry = broker_frame_registry();
     if let Some(map) = registry.as_mut() {
-        map.retain(|_, (registered, _)| !Arc::ptr_eq(registered, &channel));
+        map.retain(|_, entry| !Arc::ptr_eq(&entry.channel, &channel));
     }
     Ok(Status::Success)
 }
@@ -4241,9 +4272,14 @@ fn broker_wait(handle: u64, timeout_ms: u32, frame_handle: *mut u64) -> Result<S
             drop(inner);
             broker_push_owner_token(token);
             let mut registry = broker_frame_registry();
-            registry
-                .get_or_insert_with(HashMap::new)
-                .insert(delivery, (Arc::clone(&channel), correlation));
+            registry.get_or_insert_with(HashMap::new).insert(
+                delivery,
+                BrokerDelivery {
+                    channel: Arc::clone(&channel),
+                    correlation,
+                    owner_token: token,
+                },
+            );
             drop(registry);
             // SAFETY: validated non-null above.
             unsafe { *frame_handle = delivery };
@@ -4267,7 +4303,7 @@ fn broker_resolve_frame(delivery: u64) -> Result<(Arc<BrokerChannel>, u64), (Sta
     registry
         .as_ref()
         .and_then(|map| map.get(&delivery))
-        .map(|(channel, correlation)| (Arc::clone(channel), *correlation))
+        .map(|entry| (Arc::clone(&entry.channel), entry.correlation))
         .ok_or_else(|| (Status::InvalidHandle, "broker frame handle is invalid".to_owned()))
 }
 
@@ -4336,33 +4372,31 @@ unsafe fn broker_frame_read(
 
 /// Releases only the readable delivery handle. This is deliberately **not** a
 /// state transition: the correlation stays outstanding so the consumer can
-/// reply later from any thread.
+/// reply later from any thread. It must also succeed after the request has
+/// already terminated, otherwise the receiving thread's owner token leaks and
+/// that thread stays blocked from every non-broker call.
 fn broker_frame_release(delivery: u64) -> Result<Status, (Status, String)> {
     let (channel, correlation) = {
         let mut registry = broker_frame_registry();
         let map = registry
             .as_mut()
             .ok_or_else(|| (Status::InvalidHandle, "broker frame handle is invalid".to_owned()))?;
-        let (channel, correlation) = map
+        let owner_token = map
             .get(&delivery)
-            .map(|(channel, correlation)| (Arc::clone(channel), *correlation))
+            .map(|entry| entry.owner_token)
             .ok_or_else(|| (Status::InvalidHandle, "broker frame handle is invalid".to_owned()))?;
-        let token = {
-            let inner = channel.lock();
-            inner
-                .frames
-                .get(&correlation)
-                .map(|frame| frame.owner_token)
-                .unwrap_or(0)
-        };
-        if token == 0 || !broker_take_owner_token(token) {
+        // Ownership is proven by the receiving thread's token, never by the
+        // frame, which may already be gone.
+        if !broker_take_owner_token(owner_token) {
             return Err((
                 Status::BrokerDispatchViolation,
                 "a broker frame must be released by the thread that received it".to_owned(),
             ));
         }
-        map.remove(&delivery);
-        (channel, correlation)
+        let entry = map
+            .remove(&delivery)
+            .ok_or_else(|| (Status::InvalidHandle, "broker frame handle is invalid".to_owned()))?;
+        (entry.channel, entry.correlation)
     };
     let mut inner = channel.lock();
     if let Some(frame) = inner.frames.get_mut(&correlation) {
@@ -4510,8 +4544,7 @@ fn set_active_broker(session: &Session, attachment: Option<Arc<BrokerAttachment>
 
 fn finish_broker(session: &Session, attachment: Option<&Arc<BrokerAttachment>>) {
     if let Some(attachment) = attachment {
-        attachment.active.store(false, Ordering::Release);
-        broker_unregister_attachment(attachment.generation);
+        broker_deactivate_attachment(attachment);
     }
     set_active_broker(session, None);
 }
@@ -4535,6 +4568,13 @@ fn broker_register_attachment(attachment: &Arc<BrokerAttachment>) {
     registry
         .get_or_insert_with(HashMap::new)
         .insert(attachment.generation, Arc::clone(attachment));
+}
+
+/// Revokes one broker attachment: no later trampoline call with its generation
+/// can resolve, and its registry entry is dropped.
+fn broker_deactivate_attachment(attachment: &Arc<BrokerAttachment>) {
+    attachment.active.store(false, Ordering::Release);
+    broker_unregister_attachment(attachment.generation);
 }
 
 fn broker_unregister_attachment(generation: u64) {
@@ -4666,6 +4706,9 @@ unsafe extern "C" fn broker_enqueue_and_wait(
             };
             if let Some(state) = terminal_state {
                 let frame = inner.frames.remove(&correlation);
+                // The correlation may still be queued if it terminated before a
+                // consumer dequeued it; leaving it would dangle forever.
+                inner.queue.retain(|queued| *queued != correlation);
                 drop(inner);
                 let frame = match frame {
                     Some(frame) => frame,
@@ -8603,6 +8646,146 @@ mod tests {
     }
 
     #[test]
+    fn broker_generation_is_invalidated_when_its_invocation_terminates() {
+        // Regression: the generation must be revoked on the real terminal
+        // paths, not only on pre-invocation failure paths. Otherwise script
+        // that captured `$DpsBroker` reaches the channel in a later invocation
+        // and BROKER_ATTACHMENTS grows without bound.
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+
+        assert!(
+            broker_attachment_for(channel, generation).is_some(),
+            "the attachment should resolve while its invocation is active"
+        );
+
+        // This is exactly what every terminal invocation path now performs.
+        broker_deactivate_attachment(&attachment);
+
+        assert!(
+            broker_attachment_for(channel, generation).is_none(),
+            "the broker generation survived its invocation"
+        );
+        let (status, _, _) = broker_enqueue(channel, generation, 1, b"stale");
+        assert_eq!(
+            status,
+            Status::InvalidHandle.value(),
+            "a captured $DpsBroker reached the channel after its invocation ended"
+        );
+        assert!(
+            BROKER_ATTACHMENTS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map(|map| !map.contains_key(&generation))
+                .unwrap_or(true),
+            "the attachment registry retained a terminated generation"
+        );
+
+        broker_close_channel(channel);
+    }
+
+    #[test]
+    fn broker_expired_one_way_events_do_not_accumulate_without_a_pump() {
+        // Regression: a one-way frame has no blocked raiser to collect it, so
+        // an expired event nobody received must be dropped by the expiry sweep
+        // rather than retained for the life of the channel.
+        let mut options = broker_default_options();
+        options.max_inflight = 8;
+        options.default_deadline_ms = 60;
+        let channel = open_broker_channel(&options);
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+
+        // Attach a pump once so posting is accepted, then stop consuming.
+        assert_eq!(broker_wait_for_frame(channel, 10), 0);
+
+        for round in 0..4_u32 {
+            for index in 0..6_u32 {
+                let mut diagnostic = [0_u8; 256];
+                let mut result = broker_call_result(&mut diagnostic);
+                let body = [round as u8, index as u8];
+                let status = unsafe {
+                    broker_post(
+                        channel,
+                        generation,
+                        index,
+                        0,
+                        body.as_ptr(),
+                        body.len() as u32,
+                        &mut result,
+                    )
+                };
+                assert_eq!(status, Status::Success.value());
+            }
+            // Let this round expire, then drive a sweep.
+            std::thread::sleep(Duration::from_millis(90));
+            assert_eq!(broker_wait_for_frame(channel, 10), 0);
+        }
+
+        let retained = {
+            let owner = broker_channel_for(channel).expect("channel");
+            let inner = owner.lock();
+            inner.frames.len()
+        };
+        assert!(
+            retained <= options.max_inflight as usize,
+            "expired one-way frames accumulated: {} retained",
+            retained
+        );
+
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_release_after_deadline_does_not_poison_the_pump_thread() {
+        // Regression: the payload thread removes its frame when it wakes on a
+        // terminal state. A pump still holding the delivery handle must still be
+        // able to release it, or its thread-local owner token leaks and every
+        // later non-broker call from that thread fails forever.
+        let mut options = broker_default_options();
+        options.default_deadline_ms = 150;
+        let channel = open_broker_channel(&options);
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+
+        assert_eq!(broker_wait_for_frame(channel, 20), 0);
+        let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 42, b"late"));
+
+        let frame = broker_wait_for_frame(channel, 5_000);
+        assert_ne!(frame, 0);
+
+        // Let the request pass its deadline while the pump still holds the frame.
+        let (status, _, _) = payload.join().expect("payload thread");
+        assert_eq!(status, Status::BrokerTimeout.value());
+
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+            Status::Success.value(),
+            "releasing a delivery handle after its request terminated must succeed"
+        );
+
+        // The pump thread must not stay poisoned for ordinary FFI calls.
+        let mut builder = 0_u64;
+        let create_status = unsafe { multi_pwsh_create(&mut builder, &mut result) };
+        assert_ne!(
+            create_status,
+            Status::BrokerDispatchViolation.value(),
+            "the pump thread remained blocked from non-broker calls after release"
+        );
+        if builder != 0 {
+            unsafe { multi_pwsh_release(builder, &mut result) };
+        }
+
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
     fn broker_randomized_soak_is_bounded_and_leak_free() {
         // Deterministic LCG: reproducible in CI, no extra dependency.
         struct Lcg(u64);
@@ -8774,7 +8957,11 @@ mod tests {
             let registry = broker_frame_registry();
             let leaked = registry
                 .as_ref()
-                .map(|map| map.values().filter(|(owner, _)| Arc::strong_count(owner) > 0).count())
+                .map(|map| {
+                    map.values()
+                        .filter(|entry| Arc::strong_count(&entry.channel) > 0)
+                        .count()
+                })
                 .unwrap_or(0);
             drop(registry);
             assert!(
