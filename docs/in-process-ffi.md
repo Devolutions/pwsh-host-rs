@@ -2017,9 +2017,25 @@ because `$DpsBroker` is installed at invocation start and removed at cleanup.
 What is missing is a **pack-reachable object** to deliver it to. The sink is that
 object. That distinction is what makes the split below work.
 
-1. **The sink handshake and invocation leases.** The direction bit, including
-   the validation mask on both sides and the baseline; the sink interface; the
-   registry accepting and routing v2 contracts; the payload bindings driving the
+1. **The direction bit.** A v2 contract needs a new
+   `PowerShellLiveObjectDirection` value, and that is **not** a payload-and-pack
+   change: `PowerShellLiveObjectContract.cs` is compiled into the facade, the
+   enum is recorded in the public ABI baseline as `facade:type` and
+   `facade:field` entries, and Rust independently rejects any direction outside
+   `0x03`. So the bit lands on its own — facade enum, both validation masks, an
+   additive baseline update, and the contract-pack rejection fixtures — before
+   any protocol work. It is mechanical, it is where a mistake is expensive and a
+   review is cheap, and separating it keeps an ABI diff out of the protocol
+   commit.
+
+   This split was not a preference. Applying the boundary test to the original
+   increment — *does it touch anything outside payload and pack?* — answered no
+   on the third check, which is exactly the leading indicator agreed for
+   stopping and re-splitting rather than pushing through.
+
+2. **The sink handshake and invocation leases.** With the bit already in place
+   this is genuinely payload-and-pack only: the sink interface; the registry
+   accepting and routing v2 contracts; the payload bindings driving the
    handshake; a declaration state machine; and the requested identity exposed so
    a pack holding two v2 contracts can select. COM still carries `Invoke`
    throughout, and no facade surface moves.
@@ -2034,20 +2050,22 @@ object. That distinction is what makes the split below work.
    `liveObjectVariables` retains it and reconciles after each one — so the two
    halves genuinely can have different lifetimes.
 
-2. **The host-side construction API.** Retiring the COM carrier removes what an
+3. **The host-side construction API.** Retiring the COM carrier removes what an
    author writes but requires the SDK to grow a replacement that associates a
    dispatcher, a channel, and a payload variable. That is new public facade
    surface and gets its own design and its own adversarial review rather than
    riding along with a transport swap.
 
-3. **The carrier move.** By then the handshake and the lease semantics exist and
+4. **The carrier move.** By then the handshake and the lease semantics exist and
    are tested, so this is closer to the transport swap it was originally scoped
    as: reply envelope, transport-failure mapping, routing prefix, `Open`/`Close`
    over the channel, one-way events, and the pump.
 
-If a third design pass on the first of these also fails to converge, the agreed
-outcome is to ship the compiler and the lease runtime on their own and revisit
-the carrier move as separate work. Both stand alone and both are green.
+Two triggers end this line rather than one. Scope leaking outside an increment's
+own boundary is the leading indicator and is objectively checkable; a design pass
+failing to converge is the lagging one. On either, the agreed outcome is to ship
+the compiler and the lease runtime on their own and revisit the carrier move as
+separate work. Both stand alone and both are green.
 
 ##### What this pass still does not solve
 
