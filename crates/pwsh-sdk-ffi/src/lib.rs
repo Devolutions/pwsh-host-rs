@@ -8603,6 +8603,211 @@ mod tests {
     }
 
     #[test]
+    fn broker_randomized_soak_is_bounded_and_leak_free() {
+        // Deterministic LCG: reproducible in CI, no extra dependency.
+        struct Lcg(u64);
+        impl Lcg {
+            fn next(&mut self) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                self.0 >> 33
+            }
+            fn below(&mut self, bound: u64) -> u64 {
+                self.next() % bound
+            }
+        }
+
+        let mut random = Lcg(0x5EED_1234_ABCD_0001);
+        let mut seen_delivery_handles = HashSet::new();
+        let mut seen_channel_handles = HashSet::new();
+        let soak_started = Instant::now();
+
+        for iteration in 0..24_u32 {
+            let mut options = broker_default_options();
+            options.max_inflight = 1 + random.below(4) as u32;
+            options.max_body_bytes = 64 + random.below(256) as u32;
+            // Short deadlines keep abandoned frames bounded without a long test.
+            options.default_deadline_ms = 150 + random.below(150) as u32;
+
+            let channel = open_broker_channel(&options);
+            assert!(
+                seen_channel_handles.insert(channel),
+                "channel handle {} was reused",
+                channel
+            );
+            let attachment = broker_test_attachment(channel);
+            let generation = attachment.generation;
+
+            // Attach a pump before producing so requests are queued, not refused.
+            assert_eq!(broker_wait_for_frame(channel, 20), 0);
+
+            let request_count = 1 + random.below(4) as u32;
+            let mut payloads = Vec::new();
+            for index in 0..request_count {
+                let body = vec![(index % 251) as u8; 1 + random.below(16) as usize];
+                payloads.push(std::thread::spawn(move || {
+                    broker_enqueue(channel, generation, index, &body)
+                }));
+            }
+
+            let event_count = random.below(6) as u32;
+            for index in 0..event_count {
+                let mut diagnostic = [0_u8; 256];
+                let mut result = broker_call_result(&mut diagnostic);
+                let body = [index as u8];
+                let status =
+                    unsafe { broker_post(channel, generation, 1, 0, body.as_ptr(), body.len() as u32, &mut result) };
+                assert_eq!(status, Status::Success.value(), "one-way post applied backpressure");
+            }
+
+            // Service a random subset with a random terminal decision. Anything
+            // left over must still terminate on its deadline or at close.
+            let service_budget = request_count + event_count;
+            for _ in 0..service_budget {
+                let frame = broker_wait_for_frame(channel, 200);
+                if frame == 0 {
+                    continue;
+                }
+                assert!(
+                    seen_delivery_handles.insert(frame),
+                    "delivery handle {} was reused",
+                    frame
+                );
+
+                let mut diagnostic = [0_u8; 256];
+                let mut result = broker_call_result(&mut diagnostic);
+                let mut info = BrokerFrameInfo {
+                    size: mem::size_of::<BrokerFrameInfo>() as u32,
+                    abi_version: BROKER_ABI_V1,
+                    ..BrokerFrameInfo::default()
+                };
+                assert_eq!(
+                    unsafe { multi_pwsh_broker_frame_get_info(frame, &mut info, &mut result) },
+                    Status::Success.value()
+                );
+                let mut body = vec![0_u8; info.body_length as usize + 1];
+                let mut required = 0_u32;
+                assert_eq!(
+                    unsafe {
+                        multi_pwsh_broker_frame_read(
+                            frame,
+                            body.as_mut_ptr(),
+                            body.len() as u32,
+                            &mut required,
+                            &mut result,
+                        )
+                    },
+                    Status::Success.value()
+                );
+                assert_eq!(required, info.body_length);
+
+                let correlation = info.correlation_id;
+                let one_way = info.flags & BROKER_FRAME_FLAG_ONE_WAY != 0;
+                assert_eq!(
+                    unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+                    Status::Success.value()
+                );
+                // Releasing twice is always stale, never a second frame.
+                assert_eq!(
+                    unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+                    Status::InvalidHandle.value()
+                );
+
+                if one_way {
+                    continue;
+                }
+
+                match random.below(4) {
+                    0 => {
+                        let reply = [7_u8, 8, 9];
+                        unsafe {
+                            multi_pwsh_broker_reply(channel, correlation, reply.as_ptr(), 3, &mut result);
+                        }
+                    }
+                    1 => {
+                        let message = b"soak";
+                        unsafe {
+                            multi_pwsh_broker_reply_error(
+                                channel,
+                                correlation,
+                                1,
+                                Utf8Span {
+                                    data: message.as_ptr(),
+                                    len: message.len(),
+                                },
+                                &mut result,
+                            );
+                        }
+                    }
+                    2 => unsafe {
+                        multi_pwsh_broker_cancel(channel, correlation, &mut result);
+                    },
+                    // 3: deliberately abandon. Release is not abandonment, so
+                    // this frame must still terminate on its deadline.
+                    _ => {}
+                }
+            }
+
+            broker_close_channel(channel);
+
+            for payload in payloads {
+                let (status, _, _) = payload.join().expect("payload thread");
+                // Every path must reach a defined terminal status.
+                assert!(
+                    status == Status::Success.value()
+                        || status == Status::ManagedFailure.value()
+                        || status == Status::OperationCancelled.value()
+                        || status == Status::BrokerTimeout.value()
+                        || status == Status::BrokerClosed.value()
+                        || status == Status::BrokerBusy.value(),
+                    "iteration {} produced undefined status {}",
+                    iteration,
+                    status
+                );
+            }
+
+            broker_release_test_attachment(&attachment);
+
+            // Closing must leave no delivery handles or channel state behind.
+            let registry = broker_frame_registry();
+            let leaked = registry
+                .as_ref()
+                .map(|map| map.values().filter(|(owner, _)| Arc::strong_count(owner) > 0).count())
+                .unwrap_or(0);
+            drop(registry);
+            assert!(
+                leaked <= seen_delivery_handles.len(),
+                "delivery-handle registry grew without bound"
+            );
+            let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert!(
+                !state.broker_channels.contains_key(&channel),
+                "a closed channel remained registered"
+            );
+        }
+
+        assert!(
+            soak_started.elapsed() < Duration::from_secs(60),
+            "the broker soak exceeded its bounded runtime"
+        );
+
+        // No channel state and no delivery handles survive the soak.
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for channel in &seen_channel_handles {
+            assert!(!state.broker_channels.contains_key(channel));
+        }
+        drop(state);
+        let registry = broker_frame_registry();
+        if let Some(map) = registry.as_ref() {
+            for handle in &seen_delivery_handles {
+                assert!(!map.contains_key(handle), "delivery handle {} leaked", handle);
+            }
+        }
+    }
+
+    #[test]
     fn invocation_execution_scope_tracks_nesting_and_unwind_cleanup() {
         assert_eq!(pipeline_execution_depth(), 0);
 

@@ -1298,7 +1298,6 @@ required in the same commit:
 | `dotnet\nativeaot-sample\` | end-to-end pump smoke |
 
 ### What DBC deliberately does not carry
-
 The broker moves **bounded opaque byte frames and fixed-width metadata**. It is
 not an object bridge. The following are excluded by construction, not by
 convention:
@@ -1319,6 +1318,23 @@ convention:
 Frame `kind` values and body encodings are application-owned static contract
 data in this tranche. The generated contract layer that gives them meaning is
 deliberately a later, separate change.
+
+### DBC test coverage
+
+| Layer | Coverage | Runs in |
+| --- | --- | --- |
+| Rust unit | 15 lifecycle/liveness tests plus a bounded randomized soak: request/reply, cancel after dispatch, timeout, close waking all waiters, no consumer, saturation, duplicate and late replies, stale and cross-channel handles, release races, cross-thread release, dispatch-violation rejection, one-way coalescing, and wire-structure layout | `cargo test`, every CI `test` job |
+| NativeAOT sample | A real pipeline calls `$DpsBroker.Post` then `$DpsBroker.Request`; a non-UI pump dispatches and replies from another thread; synchronous invocation with a broker attached is rejected | `nativeaot-sdk` CI job, asserted by output line |
+| Packed SDK consumer | The same flow through the **restored NuGet package**'s public facade and staged native asset, from an isolated local feed with no fallback folders | `tests/Test-PwshFfiPackage.ps1`, `nativeaot-sdk` CI job |
+
+The randomized soak uses a fixed seed and a deterministic linear congruential
+generator, so it is reproducible and bounded (24 iterations, well under a
+minute) rather than opt-in. It asserts that every payload thread reaches a
+defined terminal status, that no channel handle or delivery handle is ever
+reused, and that closing a channel leaves no registry entries behind.
+
+Both the sample and the packaged consumer assert an explicit success line, so
+silently dropping the broker smoke fails CI rather than passing quietly.
 
 ## Explicit limitations
 
