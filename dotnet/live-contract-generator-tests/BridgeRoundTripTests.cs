@@ -61,8 +61,7 @@ internal static class BridgeRoundTripTests
         }
 
         public static class HostEntry
-        {
-            public static SampleRootHandler Handler = new();
+        {            public static SampleRootHandler Handler = new();
             public static SampleAuthorizer Authorizer = new();
 
             public static object Create()
@@ -75,6 +74,36 @@ internal static class BridgeRoundTripTests
             public static object CurrentAuthorizer() => Authorizer;
             public static object CurrentHandler() => Handler;
         }
+
+        public static class HostProbe
+        {
+            // Reaches the post-allocation encode-failure path through the public
+            // Dispatch surface: the capacity preflight passes, then the reply
+            // buffer is too small to hold the lease value.
+            public static int OpenWithUndersizedReply(object dispatcher)
+            {
+                byte[] request = new byte[
+                    global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeWire.RequestHeaderSize +
+                    global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeWire.ValueHeaderSize + 32];
+                var writer = new global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeValueWriter(
+                    request.AsSpan(global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeWire.RequestHeaderSize));
+                if (!writer.TryWriteBytes(SampleRootContract.DescriptorHash, 32))
+                {
+                    return -1;
+                }
+
+                var header = new global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeRequestHeader(
+                    global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeFrameKind.Open,
+                    1, 0U, 0UL, 0UL, 0U, writer.Length);
+                if (!header.TryWrite(request))
+                {
+                    return -1;
+                }
+
+                return ((SampleRootDispatcher)dispatcher).Dispatch(
+                    0UL, 0U, 0UL, 0U, 4096, request, new byte[16], out _);
+            }
+        }
         """;
 
     internal static void Run(Func<string, string, string, (Compilation Output, IEnumerable<Diagnostic> Diagnostics)> compile)
@@ -83,6 +112,7 @@ internal static class BridgeRoundTripTests
         Assembly payload = Emit(compile, BridgeContractTests.Valid, "Payload", "BridgeRoundTripPayload");
 
         Type entry = host.GetType("Fixture.HostEntry")!;
+        Type probe = host.GetType("Fixture.HostProbe")!;
         Type bridge = payload.GetType("Fixture.SampleRootBridge")!;
 
         ReadsWriteAndReleaseRoundTrip(entry, bridge);
@@ -93,7 +123,33 @@ internal static class BridgeRoundTripTests
         AnUnknownOrdinalIsRejectedWithoutMutation(entry, bridge);
         AMismatchedDescriptorHashIsRejected(entry, bridge);
         AClosedLeaseCanBeReopenedWithAFreshIdentity(entry, bridge);
+        AFailedOpenReplyRollsBackItsLease(entry, probe, bridge);
         RepeatedCreateInvokeReleaseCyclesAreStable(entry, bridge);
+    }
+
+    /// <summary>
+    /// A lease allocated by an open whose reply never reaches the payload would
+    /// be unreachable forever, and the one-lease rule would then reject every
+    /// later open — permanently bricking the dispatcher. The allocation must be
+    /// rolled back on any failure after it.
+    /// </summary>
+    private static void AFailedOpenReplyRollsBackItsLease(Type entry, Type probe, Type bridge)
+    {
+        var transport = new Transport(entry);
+        try
+        {
+            int status = (int)probe
+                .GetMethod("OpenWithUndersizedReply", BindingFlags.Public | BindingFlags.Static)!
+                .Invoke(null, [transport.Dispatcher])!;
+            Require(status != 0, "an open whose reply cannot be encoded fails");
+
+            object root = bridge.GetMethod("Open", BindingFlags.Public | BindingFlags.Static)!.Invoke(null, [transport])!;
+            Require((string)Get(root, "ProductVersion")! == "1.2.3", "a later open still succeeds, so the failed one rolled back");
+        }
+        finally
+        {
+            transport.Dispose();
+        }
     }
 
     /// <summary>
@@ -307,6 +363,8 @@ internal static class BridgeRoundTripTests
         }
 
         internal bool CorruptOpenHash { get; set; }
+
+        internal object Dispatcher => dispatcher;
 
         internal (ulong LeaseId, uint Generation) Lease => (leaseId, generation);
 

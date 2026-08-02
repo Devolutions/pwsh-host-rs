@@ -292,13 +292,23 @@ internal static class BridgeContractDispatcherEmitter
         source.Append("        ").Append(constants).AppendLine(".DescriptorHash.CopyTo(leaseSpan.Slice(20));");
         source.Append("        var __bridgeWriter = new ").Append(BridgeTypeNames.Writer).Append("(reply.Slice(")
             .Append(BridgeTypeNames.Wire).AppendLine(".ReplyHeaderSize));");
+        source.AppendLine("        // A lease that is allocated but whose reply never reaches the payload");
+        source.AppendLine("        // would be unreachable forever, and the one-lease rule would then reject");
+        source.AppendLine("        // every later open. Roll it back on any failure after allocation.");
         source.AppendLine("        if (!__bridgeWriter.TryWriteBytes(lease, 52) || !__bridgeWriter.IsComplete)");
         source.AppendLine("        {");
+        source.AppendLine("            leases.Close(leaseId, generation);");
         source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".InvalidArgument;");
         source.AppendLine("        }");
         source.AppendLine();
-        source.Append("        return CompleteReply(").Append(BridgeTypeNames.ReplyKind)
+        source.Append("        int completed = CompleteReply(").Append(BridgeTypeNames.ReplyKind)
             .AppendLine(".Value, __bridgeWriter.Length, reply, out replyLength);");
+        source.AppendLine("        if (completed != 0)");
+        source.AppendLine("        {");
+        source.AppendLine("            leases.Close(leaseId, generation);");
+        source.AppendLine("        }");
+        source.AppendLine();
+        source.AppendLine("        return completed;");
         source.AppendLine("    }");
         source.AppendLine();
     }
@@ -526,4 +536,5 @@ internal static class BridgeContractDispatcherEmitter
     private static string MethodName(BridgeMemberModel member) =>
         member.Name == "get_Item" ? "GetAt" : member.Name;
 }
+
 
