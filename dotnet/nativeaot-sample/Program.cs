@@ -857,5 +857,10 @@ catch (PowerShellValueConversionException)
 {
 }
 
+if (!BrokerChannelSmoke.Run(runtime))
+{
+    return 1;
+}
+
 Console.WriteLine("NativeAOT in-process PowerShell FFI: Success");
 return 0;
