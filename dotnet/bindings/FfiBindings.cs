@@ -4385,11 +4385,20 @@ namespace NativeHost
                 }
 
                 disposed = true;
-                AddEventLocked(StateClosed);
-                ReleaseAllLiveObjectVariablesLocked();
-                if (ownsRunspace)
+                try
                 {
-                    runspace.Dispose();
+                    AddEventLocked(StateClosed);
+                    ReleaseAllLiveObjectVariablesLocked();
+                }
+                finally
+                {
+                    // The guard above is already set, so a skipped dispose here
+                    // leaks the runspace permanently. A failing lease release must
+                    // not strand it.
+                    if (ownsRunspace)
+                    {
+                        runspace.Dispose();
+                    }
                 }
             }
 
@@ -6958,11 +6967,24 @@ namespace NativeHost
                     }
 
                     disposed = true;
-                    typedResults?.Dispose();
-                    observedDiagnostics?.Dispose();
+                    try
+                    {
+                        typedResults?.Dispose();
+                        observedDiagnostics?.Dispose();
+                    }
+                    finally
+                    {
+                        // Same reason: the guard is set, so skipping Cleanup here
+                        // would permanently strand the session variables and the
+                        // invocation accounting.
+                        if (asyncResult is null)
+                        {
+                            Cleanup();
+                        }
+                    }
+
                     if (asyncResult is null)
                     {
-                        Cleanup();
                         return;
                     }
 
@@ -7085,57 +7107,84 @@ namespace NativeHost
                 }
 
                 cleanedUp = true;
-                if (output != null)
+                try
                 {
-                    output.DataAdded -= outputAdded;
-                }
-                powerShell.Streams.Error.DataAdded -= errorAdded;
-                powerShell.Streams.Warning.DataAdded -= warningAdded;
-                powerShell.Streams.Verbose.DataAdded -= verboseAdded;
-                powerShell.Streams.Debug.DataAdded -= debugAdded;
-                powerShell.Streams.Information.DataAdded -= informationAdded;
-                powerShell.Streams.Progress.DataAdded -= progressAdded;
-
-                if (terminatingException != null && collector.ErrorCount == 0)
-                {
-                    collector.AddError(terminatingError, terminatingException);
-                    observedError = true;
-                    AddObservedDiagnostic(FfiStreamKind.Error, terminatingError ?? (object)terminatingException);
-                }
-
-                output?.Clear();
-                inputCollection?.Clear();
-                ClearStreamBuffers(powerShell);
-                if (capabilityRunspace != null)
-                {
-                    if (!hadPreviousCapabilityVariable)
+                    if (output != null)
                     {
-                        capabilityRunspace.SessionStateProxy.PSVariable.Remove("DpsCapabilities");
+                        output.DataAdded -= outputAdded;
                     }
-                    else
+                    powerShell.Streams.Error.DataAdded -= errorAdded;
+                    powerShell.Streams.Warning.DataAdded -= warningAdded;
+                    powerShell.Streams.Verbose.DataAdded -= verboseAdded;
+                    powerShell.Streams.Debug.DataAdded -= debugAdded;
+                    powerShell.Streams.Information.DataAdded -= informationAdded;
+                    powerShell.Streams.Progress.DataAdded -= progressAdded;
+
+                    if (terminatingException != null && collector.ErrorCount == 0)
                     {
-                        capabilityRunspace.SessionStateProxy.SetVariable(
+                        collector.AddError(terminatingError, terminatingException);
+                        observedError = true;
+                        AddObservedDiagnostic(FfiStreamKind.Error, terminatingError ?? (object)terminatingException);
+                    }
+
+                    output?.Clear();
+                    inputCollection?.Clear();
+                    ClearStreamBuffers(powerShell);
+                }
+                finally
+                {
+                    // The guard above is already set, so any step skipped here is
+                    // skipped permanently. Each restore is independent: one failing
+                    // must not strand another variable or the session's invocation
+                    // accounting.
+                    try
+                    {
+                        RestoreSessionVariable(
+                            capabilityRunspace,
                             "DpsCapabilities",
+                            hadPreviousCapabilityVariable,
                             previousCapabilityValue);
                     }
-                }
-                if (brokerRunspace != null)
-                {
-                    if (!hadPreviousBrokerVariable)
+                    finally
                     {
-                        brokerRunspace.SessionStateProxy.PSVariable.Remove("DpsBroker");
-                    }
-                    else
-                    {
-                        brokerRunspace.SessionStateProxy.SetVariable(
-                            "DpsBroker",
-                            previousBrokerValue);
+                        try
+                        {
+                            RestoreSessionVariable(
+                                brokerRunspace,
+                                "DpsBroker",
+                                hadPreviousBrokerVariable,
+                                previousBrokerValue);
+                        }
+                        finally
+                        {
+                            if (sessionInvocationStarted)
+                            {
+                                session.EndInvocation(terminatingException != null);
+                                sessionInvocationStarted = false;
+                            }
+                        }
                     }
                 }
-                if (sessionInvocationStarted)
+            }
+
+            private static void RestoreSessionVariable(
+                Runspace runspace,
+                string name,
+                bool hadPrevious,
+                object previousValue)
+            {
+                if (runspace == null)
                 {
-                    session.EndInvocation(terminatingException != null);
-                    sessionInvocationStarted = false;
+                    return;
+                }
+
+                if (!hadPrevious)
+                {
+                    runspace.SessionStateProxy.PSVariable.Remove(name);
+                }
+                else
+                {
+                    runspace.SessionStateProxy.SetVariable(name, previousValue);
                 }
             }
         }
