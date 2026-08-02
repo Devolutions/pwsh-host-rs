@@ -2044,6 +2044,43 @@ object. That distinction is what makes the split below work.
    managed contract type refuses to construct one and a pack is native memory
    the consumer does not control.
 
+   **Why the marker lives in the direction enum rather than the reserved
+   field.** The objection is a fair one and worth recording rather than
+   relitigating: every other member of `PowerShellLiveObjectDirection` names a
+   way objects flow, a protocol marker is not a direction, and the descriptor
+   already carries a `Reserved` word that both sides validate as zero. Packing
+   two axes into one `[Flags]` enum does make some bit combinations meaningless.
+
+   Three things decided it the other way.
+
+   The pairing rule does not go away. "A v2 contract is consumer-to-session" is
+   a fact about the domain, not an artifact of packing: with a separate kind
+   field, a descriptor could still declare the v2 kind alongside
+   `PayloadToConsumer`, which is exactly as meaningless. The constraint would
+   move from a cross-bit rule to a cross-field one and would still need writing
+   on both sides. Splitting the axes changes where the rule is spelled, not
+   whether it exists.
+
+   Both spellings already fail closed against an older host. A pre-marker host
+   rejects `0x06` because it is outside the known direction mask, exactly as it
+   rejects a non-zero reserved word. Neither is safer than the other on that
+   axis, so it does not choose between them.
+
+   The reserved word costs more public surface, not less. It is already a
+   recorded baseline field, so giving it meaning means either renaming it — a
+   removal, and the first non-additive change to this ABI — or leaving a field
+   called `Reserved` that is not reserved. Worse, `PowerShellLiveObjectContract`
+   has no path to it at all: `ToNative` never writes it, so carrying a kind
+   there needs a new enum type, a second constructor overload, and a new
+   property. That is roughly six baseline entries against one, and a permanent
+   overload-resolution burden, to move a constraint rather than remove it.
+
+   The long-term case for a separate axis is that protocol kinds accumulate and
+   crowd the enum. That future is one this architecture forbids: capabilities
+   are added by extending the current version in place with lock-step host and
+   payload builds, explicitly not by introducing a parallel protocol version.
+   Ruling out the trajectory rules out the cost.
+
 2. **The sink handshake and invocation leases.** With the bit already in place
    this is genuinely payload-and-pack only: the sink interface; the registry
    accepting and routing v2 contracts; the payload bindings driving the
