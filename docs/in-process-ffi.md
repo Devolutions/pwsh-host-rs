@@ -2069,10 +2069,15 @@ object. That distinction is what makes the split below work.
      that reassigns, removes, wraps, or copies the value drops the proxy. Only
      an exact alias survives. A bridge proxy is therefore no more durable than
      the variable holding it, and the design must not assume otherwise.
-   - **Reconciliation is not transactional.** It disposes as it walks and
-     rebuilds afterwards, and reading a lease's value can throw, so an
-     exception part-way through can dispose earlier entries and propagate. A v2
-     proxy joining that dictionary must not be able to throw from that path.
+   - **Reconciliation is not transactional.** It disposed as it walked and
+     rebuilt afterwards, and reading a lease's value can throw, so an exception
+     part-way through could dispose earlier entries and propagate — leaving
+     disposed leases listed as live, which poisoned every later reconciliation.
+     That is now fixed: it partitions first, swaps the table, then releases, and
+     an unreadable lease is treated as dropped rather than allowed to abort the
+     walk. The residual hazard is narrower — a release that throws after the
+     table is already consistent — and every release is attempted before the
+     first failure is reported.
    - **The invocation window has two escape hatches.** `Stop` alone does not
      close it — removal waits for a later completion or disposal — and
      `Cleanup` sets its completed flag *before* doing any work, so a failure
@@ -2156,13 +2161,148 @@ before then would describe a rule no code enforces, so it lands with the attach
 path that makes it real.
 
 ##### What the move does and does not buy
-
 It moves application code off the pipeline thread and bounds the producer's wait
 by its deadline. It does **not** make the dispatcher's no-wait and no-lock rules
 structural: `TryReceive` releases the delivery handle before it returns, so the
 dispatch-violation guard does not cover what a pump does afterwards, and a pump
 must hand off to a worker rather than dispatch inline or one blocking handler
 wedges the only pump.
+
+##### Increment two, third pass: the sink handshake and invocation leases
+
+The boundary test was run against this increment before any of it was designed,
+and the answer was **no touchpoints outside payload and pack**. Nothing here
+adds a Rust export, a payload binding-table slot, a public facade member, or an
+ABI baseline entry. That is what makes it a self-contained increment; it is not
+what makes it small.
+
+**How a pack is reached today, and the single slot that has to carry everything.**
+A pack exposes `CreatePayloadProxy` as
+`delegate* unmanaged<IntPtr, IntPtr*, int>`, and the registry calls it as
+`create(comObject, &proxyHandle)`. There is exactly **one** inbound pointer, and
+today it is the consumer's object passed through untouched. So the sink cannot
+simply be "also passed": either the pack API grows a parameter — which is a
+synchronized breaking change to the one required pack ABI, and is exactly what
+this decomposition exists to avoid — or the payload stops passing the consumer
+object raw and passes **a payload-owned object that answers `QueryInterface` for
+both the contract interface and the sink**, forwarding the contract interface to
+the consumer.
+
+The second is the one that keeps the increment inside its boundary, and it is
+worth being explicit that this is interposition rather than an extra argument.
+The earlier framing — that a sink can be handed over through the existing
+callback — is true in its conclusion and understates its mechanism: it requires
+the payload to own a COM identity it does not own today, forward `QueryInterface`
+across it, and hold a reference to the consumer object for as long as the pack
+may use it.
+
+**Interposition is gated on the direction bit, which is why the bit came first.**
+A v1 pack must keep receiving exactly what it receives now, byte for byte and
+identity for identity. Interposing for every contract would change what every
+existing pack sees, which is a behaviour change to shipped packages dressed up
+as an internal refactor. So the payload interposes **only** for a contract whose
+descriptor carries `BridgeContract`, and a v1 contract takes the untouched path.
+That also makes "this payload does not support v2" a property of the descriptor
+rather than something a pack has to infer from a failed `QueryInterface`.
+
+**Discovery and lifetime are separate mechanisms inside one increment.** The
+proxy is created once, when the live-object variable is set; the lease is opened
+at each invocation bind and closed at unbind. Discovery is a `QueryInterface`
+plus a declaration over metadata that never changes — contract identity,
+descriptor hash, variable name, frame bounds — so repeating it per invocation
+would buy nothing and cost a round trip per invocation per contract. The two can
+hold different lifetimes because `liveObjectVariables` already retains a proxy
+across invocations and reconciles after each one, releasing at session teardown.
+That was verified rather than assumed, and it returned three constraints this
+increment must respect, recorded above: retention is by exact reference,
+reconciliation used to be non-transactional and is now fixed, and the invocation
+window has two escape hatches. The third is the sharpest: lease close must be
+idempotent and exception-safe **on its own terms**, because `Stop` alone does not
+close the window and `Cleanup` marks itself done before doing any work. Placing a
+close in
+that path and assuming it runs is not enough.
+
+**The declaration state machine.** The registry accepts any callback that
+returns a non-zero proxy, so today it cannot tell a missing declaration from a
+duplicated one, or reject traffic that arrives before binding finished. The
+handshake is therefore a state machine with exactly one legal path —
+`Created -> Declared -> Bound -> Unbound` — and every other transition is a
+defined failure rather than an unobserved one:
+
+| From | Event | To | Otherwise |
+| --- | --- | --- | --- |
+| `Created` | `Declare` once, matching the requested identity | `Declared` | A second `Declare`, or one naming a contract that was not requested, fails the publish |
+| `Created` | anything else | — | Traffic before declaration fails; the pack has not yet said what it is |
+| `Declared` | `Open` at invocation start | `Bound` | A bind naming a proxy that reconciliation already released fails with a named status; re-discovery is explicit |
+| `Declared` | `Open` while another proxy over the same broker is bound | `Bound` | Receives the lease already open rather than being refused |
+| `Bound` | `Close` at invocation end | `Unbound` | A second `Close` is the same first-caller-wins transition, not an error |
+| `Unbound` | `Open` at the next invocation | `Bound` | — |
+
+A pack that never declares is not silently tolerated: the publish fails and the
+variable is not set, because a proxy that never said what it is cannot be routed
+to and would otherwise sit in the table looking healthy.
+
+**Requested identity.** A pack holding two v2 contracts cannot tell which one it
+is being asked for, because the registry stores one `create_payload_proxy` per
+pack and calls it with only a pointer. The interposed object exposes the
+requested contract identity for the pack to read **before** it declares, so
+selection is something the pack does deliberately rather than something it
+guesses from the order it was called in.
+
+Identity is the interface identifier and version, and **not** the descriptor
+hash. The second pass asked for the hash here and it cannot be had: the inbound
+`NativeLiveObjectContractDescriptor` carries size, directions, interface
+identifier and version, and no hash, and the hash exists only in generated pack
+code. Supplying it before declaration would mean adding a field to the pack ABI,
+which this decomposition exists to avoid. It is also unnecessary, because the
+hash is already compared during `Open` and a mismatch is already rejected there
+with a status that names it. Checking it twice would have bought a slightly
+earlier message at the cost of a breaking ABI change.
+
+**Several proxies over one broker share one lease.** The same broker can be
+assigned to more than one variable — nothing prevents it, and each assignment
+creates a distinct payload proxy — while a consumer lease table deliberately
+serves one lease at a time, because one consumer broker owns one lease and
+closure is first-wins rather than reference counted. A second bind must
+therefore **receive the lease that is already open**, not be refused. Refusing it
+leaves the first proxy `Bound` and the second permanently unable to reach a
+state, which is a stuck handshake rather than a defined failure.
+
+Sharing is coherent precisely because leases are invocation-scoped: every proxy
+over one broker binds and unbinds inside the same invocation, so a first-wins
+close at unbind ends a lease that all of them were finished with anyway. A bind
+that fails after the state has moved must roll the state back, so that no proxy
+is left reporting `Bound` over a lease that does not exist.
+
+**The proxy a script discarded.** Discovery happens once, so the design owes an
+answer to the case where the object is gone by the next invocation.
+Reconciliation releases a lease when no variable holds a **direct** reference to
+it, which ordinary script reaches without trying: assigning `$a = $null`,
+letting the variable fall out of use, or wrapping it as `$b = @($a)` — the
+wrapper holds the object, the variable does not, and the reference check does
+not see through it.
+
+Binding must fail loudly with a named status when the proxy it names is gone,
+and re-discovery must be explicit. This is not a hypothetical preference. The
+existing sample already probes the neighbouring case — an escaped child wrapper
+used after its root lease was released — and records that PowerShell projects
+the failed getter as **null**, so the object reads as present and empty rather
+than as revoked. That is the exact failure mode Bridge Contract v2 exists to
+remove, and it is why the answer here cannot be silence: the v2 lease runtime
+already tombstones every handle at lease end and returns a deterministic revoked
+error, and a bind that quietly attached to a released proxy would reintroduce
+the wart one layer up.
+
+**What is deliberately not in this increment.** The carrier does not move: COM
+still carries `Invoke` throughout. No reply envelope, no routing prefix, no
+transport-failure mapping, no pump. Those are the carrier move, and keeping them
+out is what lets the handshake and the lease semantics be tested against a
+transport that already works.
+
+Two triggers still end this line. Scope leaking outside the increment's own
+boundary is the leading indicator and is objectively checkable — a fourth
+touchpoint outside payload and pack means stop and re-split. A design pass
+failing to converge is the lagging one.
 
 ### Consumer dispatcher rules
 
