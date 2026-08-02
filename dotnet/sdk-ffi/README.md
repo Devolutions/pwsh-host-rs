@@ -363,8 +363,18 @@ using PowerShellBrokerChannel channel = runtime.CreateBrokerChannel(
         defaultDeadline: TimeSpan.FromSeconds(30)));
 
 // One dedicated pump thread. It must never do application work inline.
+using var pumpReady = new ManualResetEventSlim();
 var pump = new Thread(() =>
 {
+    // Thread.Start only schedules work. This zero-time wait registers the
+    // consumer before the payload can issue its first request.
+    if (!channel.TryReceive(TimeSpan.Zero, out _))
+    {
+        pumpReady.Set();
+        return;
+    }
+
+    pumpReady.Set();
     while (channel.TryReceive(TimeSpan.FromMilliseconds(250), out PowerShellBrokerRequest? request))
     {
         if (request is not null)
@@ -376,6 +386,10 @@ var pump = new Thread(() =>
 });
 pump.IsBackground = true;
 pump.Start();
+if (!pumpReady.Wait(TimeSpan.FromSeconds(5)))
+{
+    throw new TimeoutException("The broker pump did not attach.");
+}
 
 using PowerShell command = session.CreatePowerShell()
     .AddScript("$DpsBroker.Request(1, [byte[]]@(1,2,3))")

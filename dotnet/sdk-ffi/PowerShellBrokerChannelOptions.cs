@@ -37,12 +37,12 @@ public sealed class PowerShellBrokerChannelOptions
         }
 
         TimeSpan deadline = defaultDeadline ?? MaximumSupportedDeadline;
-        if (deadline <= TimeSpan.Zero || deadline > MaximumSupportedDeadline)
+        if (deadline < TimeSpan.FromMilliseconds(1) || deadline > MaximumSupportedDeadline)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(defaultDeadline),
                 deadline,
-                $"The broker channel deadline must be greater than zero and at most {MaximumSupportedDeadline}.");
+                $"The broker channel deadline must be at least one millisecond and at most {MaximumSupportedDeadline}.");
         }
 
         MaximumInflightFrames = maximumInflightFrames;

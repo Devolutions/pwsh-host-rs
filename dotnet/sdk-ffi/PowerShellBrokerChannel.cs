@@ -116,6 +116,11 @@ public sealed unsafe class PowerShellBrokerChannel : IDisposable
         {
             request = ReadFrame(frame, diagnostic);
         }
+        catch (PowerShellFfiException exception)
+            when (exception.Status is PowerShellFfiStatus.BrokerClosed or PowerShellFfiStatus.InvalidHandle)
+        {
+            return false;
+        }
         finally
         {
             // Release on the same thread that received the frame. This is not

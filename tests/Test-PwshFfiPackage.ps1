@@ -2424,6 +2424,15 @@ return 0;
 
 async Task VerifyDuplexBrokerChannelAsync()
 {
+    try
+    {
+        _ = new PowerShellBrokerChannelOptions(defaultDeadline: TimeSpan.FromTicks(1));
+        throw new InvalidOperationException("A sub-millisecond broker deadline was accepted.");
+    }
+    catch (ArgumentOutOfRangeException)
+    {
+    }
+
     using PowerShellBrokerChannel channel = runtime.CreateBrokerChannel(
         new PowerShellBrokerChannelOptions(
             maximumInflightFrames: 8,
@@ -2434,11 +2443,20 @@ async Task VerifyDuplexBrokerChannelAsync()
     int observedEvents = 0;
     Exception? pumpFailure = null;
     using var stopping = new CancellationTokenSource();
+    using var pumpReady = new ManualResetEventSlim();
 
     var pump = new Thread(() =>
     {
         try
         {
+            // Register the consumer before the payload starts. Thread.Start
+            // alone does not guarantee that broker_wait has run.
+            if (!channel.TryReceive(TimeSpan.Zero, out _))
+            {
+                throw new InvalidOperationException("The broker channel closed before the pump attached.");
+            }
+
+            pumpReady.Set();
             while (!stopping.IsCancellationRequested &&
                 channel.TryReceive(TimeSpan.FromMilliseconds(100), out PowerShellBrokerRequest? received))
             {
@@ -2473,6 +2491,7 @@ async Task VerifyDuplexBrokerChannelAsync()
         catch (Exception exception)
         {
             pumpFailure = exception;
+            pumpReady.Set();
         }
     })
     {
@@ -2483,6 +2502,11 @@ async Task VerifyDuplexBrokerChannelAsync()
 
     try
     {
+        Require(
+            pumpReady.Wait(TimeSpan.FromSeconds(5)),
+            "The packaged broker pump did not attach.");
+        Require(pumpFailure is null, "The packaged broker pump failed: " + pumpFailure?.Message);
+
         using (PowerShell synchronous = PowerShell.Create())
         {
             synchronous.AddScript("'unused'").WithBroker(channel);

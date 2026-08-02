@@ -4122,13 +4122,21 @@ unsafe fn broker_open(
     if options.is_null() {
         return Err((Status::InvalidArgument, "broker channel options are null".to_owned()));
     }
-    let header = options.read();
-    if header.size as usize != mem::size_of::<BrokerChannelOptions>() || header.abi_version != BROKER_ABI_V1 {
+    let size = std::ptr::read_unaligned(std::ptr::addr_of!((*options).size));
+    if size as usize != mem::size_of::<BrokerChannelOptions>() {
         return Err((
             Status::InvalidArgument,
             "broker channel options report an unsupported size or ABI version".to_owned(),
         ));
     }
+    let abi_version = std::ptr::read_unaligned(std::ptr::addr_of!((*options).abi_version));
+    if abi_version != BROKER_ABI_V1 {
+        return Err((
+            Status::InvalidArgument,
+            "broker channel options report an unsupported size or ABI version".to_owned(),
+        ));
+    }
+    let header = options.read_unaligned();
     if header.flags != 0 {
         return Err((
             Status::InvalidArgument,
@@ -4312,8 +4320,15 @@ unsafe fn broker_frame_get_info(delivery: u64, info: *mut BrokerFrameInfo) -> Re
     if info.is_null() {
         return Err((Status::InvalidArgument, "broker frame info pointer is null".to_owned()));
     }
-    let header = info.read();
-    if header.size as usize != mem::size_of::<BrokerFrameInfo>() || header.abi_version != BROKER_ABI_V1 {
+    let size = std::ptr::read_unaligned(std::ptr::addr_of!((*info).size));
+    if size as usize != mem::size_of::<BrokerFrameInfo>() {
+        return Err((
+            Status::InvalidArgument,
+            "broker frame info reports an unsupported size or ABI version".to_owned(),
+        ));
+    }
+    let abi_version = std::ptr::read_unaligned(std::ptr::addr_of!((*info).abi_version));
+    if abi_version != BROKER_ABI_V1 {
         return Err((
             Status::InvalidArgument,
             "broker frame info reports an unsupported size or ABI version".to_owned(),
@@ -8203,10 +8218,41 @@ mod tests {
             Status::InvalidArgument.value()
         );
 
-        let mut options = broker_default_options();
-        options.size = 8;
+        #[repr(C)]
+        struct ShortBrokerOptions {
+            size: u32,
+        }
+
+        let mut options = ShortBrokerOptions { size: 4 };
         assert_eq!(
-            unsafe { multi_pwsh_broker_open(&options, &mut channel, &mut result) },
+            unsafe {
+                multi_pwsh_broker_open(
+                    (&mut options as *mut ShortBrokerOptions).cast::<BrokerChannelOptions>(),
+                    &mut channel,
+                    &mut result,
+                )
+            },
+            Status::InvalidArgument.value()
+        );
+
+        #[repr(C, align(8))]
+        struct ShortBrokerFrameInfo {
+            size: u32,
+            abi_version: u32,
+        }
+
+        let mut info = ShortBrokerFrameInfo {
+            size: 8,
+            abi_version: BROKER_ABI_V1,
+        };
+        assert_eq!(
+            unsafe {
+                multi_pwsh_broker_frame_get_info(
+                    0,
+                    (&mut info as *mut ShortBrokerFrameInfo).cast::<BrokerFrameInfo>(),
+                    &mut result,
+                )
+            },
             Status::InvalidArgument.value()
         );
 

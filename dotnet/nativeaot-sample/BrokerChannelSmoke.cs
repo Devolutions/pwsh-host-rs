@@ -29,11 +29,20 @@ internal static class BrokerChannelSmoke
         int requests = 0;
         Exception? pumpFailure = null;
         using var stopping = new CancellationTokenSource();
+        using var pumpReady = new ManualResetEventSlim();
 
         var pump = new Thread(() =>
         {
             try
             {
+                // Register the consumer before the payload starts. Thread.Start
+                // alone does not guarantee that broker_wait has run.
+                if (!channel.TryReceive(TimeSpan.Zero, out _))
+                {
+                    throw new InvalidOperationException("The broker channel closed before the pump attached.");
+                }
+
+                pumpReady.Set();
                 while (!stopping.IsCancellationRequested &&
                     channel.TryReceive(TimeSpan.FromMilliseconds(100), out PowerShellBrokerRequest? request))
                 {
@@ -69,6 +78,7 @@ internal static class BrokerChannelSmoke
             catch (Exception exception)
             {
                 pumpFailure = exception;
+                pumpReady.Set();
             }
         })
         {
@@ -79,6 +89,18 @@ internal static class BrokerChannelSmoke
 
         try
         {
+            if (!pumpReady.Wait(TimeSpan.FromSeconds(5)))
+            {
+                Console.Error.WriteLine("NativeAOT broker pump did not attach.");
+                return false;
+            }
+
+            if (pumpFailure is not null)
+            {
+                Console.Error.WriteLine($"NativeAOT broker pump failed: {pumpFailure.Message}");
+                return false;
+            }
+
             using PowerShell synchronous = PowerShell.Create();
             synchronous.AddScript("'unused'").WithBroker(channel);
             try
