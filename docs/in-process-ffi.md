@@ -1962,21 +1962,33 @@ descriptor hash so it cannot drift from the contract it names, and the pump
 rejects a second contract presenting the same value at registration rather than
 mis-routing at run time.
 
-**Open question — a builder carries exactly one channel.** The builder holds a
-single `broker_channel`, so "dedicated" cannot mean "a second channel alongside
-the one backing `$DpsBroker`" without an ABI change. Two ways to honour the
-decision:
+**A builder carries exactly one channel, and that is the rule, not a limitation.**
+`set_broker` already rejects a second attach with `MULTI_PWSH_BACKPRESSURE`, so
+mutual exclusion is the behaviour the ABI enforces today: allowing a bridge and
+raw `$DpsBroker` in one invocation would be the *change*, not the restriction.
 
-1. **Mutual exclusion, no ABI change.** An invocation uses the channel for the
-   bridge or for raw `$DpsBroker`, never both, and the payload installs one or
-   the other. Separation stays structural and nothing in the ABI moves.
-2. **A second channel slot on the builder.** Both are available at once, at the
-   cost of another change to an unreleased surface.
+An invocation therefore uses its channel for a generated bridge **or** for raw
+`$DpsBroker`, never both. The supported way to do both is two invocations.
 
-Option 1 is the smaller change and keeps the invariant structural, which is the
-principle that selected a dedicated channel in the first place. It costs
-consumers the ability to mix hand-rolled broker frames with a generated bridge in
-one invocation.
+The decisive argument is not cost, it is what the rule makes true. Under mutual
+exclusion, for a bridge invocation this holds:
+
+> every application request this invocation can make goes through the generated,
+> authorized, leased contract surface.
+
+Allow both and it becomes false. The script would hold a typed surface with
+per-accessor authorization, lease validation, and tombstoning next to a raw frame
+channel with none of it — and the realistic failure is an application raw handler
+that does what a staged member would have staged, without the staging. A closed
+surface loses most of its value when an open one sits beside it in the same
+invocation.
+
+The restriction is also the reversible choice: adding a second channel later is
+additive, while shipping both and restricting later would break consumers. Both
+surfaces are unreleased, so the capability being withheld has no users.
+
+The attach failure must name the rule rather than only its mechanism, and say
+that two invocations are the supported alternative.
 
 ##### What this pass still does not solve
 
@@ -2021,6 +2033,15 @@ above: keep the single builder slot but give it an explicit **role**, so an
 additive attach marks the channel as carrying bridge traffic and the payload
 then deterministically installs bridge sinks or `$DpsBroker`, never both, and
 rejects mixed use outright.
+
+Item 3 needs one more decision that is easy to miss. Reusing `Open`/`Close` as
+bind and unbind is only coherent if a lease lives for one invocation, because a
+proxy created per invocation must open per invocation. Endorsing the reuse and
+deferring invocation-scoped leases are therefore the same decision made twice
+with opposite answers. Either that lifecycle is adopted here, or bind attaches
+only the invocation's transport while `Open` happens once lazily and `Close` on
+disposal — in which case bind and unbind are **not** `Open` and `Close` after
+all.
 
 
 

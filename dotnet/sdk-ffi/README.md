@@ -212,6 +212,20 @@ consumer-owned `IUnknown`, so an event sink is obtained by `QueryInterface` and
 a consumer that supplies one must return without blocking. A lease with no sink
 fails an event call deterministically instead of degrading silently.
 
+### One channel, one purpose
+
+When the bridge moves onto the duplex broker channel, an invocation will use its
+channel for a generated bridge **or** for raw `$DpsBroker`, never both. Attaching
+a second channel to one builder already fails today, so this is the behaviour the
+runtime enforces rather than a new restriction. To use both, run two invocations.
+
+This is a product statement, not an implementation detail. Under it, for a bridge
+invocation, *every* application request the script can make goes through the
+generated, authorized, leased contract surface. Allowing a raw frame channel
+beside it would put a surface with no authorization, no lease validation, and no
+staging next to one that has all three, in the same invocation — and a closed
+surface loses most of its value when an open one sits beside it.
+
 `docs/in-process-ffi.md` carries the normative wire, descriptor, dispatcher,
 failure, lease, authorization, and staged-mutation rules.
 
