@@ -2018,21 +2018,31 @@ because `$DpsBroker` is installed at invocation start and removed at cleanup.
 What is missing is a **pack-reachable object** to deliver it to. The sink is that
 object. That distinction is what makes the split below work.
 
-1. **The direction bit.** A v2 contract needs a new
+1. **The direction bit — landed.** A v2 contract needs a new
    `PowerShellLiveObjectDirection` value, and that is **not** a payload-and-pack
    change: `PowerShellLiveObjectContract.cs` is compiled into the facade, the
    enum is recorded in the public ABI baseline as `facade:type` and
    `facade:field` entries, and Rust independently rejects any direction outside
-   `0x03`. So the bit lands on its own — facade enum, both validation masks, an
-   additive baseline update, and the contract-pack rejection fixtures — before
-   any protocol work. It is mechanical, it is where a mistake is expensive and a
-   review is cheap, and separating it keeps an ABI diff out of the protocol
+   `0x03`. So the bit landed on its own — facade enum, both validation masks, an
+   additive baseline update, and a contract-pack rejection fixture — before any
+   protocol work. It is mechanical, it is where a mistake is expensive and a
+   review is cheap, and separating it kept an ABI diff out of the protocol
    commit.
 
    This split was not a preference. Applying the boundary test to the original
    increment — *does it touch anything outside payload and pack?* — answered no
    on the third check, which is exactly the leading indicator agreed for
    stopping and re-splitting rather than pushing through.
+
+   `BridgeContract` is declared **with** `ConsumerToSession`, never instead of
+   it, and both validators enforce the pairing independently rather than
+   trusting the other to have checked. The rule is defense in depth plus an
+   early, specific diagnosis: a lone marker was already rejected downstream by
+   the registry's `ConsumerToSession` requirement, so the rule moves the error
+   to the line that made the mistake rather than adding a barrier where none
+   existed. The rejection fixture writes raw descriptor bits, because the
+   managed contract type refuses to construct one and a pack is native memory
+   the consumer does not control.
 
 2. **The sink handshake and invocation leases.** With the bit already in place
    this is genuinely payload-and-pack only: the sink interface; the registry
@@ -2101,9 +2111,10 @@ decision rather than more design:
 2. **The sink needs a state machine.** The registry accepts any callback that
    returns a non-zero proxy, so it cannot detect a missing or duplicated
    declaration, or traffic sent before binding completes.
-3. **`Open`/`Close` as bind/unbind *is* an invocation-scoped lease**, which this
-   task explicitly defers. Either that lifecycle is adopted now, or `Open`
-   happens once lazily and bind only attaches the invocation's transport.
+3. **`Open`/`Close` as bind/unbind *is* an invocation-scoped lease** —
+   **resolved by adopting it.** Endorsing the reuse and deferring the lifecycle
+   were the same decision made twice with opposite answers, so the lifecycle is
+   adopted up front and the reasoning is recorded above.
 4. **A timed-out `Open` can strand a lease.** The dispatcher allocates before
    replying, and a late reply merely fails, so the allocation must be rolled
    back on every delivery failure.
@@ -2116,31 +2127,35 @@ decision rather than more design:
 7. **Routing identifies a schema, not an instance**, so two bindings of the same
    contract on one channel cannot be told apart — and the `Open` frame has no
    lease yet to disambiguate with.
-8. **The direction bit is not free after all.** Rust independently rejects any
-   direction outside `0x03`, so the bit needs a validation change on both sides
-   and a baseline update. That is still far smaller than appending slots to the
-   pack ABI, so the conclusion stands and the framing does not.
+8. **The direction bit is not free after all** — **resolved and landed.** Rust
+   independently rejects any direction outside `0x03`, so the bit needed a
+   validation change on both sides and a baseline update. That was still far
+   smaller than appending slots to the pack ABI, so the conclusion stood and
+   only the framing did not.
 9. **There is no host-side non-COM construction path.** The only existing
    abstraction requires a generated COM interface and exports an `IUnknown`, so
    deleting the COM carrier leaves nothing that associates a dispatcher, a
    channel, and a payload variable. That is new public facade surface.
 
-A third option for the one-channel question is better than either recorded
-above: keep the single builder slot but give it an explicit **role**, so an
-additive attach marks the channel as carrying bridge traffic and the payload
-then deterministically installs bridge sinks or `$DpsBroker`, never both, and
-rejects mixed use outright.
+**The one-channel question is settled by an explicit role on the single slot.**
+Mutual exclusion by itself is not a structural invariant, because `set_broker`
+records only the channel and its handle — nothing carries intent, so nothing can
+decide. Giving the single slot an explicit role does: an attach marks the channel
+as carrying bridge traffic, the payload then deterministically installs bridge
+sinks or `$DpsBroker`, never both, and mixed use is rejected outright. One slot,
+one decider.
 
-Item 3 needs one more decision that is easy to miss. Reusing `Open`/`Close` as
-bind and unbind is only coherent if a lease lives for one invocation, because a
-proxy created per invocation must open per invocation. Endorsing the reuse and
-deferring invocation-scoped leases are therefore the same decision made twice
-with opposite answers. Either that lifecycle is adopted here, or bind attaches
-only the invocation's transport while `Open` happens once lazily and `Close` on
-disposal — in which case bind and unbind are **not** `Open` and `Close` after
-all.
+The guarantee that follows holds **per invocation, not per session** — a session
+may run a bridge invocation and a raw-broker invocation back to back. With
+invocation-scoped leases the two scopes line up: the bridge surface a script can
+reach is bounded by the same boundary the guarantee is stated at, rather than a
+lease outliving the claim made about it.
 
+The attach failure will name that rule once a bridge can be attached. Stating it
+before then would describe a rule no code enforces, so it lands with the attach
+path that makes it real.
 
+##### What the move does and does not buy
 
 It moves application code off the pipeline thread and bounds the producer's wait
 by its deadline. It does **not** make the dispatcher's no-wait and no-lock rules
