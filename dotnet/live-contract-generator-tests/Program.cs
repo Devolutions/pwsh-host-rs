@@ -52,6 +52,7 @@ VerifyNoDiagnostics("""
 // The v2 compiler is a second generator in the same analyzer assembly. Running
 // both here also proves an ordinary v1 compilation gets no v2 diagnostics.
 BridgeContractTests.Run(RunBridgeGenerators, AssertNoErrors);
+BridgeWireTests.Run();
 
 Console.WriteLine("live-contract and bridge-contract generator fixtures passed");
 
