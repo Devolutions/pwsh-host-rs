@@ -215,6 +215,15 @@ an invocation-scoped generated root through an owned GC handle. The payload
 unbinds that root at completion before releasing the handle, so escaped wrappers
 are deterministically revoked.
 
+The host construction surface is already explicit:
+`PowerShellRuntime.CreateBridgeChannel` creates a channel and
+`PowerShellBridgeChannel.CreateBinding` associates one generated
+`IPowerShellBridgeDispatcher` with it. A binding owns its dispatcher and the
+channel owns its bindings. Session assignment and builder attachment deliberately
+remain unavailable until generated frames use this channel; publishing either
+against the current COM carrier would create a variable that fails at its first
+member call.
+
 **Duplex broker delivery of declared events is not wired yet**: a consumer event
 sink is obtained by `QueryInterface` on the contract transport and a consumer
 that supplies one must return without blocking. A lease with no sink fails an

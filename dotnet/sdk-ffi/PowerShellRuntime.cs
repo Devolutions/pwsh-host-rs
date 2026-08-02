@@ -174,6 +174,16 @@ public sealed class PowerShellRuntime
         return PowerShellBrokerChannel.Create(options ?? new PowerShellBrokerChannelOptions());
     }
 
+    /// <summary>
+    /// Creates a broker channel dedicated to generated Bridge Contract v2
+    /// dispatchers. Bind generated dispatchers with
+    /// <see cref="PowerShellBridgeChannel.CreateBinding"/>.
+    /// </summary>
+    public PowerShellBridgeChannel CreateBridgeChannel(PowerShellBrokerChannelOptions? options = null)
+    {
+        return new PowerShellBridgeChannel(CreateBrokerChannel(options));
+    }
+
     public PowerShellCapabilitySet RegisterCapabilities(IEnumerable<PowerShellCapabilityBinding> bindings)
     {
         if ((FeatureFlags & (1UL << 16)) == 0)

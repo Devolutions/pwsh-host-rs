@@ -2126,7 +2126,14 @@ object. That distinction is what makes the split below work.
    author writes but requires the SDK to grow a replacement that associates a
    dispatcher, a channel, and a payload variable. That is new public facade
    surface and gets its own design and its own adversarial review rather than
-   riding along with a transport swap.
+   riding along with a transport swap. The construction half is
+   `PowerShellRuntime.CreateBridgeChannel`, followed by
+   `PowerShellBridgeChannel.CreateBinding` over the generated
+   `IPowerShellBridgeDispatcher`; the binding owns its generated dispatcher and
+   the channel owns its bindings. It deliberately does not yet expose session
+   assignment or builder attachment: until the payload can route frames to that
+   binding, exposing either would publish a live-object variable that fails at
+   its first member call. Those operations land with the carrier move.
 
 4. **The carrier move.** By then the handshake and the lease semantics exist and
    are tested, so this is closer to the transport swap it was originally scoped

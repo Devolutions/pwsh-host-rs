@@ -100,6 +100,7 @@ internal static class BridgeContractTests
         VerifySurface(run, assertNoErrors, "Payload", "public void ReportProgress(int percent)");
         VerifySurface(run, assertNoErrors, "Host", "interface ISampleRootBridgeHandler");
         VerifySurface(run, assertNoErrors, "Host", "interface ISampleRootAuthorizer");
+        VerifySurface(run, assertNoErrors, "Host", "IPowerShellBridgeDispatcher");
         VerifySurface(run, assertNoErrors, "Host", "class SampleFailureValue");
         VerifyDescriptorParity(run, assertNoErrors);
         VerifyNoDynamicDispatch(run, assertNoErrors);
@@ -527,5 +528,3 @@ internal static class BridgeContractTests
     private static string Generated(GeneratorDriverRunResult result) =>
         string.Join(Environment.NewLine, result.GeneratedTrees.Select(static tree => tree.GetText().ToString()));
 }
-
-

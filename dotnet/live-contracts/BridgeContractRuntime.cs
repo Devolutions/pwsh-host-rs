@@ -196,6 +196,41 @@ public interface IPowerShellBridgeTransport
 }
 
 /// <summary>
+/// The transport-neutral, generated host endpoint for one closed bridge
+/// contract. A <c>PowerShellBridgeBinding</c> associates it with a broker
+/// channel without requiring an application-defined COM transport wrapper.
+/// </summary>
+public interface IPowerShellBridgeDispatcher : IDisposable
+{
+    /// <summary>The contract transport identity validated by the payload during discovery.</summary>
+    Guid ContractInterfaceId { get; }
+
+    /// <summary>The declared contract major version.</summary>
+    ushort ContractMajorVersion { get; }
+
+    /// <summary>The declared contract minor version.</summary>
+    ushort ContractMinorVersion { get; }
+
+    /// <summary>The largest reply any declared operation can produce.</summary>
+    int MaximumReplyBytes { get; }
+
+    /// <summary>
+    /// Dispatches one already-bounded bridge request. The caller supplies the
+    /// lease identity from the request header and a reply buffer bounded by
+    /// <see cref="MaximumReplyBytes"/>.
+    /// </summary>
+    int Dispatch(
+        ulong leaseId,
+        uint generation,
+        ulong objectId,
+        uint memberId,
+        int outputCapacity,
+        ReadOnlySpan<byte> request,
+        Span<byte> reply,
+        out int replyLength);
+}
+
+/// <summary>
 /// The optional one-way event sink a consumer may expose alongside its contract
 /// transport interface. It is obtained by <c>QueryInterface</c> on the same
 /// <c>IUnknown</c> the payload pack already receives.

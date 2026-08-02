@@ -34,7 +34,8 @@ internal static class BridgeContractDispatcherEmitter
         source.AppendLine("/// setter, and method is authorized independently, immediately before it runs,");
         source.AppendLine("/// and every frame is admitted against the lease and object tables first.");
         source.AppendLine("/// </summary>");
-        source.Append("public sealed class ").Append(name).AppendLine(" : global::System.IDisposable");
+        source.Append("public sealed class ").Append(name)
+            .AppendLine(" : global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeDispatcher");
         source.AppendLine("{");
         source.AppendLine("    private readonly global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeLeaseTable leases = new();");
         source.Append("    private readonly ").Append(rootHandler).AppendLine(" root;");
@@ -52,6 +53,18 @@ internal static class BridgeContractDispatcherEmitter
         source.Append("    /// <summary>The largest reply any declared member can produce, computed at compile time.</summary>")
             .AppendLine();
         source.Append("    public const int MaximumReplyBytes = ").Append(BridgeTypeNames.Number(maximumReply)).AppendLine(";");
+        source.AppendLine();
+        source.AppendLine("    /// <summary>The contract transport identity used for payload discovery.</summary>");
+        source.Append("    public global::System.Guid ContractInterfaceId { get; } = global::System.Guid.Parse(")
+            .Append(constants).AppendLine(".TransportInterfaceId);");
+        source.AppendLine();
+        source.Append("    /// <summary>The declared contract major version.</summary>").AppendLine();
+        source.Append("    public ushort ContractMajorVersion => checked((ushort)").Append(constants).AppendLine(".MajorVersion);");
+        source.AppendLine();
+        source.Append("    /// <summary>The declared contract minor version.</summary>").AppendLine();
+        source.Append("    public ushort ContractMinorVersion => checked((ushort)").Append(constants).AppendLine(".MinorVersion);");
+        source.AppendLine();
+        source.AppendLine("    int global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeDispatcher.MaximumReplyBytes => MaximumReplyBytes;");
         source.AppendLine();
         EmitComEntryPoint(source, name, maximumReply);
         EmitCloseAndDispose(source);
@@ -536,5 +549,4 @@ internal static class BridgeContractDispatcherEmitter
     private static string MethodName(BridgeMemberModel member) =>
         member.Name == "get_Item" ? "GetAt" : member.Name;
 }
-
 
