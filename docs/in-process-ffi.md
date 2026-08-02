@@ -1336,6 +1336,727 @@ reused, and that closing a channel leaves no registry entries behind.
 Both the sample and the packaged consumer assert an explicit success line, so
 silently dropping the broker smoke fails CI rather than passing quietly.
 
+## Bridge Contract v2
+
+Bridge Contract v2 is a **closed generated IDL** for a finite local application
+object surface. It exists so a trusted payload pack can offer ordinary
+PowerShell property and method syntax over an application object graph that the
+application declared, member by member, at compile time.
+
+It is a compiler, not a bridge policy. Everything it accepts is enumerated in
+source; everything else is a compile-time error. There is no runtime member
+discovery, no name-based dispatch, and no way to widen the surface without
+recompiling both sides.
+
+### Relationship to the v1 live-contract preview
+
+`[LiveContract]`, `[LiveObject]`, and `[LiveMember]` — the v1 preview described
+in *Live-contract generator preview* — are **unchanged**. v1 keeps its own
+generator, its own diagnostics (`MPWLC001`-`MPWLC010`), its own version-1 wire
+format, and its existing narrow root/collection/child graph. A package built
+against v1 keeps its exact behaviour.
+
+v2 is a **separate attribute family** compiled by a second generator in the same
+analyzer assembly. v1's shape-matched three-object graph cannot be generalised
+without changing its emitted surface, and keeping legacy packages working is a
+delivery requirement, so the two families coexist rather than merge.
+
+Coexistence rules, which the generators implement mechanically:
+
+- The v2 generator produces nothing and reports nothing when a compilation
+  declares no `[BridgeContract]` root, exactly as v1 does for `[LiveContract]`.
+  Referencing the SDK never turns an ordinary consumer into diagnostics.
+- A compilation that declares both a v1 root and a v2 root is an error
+  (`MPWLC012`), reported by the v2 generator only, which then emits nothing.
+- Both families share `AnalyzerReleases.Unshipped.md`; `MPWLC011`-`MPWLC024`
+  are added there in the same change that adds them to the generator, because
+  `EnforceExtendedAnalyzerRules` makes an unlisted rule an RS2008 build error.
+
+### Declaration surface
+
+A contract is declared once, in one source file, and compiled twice — once with
+`LiveContractMode=Host` for the NativeAOT consumer and once with
+`LiveContractMode=Payload` for the trusted payload pack.
+
+```csharp
+// The contract author declares the COM transport interface by hand.
+// A source generator cannot see another generator's output, so the
+// [GeneratedComInterface] declaration must exist in user source.
+[GeneratedComInterface]
+[Guid("2C7E8A11-6B44-4E27-9F0A-0C6C0F53D8E1")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public partial interface IRdmBridgeTransport
+{
+    [PreserveSig]
+    int Invoke(ulong leaseId, uint generation, ulong objectId, uint memberId,
+               nint input, int inputLength, nint output, int outputCapacity, out int outputLength);
+
+    [PreserveSig]
+    int CloseLease(ulong leaseId, uint generation);
+}
+
+[BridgeContract("6F1B2D2A-...", 1, 0, "2C7E8A11-6B44-4E27-9F0A-0C6C0F53D8E1")]
+[BridgeObject(1, ReleaseId = 900)]
+public interface IRdmBridge
+{
+    [BridgeMember(1, Permission = BridgePermission.Read, MaximumUtf8Bytes = 256)]
+    string ProductVersion { get; }
+
+    [BridgeMember(2, Permission = BridgePermission.Execute, ResultObjectId = 2)]
+    IRdmConnection? GetConnection([BridgeBound(MaximumUtf8Bytes = 128)] string id);
+
+    [BridgeEvent(500, OrderingKey = 1)]
+    void OnScriptProgress(int percent);
+}
+
+[BridgeObject(2, ReleaseId = 901)]
+public interface IRdmConnection
+{
+    [BridgeMember(10, SetterId = 11,
+        Permission = BridgePermission.Read,
+        SetterPermission = BridgePermission.Write,
+        SetterMutation = BridgeMutation.Direct,
+        MaximumUtf8Bytes = 256)]
+    string Name { get; set; }
+
+    [BridgeMember(12, MaximumCollectionCount = 64, MaximumUtf8Bytes = 128)]
+    IReadOnlyList<string> Tags { get; }
+}
+
+[BridgeData(70)]
+public interface IRdmFailure
+{
+    [BridgeField(1, MaximumUtf8Bytes = 256)] string Reason { get; }
+}
+
+[BridgeEnum(80)]
+public enum RdmConnectionState { Closed = 0, Open = 1 }
+```
+
+| Attribute | Applies to | Carries |
+| --- | --- | --- |
+| `[BridgeContract]` | the root interface | contract ID, major, minor, **the IID of a user-declared COM transport interface** |
+| `[BridgeObject]` | every object interface, root included | object type ID, explicit `ReleaseId` ordinal |
+| `[BridgeMember]` | property or method | ordinal, `SetterId`, `Mutation`, `SetterMutation`, `Permission`, `SetterPermission`, `ResultObjectId`, `ErrorDataId`, and the bounds for the **result** position |
+| `[BridgeBound]` | parameter or return value | the bounds and `ResultObjectId` for that **one** position |
+| `[BridgeEvent]` | `void` method | one-way ordinal in `1..65535` and a static `OrderingKey` |
+| `[BridgeData]` | DTO interface | data type ID |
+| `[BridgeField]` | DTO property | field ordinal and that field's bounds |
+| `[BridgeEnum]` | enum | enum type ID |
+
+Bounds are **per position, never inherited**. A member-level cap applies only to
+the property or method result; every bounded parameter declares its own
+`[BridgeBound]`. A setter's value position is the property's own type and reuses
+the property's declared cap, because it is the same position.
+
+The accepted CLR spellings are closed:
+
+| Declared CLR type | Tag | Required bound |
+| --- | --- | --- |
+| `bool`, `int`, `long`, `double`, `System.Guid` | `Bool`, `Int32`, `Int64`, `Double`, `Guid` | none |
+| `string` | `Utf8String` | `MaximumUtf8Bytes` |
+| `byte[]` | `Bytes` | `MaximumByteCount` |
+| an enum declaring `[BridgeEnum]` | `Enum32` | none |
+| an interface declaring `[BridgeObject]` | `Handle` | `ResultObjectId` |
+| an interface declaring `[BridgeData]` | `Data` | none |
+| `IReadOnlyList<T>` | `List` | `MaximumCollectionCount` |
+| `T?` and `Nullable<T>` | the base tag, plus `Null` | the base tag's bound |
+
+`byte[]` and `IReadOnlyList<T>` are the **only** array and generic spellings the
+compiler accepts, plus `Nullable<T>` over a supported scalar. Every other array
+and every other generic is rejected.
+
+A reference-type position must be declared in an enabled nullable context. An
+unannotated reference type is rejected, because inferring nullability from
+project settings would make the descriptor depend on how each side is built and
+break Host/Payload hash parity.
+
+**Every contract owns a distinct COM IID.** The payload pack registry keys on
+`InterfaceId` and rejects duplicates
+(`dotnet\bindings\LiveObjectContractPackRegistry.cs`), and
+`PowerShellLiveObject<TContract>` requires `contract.InterfaceId` to equal
+`typeof(TContract).GUID`. A shared v2 interface would therefore let only one
+contract exist per process and would collide with v1, whose fixture already uses
+`IPowerShellLiveObjectBrokerContract`'s fixed IID. The generator verifies that
+the compilation declares a `[GeneratedComInterface]` interface with the declared
+IID and the exact `Invoke`/`CloseLease` shape above, and reports `MPWLC012`
+otherwise. Major must be `1..65535` and minor `0..65535`, because the pack
+descriptor stores both as `ushort`.
+
+Ordinals are **globally unique within the contract** across getters, setters,
+methods, events, and release ordinals. Nothing on the wire is a name.
+
+`Permission` is metadata, never a decision. It is an **input** to the
+application's authorizer, which is consulted independently for the getter, the
+setter, and each method. A member declaring `BridgePermission.Read` cannot make
+its setter callable, because the setter carries its own `SetterPermission` and
+its own authorization call.
+
+### Closed value system
+
+All wire integers are **little-endian**, `Double` is IEEE-754 transported as its
+little-endian `int64` bit pattern, and a `Guid` payload is exactly the 16 bytes
+of `Guid.ToByteArray()`. Every value uses this 8-byte header followed by its
+payload:
+
+```text
+0  u8   version   = 2
+1  u8   tag
+2  u8   flags     = 0
+3  u8   reserved  = 0
+4  u32  length    (payload bytes)
+```
+
+| Tag | Value | Payload | Declared bound |
+| --- | --- | --- | --- |
+| `Null` | 0 | none | — |
+| `Bool` | 1 | 1 byte, `0` or `1` | — |
+| `Int32` | 2 | 4 | — |
+| `Int64` | 3 | 8 | — |
+| `Double` | 4 | 8 IEEE-754 | — |
+| `Utf8String` | 5 | strict UTF-8, no NUL | `MaximumUtf8Bytes` |
+| `Bytes` | 6 | opaque octets | `MaximumByteCount` |
+| `Guid` | 7 | 16 | — |
+| `Enum32` | 8 | 4, must equal a declared member value | closed member set |
+| `Handle` | 9 | `objectTypeId:u64`, `objectId:u64` | declared object type |
+| `List` | 10 | `count:u32`, `elementTag:u8`, `reserved:u8[3]`, elements | `MaximumCollectionCount` |
+| `Data` | 11 | `dataId:u64`, `fieldCount:u32`, `reserved:u32`, then each field as `ordinal:u32`, `reserved:u32`, value | declared field set |
+| `Error` | 12 | `code:i32`, `reserved:u32`, one nested value | declared error data ID |
+
+`Bytes` has its own bound because opaque octets have no UTF-8 semantics.
+
+**Nesting is closed and non-recursive in its bounds.** Exactly these shapes are
+legal, so every position that can hold a string, a byte payload, or a
+collection declares its own single cap and no bound is ever inherited or
+inferred:
+
+| Position | May hold |
+| --- | --- |
+| member result, method parameter | any scalar tag, `Data`, or `List` |
+| `List` element | any scalar tag or `Data` — never `List` |
+| `Data` field | any scalar tag except `Handle`, or `List` of such scalars — never `Data`, never `List` of `Data` |
+| `Error` payload | `Null` or one `Data` |
+
+A `Data` field cannot carry a `Handle`. A data contract is a copied value and
+must not depend on lease-scoped identity; excluding it also keeps the emitted
+data class and its codec identical in `Host` and `Payload` mode.
+
+The deepest legal value is therefore `Error > Data > List > scalar`, four
+levels, which is the runtime depth cap. Every element of a `List` still carries
+its own value header; `elementTag` states the single tag every element must
+use, and a nullable element position accepts `Null` in addition to it.
+
+`Data` fields are written in ascending ordinal order with no duplicates and
+**every declared field present**; a closed contract has no optional field, so an
+absent value is `Null`, never an omission.
+
+A nullable declaration widens the accepted tag set for that position by exactly
+`Null`. It is not a distinct encoding.
+
+`Handle` carries its declared object type ID next to the runtime object ID, so a
+handle of the wrong type is rejected structurally, before any lookup.
+
+### Structural limits
+
+| Limit | Value | Enforced |
+| --- | --- | --- |
+| Object types per contract | 64 | compile time |
+| Object DAG depth from the root | 8 | compile time |
+| Members per object | 64 | compile time |
+| Method parameters | 8 | compile time |
+| DTO fields | 32 | compile time |
+| Enum members | 64 | compile time |
+| Value nesting depth | 4 | compile time and runtime |
+| `MaximumUtf8Bytes`, `MaximumByteCount` | 1..8192 | compile time and runtime |
+| `MaximumCollectionCount` | 1..4096 | compile time and runtime |
+| Frame bytes | 65536 | compile time budget and runtime |
+
+The per-position caps are independent upper bounds; the **frame budget is the
+binding constraint**. The generator computes the worst-case encoded request and
+reply size of every member from its declared caps using saturating arithmetic
+that stops at 65537, and fails the build (`MPWLC022`) if either exceeds 65536.
+A declaration at both maxima — 4096 elements of 8192 bytes — is roughly 33 MB
+and is rejected at compile time, so it never becomes a runtime bound check. At
+runtime the codecs still enforce every declared cap and the frame header's own
+length, so a mismatched or hostile peer fails loudly rather than truncating.
+
+### Canonical descriptor and SHA-256
+
+The generator emits a **canonical descriptor byte sequence** that fully
+determines the contract, and the SHA-256 of those bytes.
+
+Every integer is little-endian. Every name is `u32` byte length followed by
+strict UTF-8 bytes with no NUL. Nothing is derived from
+`ISymbol.ToDisplayString`, assembly identity, namespace, culture, nullable
+project settings, or any dictionary or `GetMembers()` iteration order; every
+collection below is emitted in the stated total order, and a tie is impossible
+because the sort keys are the unique IDs the author declared.
+
+```text
+magic         u32  0x32574D42            (bytes 42 4D 57 32, "BMW2")
+version       u32  2
+contractId    name
+major         u32
+minor         u32
+interfaceId   16 bytes, exactly Guid.ToByteArray()
+rootObjectId  u64
+enums       u32 count, ascending by enum ID:
+              id u64, name, u32 member count, ascending by value: value i32, name
+data        u32 count, ascending by data ID:
+              id u64, name, u32 field count, ascending by ordinal: ordinal u32, name, type-ref
+objects     u32 count, ascending by object type ID:
+              id u64, name, releaseId u32, u32 record count, ascending by ordinal: member record
+```
+
+Names are `ISymbol.Name`, never a display string. A property expands into **one
+or two independent member records** — a `Getter` record at its ordinal and, when
+`SetterId` is non-zero, a `Setter` record at the setter ordinal. A method
+expands into one `Method` record and an event into one `Event` record. The
+object's `releaseId` is emitted in the object header and does not produce a
+member record. Each record's fields are fully determined:
+
+| Record | `name` | `mutation` | `permission` | `result` | `parameters` |
+| --- | --- | --- | --- | --- | --- |
+| `Getter` | the property name | always `None` | `Permission` | the property type | none |
+| `Setter` | the property name | `SetterMutation` | `SetterPermission` | `Null` | one, named `value`, of the property type |
+| `Method` | the method name, or `get_Item` for an indexer | `Mutation` | `Permission` | the return type, `Null` for `void` | in declaration order |
+| `Event` | the method name | always `None` | always `Execute` | `Null` | in declaration order |
+
+`orderingKey` is the declared value for an `Event` record and `0` everywhere
+else. `errorDataId` is the declared `ErrorDataId`, and `0` means the member
+declares no typed error reply.
+
+```text
+ordinal      u32
+name         name
+kind         u8   Getter=1, Setter=2, Method=3, Event=4
+mutation     u8   None=0, Direct=1, Staged=2
+permission   u8   None=0, Read=1, Write=2, Execute=3
+flags        u8   bit 0: nullable result
+errorDataId  u64
+orderingKey  u64  (0 for every non-event record)
+result       type-ref
+parameters   u32 count, in declaration order: name, type-ref
+```
+
+A type-ref is recursive and finite:
+
+```text
+tag u8 (bit 7 set when the position is nullable)
+  Utf8String / Bytes : maxBytes u32
+  Enum32             : enumId u64
+  Handle             : objectTypeId u64
+  List               : maxCount u32, element type-ref
+  Data / Error       : dataId u64
+  everything else    : no trailing bytes
+```
+
+Names are included. Both sides compile the same declaration, so names always
+agree; including them catches an ordinal swapped between two same-shaped
+members, which a shape-only hash would silently accept.
+
+The hash is emitted as a hex constant and as a `ReadOnlySpan<byte>`-returning
+property over a `new byte[] { ... }` literal, so reading it allocates nothing
+and touches no reflection. The generator itself runs on `netstandard2.0` and
+therefore uses `SHA256.Create().ComputeHash`, not `SHA256.HashData`.
+
+### Frames
+
+One 32-byte request header serves every carrier.
+
+```text
+0   u8   version        = 2
+1   u8   frameKind      Invoke=0, Release=1, Event=2, Open=3
+2   u16  argumentCount
+4   u32  memberId
+8   u64  objectId
+16  u64  leaseId
+24  u32  generation
+28  u32  bodyLength     (bytes after this header)
+32  ...  argumentCount tagged values, back to back
+```
+
+The reply header is 8 bytes and carries exactly one tagged value:
+
+```text
+0   u8   version    = 2
+1   u8   replyKind  Value=0, Error=1
+2   u16  reserved   = 0
+4   u32  bodyLength
+8   ...  one tagged value (Null for void, Error for a typed failure)
+```
+
+`frameKind` is **not** redundant with the globally unique ordinal, and it is not
+trusted on its own. Before any lease lookup the dispatcher requires exact
+agreement between the carrier, `frameKind`, the descriptor's declared kind for
+`memberId`, and `argumentCount`:
+
+- `Invoke` is legal only over the COM transport and only for a `Getter`,
+  `Setter`, or `Method` record;
+- `Release` is legal only over the COM transport, only when `memberId` equals
+  the `ReleaseId` of the object type that `objectId` resolves to, and only with
+  `argumentCount == 0`;
+- `Event` is legal only over the one-way event carrier and only for an `Event`
+  record; it is never accepted on the request/reply transport;
+- `Open` is legal only over the COM transport with
+  `memberId == 0`, `objectId == 0`, `leaseId == 0`, `generation == 0`, and
+  exactly one `Bytes` argument.
+
+`replyKind` must be `Error` if and only if the nested tag is `Error`.
+
+`(leaseId, generation, objectId, memberId)` is present in every request frame
+even though the COM transport also passes it out of band. The dispatcher
+compares the two and rejects a mismatch, so a request that agrees with itself is
+the only one that reaches an application handler.
+
+### Lease handshake
+
+v1 bootstraps a lease with an all-zero `Invoke` whose reply is the UTF-8 string
+`"leaseId:generation:hash"`, and the **payload** compares the hash. v2 keeps the
+same bootstrap position but makes it typed and two-sided.
+
+An `Open` frame carries the payload's own 32-byte descriptor hash as its single
+`Bytes` argument. The consumer compares it to its own hash **before allocating
+anything** and returns `PowerShellBridgeStatus.ContractMismatch` on any
+difference. On agreement it replies with a `Bytes` value of exactly 52 bytes:
+
+```text
+0   u64  leaseId          (non-zero)
+8   u32  generation       (non-zero)
+12  u64  rootObjectId     (non-zero)
+20  32   descriptorHash   (echoed)
+```
+
+The payload verifies the echoed hash as well, so neither side can accept a
+mismatched peer. Both sides therefore reject a mismatched artifact before any
+member call, which is what "lock-step" means operationally.
+
+`Open` is **not** idempotent and is not a query. A consumer broker has exactly
+one `Unopened -> Active -> Closed` progression:
+
+- an `Open` while a lease is `Active` returns `E_ACCESSDENIED` and allocates
+  nothing, so a replayed or concurrent `Open` cannot consume lease slots;
+- an `Open` after closure allocates a **new** lease with a lease ID that the
+  process never reuses, so a wrapper holding the previous lease stays revoked;
+- the consumer validates `outputCapacity` against the full 68-byte `Open` reply
+  — an 8-byte reply header plus an 8-byte value header plus the 52-byte
+  payload — **before** it allocates a lease, so a buffer-too-small probe cannot
+  consume a slot either.
+
+The same consumer object may legitimately be assigned to more than one session
+variable, and each assignment creates a payload proxy. Those proxies share one
+lease and one `Close`; that is the intended model, and it is why closure is
+first-caller-wins rather than reference-counted.
+
+### Transport binding, and what is not yet wired
+
+| Direction | Carrier | Status |
+| --- | --- | --- |
+| `Open`, `Invoke`, `Release` | the contract's own COM transport interface, through the existing consumer-to-session contract pack registry | wired |
+| `Event` | `IPowerShellBridgeEventSink`, obtained by `QueryInterface` on the same `IUnknown` | wired, non-blocking by contract |
+| `Event` | duplex broker channel `Post` | **not wired**; see below |
+
+The generated payload wrapper talks to a seam rather than to a carrier:
+
+```csharp
+public interface IPowerShellBridgeTransport
+{
+    int Invoke(ulong leaseId, uint generation, ulong objectId, uint memberId,
+               ReadOnlySpan<byte> request, Span<byte> reply, out int replyLength);
+    void PostEvent(uint kind, ulong orderingKey, ReadOnlySpan<byte> body);
+}
+```
+
+The interim event carrier has a real ABI, not a convention. It is a single
+shared `[GeneratedComInterface]` declared by the SDK, so a pack implements one
+known shape rather than a per-contract one:
+
+```csharp
+[GeneratedComInterface]
+[Guid("9D4B2F87-1A63-4F0E-A5C4-6E0B1D5C7A32")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public partial interface IPowerShellBridgeEventSink
+{
+    [PreserveSig]
+    int PostEvent(uint kind, ulong orderingKey, nint body, int bodyLength);
+}
+```
+
+It carries the same 32-byte request frame with `frameKind = Event`. Any non-zero
+HRESULT fails the call deterministically; a saturated consumer queue must return
+a non-zero HRESULT rather than block, because it is servicing a pipeline thread.
+
+**The duplex broker channel is not reachable from a payload pack today, and
+saying otherwise would be false.** A pack is created only through
+`NativeLiveObjectContractPackApi.CreatePayloadProxy(IntPtr comObject, IntPtr* proxyHandle)`
+and receives nothing but a consumer-owned `IUnknown`. The only producer of DBC
+frames is `FfiBrokerContext`/`FfiBrokerBridge`, which is private to
+`FfiBindings` and is installed only as the payload-local `$DpsBroker` variable
+for the duration of one invocation. A pack additionally compiles its **own
+private copy** of the live-contract sources, so no plain managed interface can
+be handed across by type identity.
+
+Until that is changed, an event sink is obtained by `QueryInterface` for the
+hand-authored `IPowerShellBridgeEventSink` on the same `IUnknown` the pack
+already receives, and a consumer that supplies one **must** return from
+`PostEvent` without blocking. A contract that declares an event and is leased
+without a sink fails that call with a deterministic
+`InvalidOperationException`; it never silently degrades, because an event that
+blocks a pipeline is a different primitive with different liveness.
+
+Making non-blocking delivery *structural* rather than contractual requires
+appending mandatory transport bind/unbind callbacks to the contract-pack API so
+the payload can hand the pack an opaque payload-local post trampoline. That is a
+synchronized breaking extension of the single required pack ABI — header-first
+`Size` validation, no optional lane, no second table — and it is a Task 3.2
+item, tracked here rather than assumed. When it lands:
+
+- bridge events use DBC `kind = 0x42520000 | ordinal` with the declared
+  `OrderingKey` passed out of band, because DBC requires `kind` and
+  `ordering_key` as explicit trampoline parameters and forbids inferring them
+  from an opaque body;
+- because that `kind` encodes only a 16-bit ordinal, **two contracts sharing one
+  channel would collide**. Either a channel carries exactly one contract, or the
+  frame's own header tuple — which already carries `leaseId` — is the
+  discriminator and lease IDs must be process-unique and never reused;
+- the channel's `MaximumBodyBytes` must be validated against the contract's
+  largest event frame **in the bind callback**, not at lease open: no channel
+  exists when a lease is opened, because a channel is attached per invocation
+  while a lease is created when a session variable is assigned.
+
+For the same reason, routing `Invoke` through the broker is **not** what v2 does
+today. The generated consumer dispatcher runs on the PowerShell pipeline thread,
+exactly like v1 and like `PowerShellCapabilitySet`. That is a real constraint,
+not an oversight, and the dispatcher rules below exist because of it.
+
+### Consumer dispatcher rules
+
+These are normative for generated and application code reached through
+`Invoke`, because backpressure only rejects a later FFI call and cannot see a
+lock or dispatcher cycle that makes no FFI call at all:
+
+1. A handler must not start a pipeline, invoke a session, or call any facade
+   API that would re-enter the runtime.
+2. A handler must not block on another thread that can block on the pipeline —
+   in particular it must not marshal to a UI dispatcher and wait.
+3. A handler must not wait at all. There is no deadline on the COM transport, so
+   a bounded wait cannot be defined here; a handler that needs to wait belongs
+   behind the duplex broker channel, not on this carrier.
+4. A handler must not acquire a lock that any pipeline-blocking thread can
+   hold.
+
+Routing request/reply through the broker channel, which would make rules 1-4
+structural instead of contractual, is the target end state and depends on the
+same pack-API change as events.
+
+### Failure semantics
+
+The COM transport returns an `HRESULT`; typed application failures are `S_OK`
+replies whose value is `Error`. Precedence is fixed: structural, then reply
+capacity, then lease, then handle, then authorization, then dispatch.
+
+| Condition | Result |
+| --- | --- |
+| malformed frame, truncated value, unknown ordinal, undeclared tag, shape violation, carrier/kind/argument-count disagreement, **or a declared cap exceeded by an inbound value** | `E_INVALIDARG` (`0x80070057`) |
+| descriptor hash mismatch on `Open` | `ContractMismatch` (`0x8007075B`) |
+| unknown, closed, or superseded lease; unknown, released, or cross-lease handle; authorization denied | `E_ACCESSDENIED` (`0x80070005`) |
+| an application-returned value exceeds a declared cap while encoding the reply | `E_BOUNDS` (`0x8000000B`) |
+| a runtime table is full | `E_OUTOFMEMORY` (`0x8007000E`) |
+| `outputCapacity` is below the member's declared maximum reply size | `E_NOT_SUFFICIENT_BUFFER` (`0x8007007A`), `outputLength` set to that maximum |
+| declared application failure | `S_OK`, `replyKind = Error` |
+
+Inbound decode failures are **all** `E_INVALIDARG`: the codec cannot distinguish
+a truncated value from an over-cap value without a classified decode error, and
+inventing a distinction the implementation cannot make would be worse than one
+honest status. `E_BOUNDS` is reserved for the outbound direction, where the
+generator knows the declared cap and the application value separately.
+
+Reply capacity is checked **before dispatch**, against the member's compile-time
+maximum reply size from the static member table, not after the handler runs. A
+handler therefore cannot perform a mutation and then fail on a buffer the caller
+sized too small, which would make a retry duplicate the side effect.
+
+Revoked handles and denied authorization deliberately share one status so a
+caller cannot probe which handles exist. `outputLength` is meaningful only for
+`S_OK` and `E_NOT_SUFFICIENT_BUFFER`.
+
+### Lease, authorization, and staged mutation
+
+A lease is `(leaseId, generation)`. It is allocated by the consumer during
+`Open`, carried in every frame, and revalidated by generated consumer code
+**immediately before** each application call — not once at handle creation.
+
+1. Decode and structurally validate the frame. Reject unknown ordinals, wrong
+   tags, out-of-bound lengths, a carrier/kind mismatch, and a header tuple that
+   disagrees with the transport parameters. Nothing is dispatched.
+2. Check `outputCapacity` against the member's declared maximum reply size.
+3. **Admit the call**: resolve `(leaseId, generation)` and resolve `objectId`
+   within that lease in one atomic step under the lease's own lock, and take an
+   active-call token. Admission is atomic precisely so a call cannot pass the
+   lease check, lose a race to closure, and then fail object resolution. A
+   closed, superseded, or unknown lease, and a handle minted by another lease or
+   forged, are all rejected here with the same revoked error. Object IDs are
+   allocated monotonically per lease and never reused inside it, so a released
+   wrapper can never target a later object.
+4. Authorize. Getter, setter, and each method are authorized separately. The
+   declared `Permission` is passed to the authorizer as input; it never stands
+   in for the call.
+5. Dispatch, encode the reply, then drop the active-call token.
+
+**`Mutation.Staged` is rejected at compile time** (`MPWLC023`) until the staged
+lifecycle is deliverable. `PowerShellStagedIntentCoordinator` exposes no
+programmatic stage/validate/commit entry point — it is reachable only through
+its capability set, driven from script — so a generated dispatcher has nothing
+to call. Accepting the declaration and silently not staging would be worse than
+refusing to compile it.
+
+When it is delivered, **"invocation" means one member call**: a staged member
+stages, validates, and commits within its own `Invoke`, any failure inside that
+call aborts every intent it staged, and lease state, generation, and
+authorization are re-checked immediately before commit. Multi-member
+transactions stay out of scope, because the COM transport carries no invocation
+ID, deadline, cancellation, or pipeline outcome; a cross-member transaction
+needs explicit begin/commit ordinals and a correlation ID.
+
+v2 will reuse the vocabulary of `PowerShellStagedIntentOperation`,
+`PowerShellStagedIntentHandlerResult`, and `IPowerShellStagedIntentHandler`
+rather than inventing a second one.
+
+### Lease closure and tombstoning
+
+A lease has exactly one idempotent `Active -> Closed` transition, and both
+owners drive the same transition:
+
+- the payload calls `CloseLease(leaseId, generation)` on the COM transport;
+- the consumer ends the lease when it disposes its broker.
+
+**First caller wins**, and the two owners are not symmetric. The payload's
+`CloseLease` is a call that returns a status: the winner receives `S_OK`, and a
+later or stale `CloseLease` receives `E_ACCESSDENIED`. The consumer's disposal
+returns nothing and is idempotent, so repeating it is simply a no-op rather than
+a failure.
+
+The transition increments the generation, so every later frame carrying the old
+generation fails admission. Closure does not interrupt a call that already holds
+an active-call token; such a call keeps its resolved object reference until it
+returns. Closure takes effect for every call that has not yet been admitted, and
+because admission is one atomic step there is no window in which a call passes
+the lease check and then fails object resolution.
+
+At closure every handle in the lease's object table is tombstoned in the same
+locked transition, before the lease becomes unreachable. A payload wrapper that
+escaped into a longer-lived script variable therefore observes a deterministic
+revoked error and retains no application state — only an object ID that no
+longer resolves.
+
+Release is an explicit ordinal per object type (`[BridgeObject(..., ReleaseId =
+n)]`), not an implicit finalizer.
+
+### Runtime bounds
+
+| Table | Bound | On overflow |
+| --- | --- | --- |
+| Active bridge leases per process | 16 | `Open` fails with `E_OUTOFMEMORY` |
+| Live object handles per lease | 1024 | the allocating call fails with `E_OUTOFMEMORY` |
+| Staged intents per member call | 16 | the call fails and aborts every intent it staged |
+| Tombstoned object IDs retained per lease | none — IDs are monotonic, so a released ID is simply never re-allocated |
+
+### Lease lifetime
+
+The existing consumer-to-session path creates a payload proxy when a live-object
+**session variable** is assigned (`PowerShellSession.SetLiveObjectVariable`), so
+a lease created there lives as long as that variable, across invocations. v2
+does not change that, and does not claim an invocation-scoped lease it cannot
+enforce: there is no pack callback marking invocation start and end.
+
+Binding a lease to one invocation requires the same transport bind/unbind
+addition as events. Until it exists, a bridge lease is **session-scoped and
+consumer-terminated**, and the consumer is responsible for ending it. Session
+and runtime lease lifecycles beyond that remain unqualified.
+
+### What the compiler emits
+
+| Emitted | `Host` | `Payload` |
+| --- | --- | --- |
+| contract constants, canonical descriptor bytes, SHA-256 hash | yes | yes |
+| static member table plus generated `TryGetMember`/`TryGetReleaseOrdinal` switches | yes | yes |
+| copied data classes and their typed codecs | yes | yes |
+| closed enumeration allow-list guards | yes | yes |
+| typed handler interfaces, call context, and authorizer interface | yes | no |
+| CLR wrapper classes, lease client, and inline typed codecs | no | yes |
+
+The generated consumer **dispatcher** — the `[GeneratedComClass]` broker adapter
+that implements the contract's transport interface, decodes frames, admits calls
+against the lease table, calls the authorizer, and encodes replies — is part of
+the lease runtime and is delivered with it. Until then an application implements
+the COM transport interface itself, exactly as the v1 preview requires, and the
+handler interfaces above are the stable typed surface that dispatcher will call.
+
+### Lock-step builds
+
+Host and payload contract builds are **lock-step**. Both sides compile the same
+declaration and therefore compute the same descriptor and the same SHA-256, and
+the `Open` handshake rejects any difference on both sides.
+
+There is **no contract-layer minor compatibility lane**: no descriptor
+subsetting, no optional member negotiation, no additive-member tolerance, and no
+"payload is newer" path. Introducing one changes what a revoked or unknown
+ordinal means and needs separate architecture approval before it is designed.
+
+### Rejected at compile time
+
+Each of these is a generator error with a specific diagnostic and an actionable
+message, not a runtime failure:
+
+`object`, `dynamic`, `Type`, `PSObject`, any SMA type, delegates and function
+pointers, `Task`/`ValueTask`, generics other than `IReadOnlyList<T>` and
+`Nullable<T>`, `ref`/`out`/`in` parameters, pointers, `IntPtr`/`UIntPtr`,
+`decimal`, `DateTime`/`DateTimeOffset`/`TimeSpan`, `SecureString`,
+`PSCredential`, any type name containing `Credential`, arrays other than
+`byte[]`, unannotated reference types, nested interfaces, static members,
+interface inheritance across the contract boundary, cyclic data graphs, `Data`
+inside `Data`, `Handle` inside `Data`, `List` inside `List`, `List` of `Data`
+inside `Data`, unbounded strings, unbounded byte payloads, unbounded
+collections, indexers without an explicit bound, `[Flags]` enums, aliased or
+non-`Int32` enum members, `Mutation.Staged`, duplicate ordinals, zero ordinals,
+an object unreachable from the root, and any member without an explicit
+attribute.
+
+`[Flags]` is rejected because a combined flag value is not equal to any declared
+member, so the closed `Enum32` allow-list cannot validate it.
+
+| Rule | Meaning |
+| --- | --- |
+| `MPWLC011` | Bridge contract mode is required |
+| `MPWLC012` | Invalid bridge contract root, transport interface, or mixed v1/v2 declaration |
+| `MPWLC013` | Invalid bridge object |
+| `MPWLC014` | Invalid bridge member |
+| `MPWLC015` | Invalid bridge setter |
+| `MPWLC016` | Bridge member requires an explicit bound |
+| `MPWLC017` | Unsupported bridge type |
+| `MPWLC018` | Unresolved bridge object reference |
+| `MPWLC019` | Invalid bridge data contract |
+| `MPWLC020` | Invalid bridge enumeration |
+| `MPWLC021` | Invalid bridge event |
+| `MPWLC022` | Bridge contract exceeds a structural or frame-size limit |
+| `MPWLC023` | Invalid bridge mutation or authorization metadata |
+| `MPWLC024` | Invalid bridge release ordinal |
+
+### What Bridge Contract v2 deliberately does not carry
+
+- no reflection, `IDispatch`, dynamic binder, expression trees, or
+  `System.Text.Json`;
+- no runtime member names, member discovery, or contract negotiation;
+- no CLR object identity across the boundary — a `Handle` is a lease-scoped
+  integer, not a pointer or a `GCHandle`;
+- no `PSObject`, `ErrorRecord`, runspace, or any SMA type;
+- no delegates, events with add/remove accessors, or callbacks from script;
+- no credential, `SecureString`, or secret material;
+- no injection into a remote runspace: a payload wrapper is a local managed
+  object and would be serialized, stripping its members;
+- no ambient authorization — every getter, setter, and method is authorized on
+  every call.
+
 ## Explicit limitations
 
 This is not binary or source compatible with the full PowerShell SDK. The

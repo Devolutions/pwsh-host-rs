@@ -138,6 +138,74 @@ This is neither a live console, `PSHost`, callback/event API, nor a stream of
 SMA objects, credentials, or other CLR references. Cancellation can expose
 already-captured records, but still never produces a successful final result.
 
+## Bridge Contract v2 preview
+
+`BridgeContractAttribute`, `BridgeObjectAttribute`, `BridgeMemberAttribute`,
+`BridgeEventAttribute`, `BridgeDataAttribute`, `BridgeFieldAttribute`, and
+`BridgeEnumAttribute` opt an application object graph into the closed Bridge
+Contract v2 compiler. It is a second, separate attribute family: the v1
+`[LiveContract]` preview above is unchanged, and a compilation declares one root
+or the other, never both.
+
+v2 models a finite DAG of at most 64 object interfaces and depth 8, with
+property getters and setters, bounded methods, explicitly bounded collections,
+nullable and enumeration values, data-transfer interfaces, typed error data, and
+one-way events. Events are generated one-way ordinals, not CLR `event`
+accessors, so no delegate ever crosses the boundary.
+
+Each contract declares the IID of a COM transport interface that the contract
+author writes by hand, because a source generator cannot see another generator's
+output and the payload pack registry keys on a unique interface identifier. The
+generator verifies that interface exists with the required shape.
+
+Both sides compile the same declaration — the consumer with
+`LiveContractMode=Host` and the trusted payload pack with
+`LiveContractMode=Payload`. The generator emits, identically in both modes, a
+canonical descriptor byte sequence, its SHA-256 hash, static member tables, the
+copied data classes, and their typed binary codecs. Host mode additionally emits
+typed handler interfaces, a call context, and an authorizer interface the
+application implements; payload mode emits the CLR wrapper classes that script
+uses with ordinary property and method syntax.
+
+The generated consumer dispatcher that decodes frames, admits calls against the
+lease table, and calls the authorizer ships with the lease runtime. Until then an
+application implements its contract's COM transport interface itself, and the
+generated handler interfaces are the stable typed surface that dispatcher will
+call.
+
+Everything the compiler accepts is enumerated in source. `object`, `dynamic`,
+`Type`, `PSObject`, delegates, `Task`, generics other than `IReadOnlyList<T>`
+and `Nullable<T>`, `ref`/`out`, arrays other than `byte[]`, pointers,
+credentials, `[Flags]` enumerations, unannotated reference types, cyclic data
+graphs, cross-boundary interface inheritance, unbounded strings and collections,
+and members without an explicit attribute are compile errors with actionable
+`MPWLC011`-`MPWLC024` diagnostics. Generated code contains no reflection,
+`IDispatch`, dynamic binder, or JSON serializer path.
+
+Bounds are per position and never inherited: a member-level cap applies to the
+result, and every bounded parameter declares its own `[BridgeBound]`. Declaring
+a member whose bounds could produce a frame above 64 KiB fails the build rather
+than failing at run time.
+
+`BridgeMutation.Staged` is rejected at compile time until the staged-intent
+coordinator exposes a programmatic stage/validate/commit entry point.
+
+Host and payload contract builds are **lock-step**. The lease handshake carries
+the payload's descriptor hash, the consumer compares it before allocating a
+lease, and the payload verifies the echoed hash in the reply, so neither side
+accepts a mismatched artifact. There is no contract-layer minor compatibility
+lane, no member negotiation, and no additive-member tolerance.
+
+Request, release, and lease-open frames travel over the contract's COM transport
+through the existing consumer-to-session pack registry. **Duplex broker delivery
+of declared events is not wired yet**: a payload pack receives only a
+consumer-owned `IUnknown`, so an event sink is obtained by `QueryInterface` and
+a consumer that supplies one must return without blocking. A lease with no sink
+fails an event call deterministically instead of degrading silently.
+
+`docs/in-process-ffi.md` carries the normative wire, descriptor, dispatcher,
+failure, lease, authorization, and staged-mutation rules.
+
 ## DTO projections and bounded paging
 
 `PowerShellDtoContractAttribute` and `PowerShellDtoMemberAttribute` opt an
