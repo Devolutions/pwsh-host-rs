@@ -34,9 +34,13 @@ public sealed class BridgeContractGenerator : IIncrementalGenerator
             .Select(static (options, _) =>
                 options.GlobalOptions.TryGetValue("build_property.LiveContractMode", out string? value) ? value : string.Empty);
 
-        context.RegisterSourceOutput(declarations.Collect().Combine(mode), static (production, pair) =>
+        context.RegisterSourceOutput(
+            declarations.Collect().Combine(mode).Combine(context.CompilationProvider),
+            static (production, pair) =>
         {
-            List<INamedTypeSymbol> types = pair.Left
+            (System.Collections.Immutable.ImmutableArray<INamedTypeSymbol> collected, string selectedMode) = pair.Left;
+            Compilation compilation = pair.Right;
+            List<INamedTypeSymbol> types = collected
                 .GroupBy(static type => type, SymbolEqualityComparer.Default)
                 .Select(static group => group.First())
                 .ToList();
@@ -75,7 +79,7 @@ public sealed class BridgeContractGenerator : IIncrementalGenerator
                 return;
             }
 
-            if (pair.Right is not ("Host" or "Payload"))
+            if (selectedMode is not ("Host" or "Payload"))
             {
                 production.ReportDiagnostic(Diagnostic.Create(
                     BridgeContractDiagnostics.MissingMode,
@@ -84,7 +88,7 @@ public sealed class BridgeContractGenerator : IIncrementalGenerator
             }
 
             var diagnostics = new List<Diagnostic>();
-            BridgeContractModel? contract = BridgeContractAnalyzer.Analyze(roots[0], types, diagnostics);
+            BridgeContractModel? contract = BridgeContractAnalyzer.Analyze(roots[0], types, compilation, diagnostics);
             foreach (Diagnostic diagnostic in diagnostics)
             {
                 production.ReportDiagnostic(diagnostic);
@@ -105,9 +109,9 @@ public sealed class BridgeContractGenerator : IIncrementalGenerator
                 source.AppendLine();
             }
 
-            EmitShared(source, contract, pair.Right);
+            EmitShared(source, contract, selectedMode);
             BridgeContractDataEmitter.Emit(source, contract);
-            if (pair.Right == "Payload")
+            if (selectedMode == "Payload")
             {
                 BridgeContractPayloadEmitter.Emit(source, contract);
             }
@@ -117,7 +121,7 @@ public sealed class BridgeContractGenerator : IIncrementalGenerator
             }
 
             production.AddSource(
-                $"{contract.Root.Name}.Bridge.{pair.Right}.g.cs",
+                $"{contract.Root.Name}.Bridge.{selectedMode}.g.cs",
                 SourceText.From(source.ToString(), Encoding.UTF8));
         });
     }
@@ -314,3 +318,4 @@ internal static class BridgeNames
 
     internal static string Escape(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"");
 }
+

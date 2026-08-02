@@ -128,8 +128,166 @@ internal static class BridgeContractTests
         VerifyDiagnostic(run, Valid.Replace("int Code { get; }", "ISampleChild Code { get; }", StringComparison.Ordinal), "MPWLC019");
         VerifyDiagnostic(run, Valid.Replace("[BridgeMember(12, Permission = BridgePermission.Read)]", string.Empty, StringComparison.Ordinal), "MPWLC014");
         VerifyDiagnostic(run, Valid + "\n[BridgeObject(3, ReleaseId = 902)]\npublic interface ISampleOrphan { }\n", "MPWLC013");
+
+        // Regressions for defects found in independent review of the first
+        // increment. Each of these fixtures fails without its fix.
+        VerifyLowercaseFieldRoundTrips(run, assertNoErrors);
+        VerifyCaseOnlyFieldNamesCoexist(run, assertNoErrors);
+        VerifyContractParameterNamesNeverCollideWithGeneratedLocals(run, assertNoErrors);
+        VerifyReturnBoundWins(run, assertNoErrors);
+        VerifySpoofedAllowListTypeIsRejected(run);
+        VerifyLegitimateCredentialNameIsAccepted(run, assertNoErrors);
+        VerifyNullBytesFailClosed(run, assertNoErrors);
+        VerifyDiagnostic(run, Valid.Replace("string ProductVersion { get; }", "string __bridgeProductVersion { get; }", StringComparison.Ordinal), "MPWLC014");
+        VerifyDiagnostic(run, Valid.Replace("[BridgeBound(MaximumUtf8Bytes = 128)] string name", "[BridgeBound(MaximumUtf8Bytes = 128)] string __bridgeRequest", StringComparison.Ordinal), "MPWLC014");
         VerifyMissingMode(run);
         VerifyMixedFamilies(run);
+    }
+
+    /// <summary>
+    /// A field whose name is already lowercase must still be initialized. The
+    /// first implementation derived the constructor parameter by lowercasing the
+    /// first character, so the parameter equalled the property and the emitted
+    /// body was a self-assignment: decode discarded the value and encode always
+    /// wrote the default, while the descriptor still advertised a live field.
+    /// </summary>
+    private static void VerifyLowercaseFieldRoundTrips(
+        Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run,
+        Action<IEnumerable<Diagnostic>> assertNoErrors)
+    {
+        string source = Valid.Replace("string Reason { get; }", "string reason { get; }", StringComparison.Ordinal);
+        var (result, output) = run(source, "Payload");
+        assertNoErrors(Diagnostics(result));
+        assertNoErrors(output.GetDiagnostics());
+        string generated = Generated(result);
+        if (!generated.Contains("this.reason = reason;", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("A lowercase data field must be assigned from its constructor parameter.");
+        }
+    }
+
+    private static void VerifyCaseOnlyFieldNamesCoexist(
+        Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run,
+        Action<IEnumerable<Diagnostic>> assertNoErrors)
+    {
+        string source = Valid.Replace(
+            "int Code { get; }",
+            "int Code { get; } [BridgeField(3)] int code { get; }",
+            StringComparison.Ordinal);
+        var (result, output) = run(source, "Payload");
+        assertNoErrors(Diagnostics(result));
+        assertNoErrors(output.GetDiagnostics());
+    }
+
+    /// <summary>
+    /// A contract parameter named like a generated local must not produce a raw
+    /// compiler error inside auto-generated code.
+    /// </summary>
+    private static void VerifyContractParameterNamesNeverCollideWithGeneratedLocals(
+        Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run,
+        Action<IEnumerable<Diagnostic>> assertNoErrors)
+    {
+        foreach (string name in new[] { "request", "writer", "reader", "replyBuffer", "replyHeader", "result", "value0", "count0", "index0" })
+        {
+            string source = Valid.Replace(
+                "[BridgeBound(MaximumUtf8Bytes = 128)] string name",
+                $"[BridgeBound(MaximumUtf8Bytes = 128)] string {name}",
+                StringComparison.Ordinal);
+            var (result, output) = run(source, "Payload");
+            assertNoErrors(Diagnostics(result));
+            assertNoErrors(output.GetDiagnostics());
+        }
+    }
+
+    /// <summary>
+    /// <c>[return: BridgeBound]</c> declares a bound for the return position, so
+    /// it must win over the member-level bound rather than being ignored. The
+    /// member here declares a deliberately wrong object identifier, so this
+    /// contract only resolves when the return-position declaration is honoured.
+    /// </summary>
+    private static void VerifyReturnBoundWins(
+        Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run,
+        Action<IEnumerable<Diagnostic>> assertNoErrors)
+    {
+        string source = Valid
+            .Replace(
+                "[BridgeMember(3, Permission = BridgePermission.Execute, ResultObjectId = 2)]",
+                "[BridgeMember(3, Permission = BridgePermission.Execute, ResultObjectId = 999)]",
+                StringComparison.Ordinal)
+            .Replace(
+                "ISampleChild? FindChild(",
+                "[return: BridgeBound(ResultObjectId = 2)] ISampleChild? FindChild(",
+                StringComparison.Ordinal);
+        if (string.Equals(source, Valid, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The return-bound fixture did not change the valid contract.");
+        }
+
+        var (result, output) = run(source, "Payload");
+        assertNoErrors(Diagnostics(result));
+        assertNoErrors(output.GetDiagnostics());
+    }
+
+    /// <summary>
+    /// The allow-list is matched by symbol. A type merely named <c>Guid</c> in a
+    /// namespace whose last segment is <c>System</c> must not be accepted and
+    /// silently emitted as <c>global::System.Guid</c>.
+    /// </summary>
+    private static void VerifySpoofedAllowListTypeIsRejected(
+        Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run)
+    {
+        string source = Valid.Replace(
+            "string ProductVersion { get; }",
+            "Acme.System.Guid ProductVersion { get; }",
+            StringComparison.Ordinal) + "\n\nnamespace Acme.System { public struct Guid { } }\n";
+        GeneratorDriverRunResult result = run(source, "Host").Result;
+        if (!Diagnostics(result).Any(diagnostic => diagnostic.Id == "MPWLC017"))
+        {
+            throw new InvalidOperationException("A spoofed allow-list type must be rejected with MPWLC017.");
+        }
+    }
+
+    /// <summary>
+    /// A null in a non-nullable <c>byte[]</c> position must fail closed. Left
+    /// alone it becomes an empty span and encodes as a well-formed empty value,
+    /// substituting data where the sibling string path refuses.
+    /// </summary>
+    private static void VerifyNullBytesFailClosed(
+        Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run,
+        Action<IEnumerable<Diagnostic>> assertNoErrors)
+    {
+        string source = Valid.Replace(
+            "int Code { get; }",
+            "int Code { get; } [BridgeField(3, MaximumByteCount = 64)] byte[] Blob { get; }",
+            StringComparison.Ordinal);
+        var (result, output) = run(source, "Payload");
+        assertNoErrors(Diagnostics(result));
+        assertNoErrors(output.GetDiagnostics());
+        string generated = Generated(result);
+        int write = generated.IndexOf("TryWriteBytes(value.Blob", StringComparison.Ordinal);
+        if (write < 0)
+        {
+            throw new InvalidOperationException("The bytes fixture did not emit a byte[] encoder.");
+        }
+
+        if (!generated.AsSpan(Math.Max(0, write - 400), 400).ToString().Contains("value.Blob is not null", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("A non-nullable byte[] position must reject null instead of encoding an empty value.");
+        }
+    }
+
+    /// <summary>
+    /// A legitimate contract type whose name merely contains "Credential" must
+    /// not be rejected as secret material.
+    /// </summary>
+    private static void VerifyLegitimateCredentialNameIsAccepted(
+        Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run,
+        Action<IEnumerable<Diagnostic>> assertNoErrors)
+    {
+        string source = Valid.Replace("ISampleFailure", "ICredentialPolicy", StringComparison.Ordinal);
+        var (result, output) = run(source, "Host");
+        assertNoErrors(Diagnostics(result));
+        assertNoErrors(output.GetDiagnostics());
     }
 
     private static void VerifySurface(

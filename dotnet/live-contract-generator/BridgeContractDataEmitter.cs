@@ -119,7 +119,7 @@ internal static class BridgeCodecEmitter
             string suffix = BridgeTypeNames.IsNullableValue(type, payload) ? ".Value" : string.Empty;
             source.Append(indent).Append("if (").Append(expression).AppendLine(" is null)");
             source.Append(indent).AppendLine("{");
-            source.Append(indent).Append("    if (!writer.TryWriteNull()) { ").Append(onFail).AppendLine(" }");
+            source.Append(indent).Append("    if (!__bridgeWriter.TryWriteNull()) { ").Append(onFail).AppendLine(" }");
             source.Append(indent).AppendLine("}");
             source.Append(indent).AppendLine("else");
             source.Append(indent).AppendLine("{");
@@ -144,46 +144,50 @@ internal static class BridgeCodecEmitter
         switch (type.Tag)
         {
             case BridgeTag.Null:
-                Guard(source, indent, "writer.TryWriteNull()", onFail);
+                Guard(source, indent, "__bridgeWriter.TryWriteNull()", onFail);
                 return;
             case BridgeTag.Bool:
-                Guard(source, indent, $"writer.TryWriteBool({expression})", onFail);
+                Guard(source, indent, $"__bridgeWriter.TryWriteBool({expression})", onFail);
                 return;
             case BridgeTag.Int32:
-                Guard(source, indent, $"writer.TryWriteInt32({expression})", onFail);
+                Guard(source, indent, $"__bridgeWriter.TryWriteInt32({expression})", onFail);
                 return;
             case BridgeTag.Int64:
-                Guard(source, indent, $"writer.TryWriteInt64({expression})", onFail);
+                Guard(source, indent, $"__bridgeWriter.TryWriteInt64({expression})", onFail);
                 return;
             case BridgeTag.Double:
-                Guard(source, indent, $"writer.TryWriteDouble({expression})", onFail);
+                Guard(source, indent, $"__bridgeWriter.TryWriteDouble({expression})", onFail);
                 return;
             case BridgeTag.Guid:
-                Guard(source, indent, $"writer.TryWriteGuid({expression})", onFail);
+                Guard(source, indent, $"__bridgeWriter.TryWriteGuid({expression})", onFail);
                 return;
             case BridgeTag.Enum32:
-                Guard(source, indent, $"writer.TryWriteEnum32((int)({expression}))", onFail);
+                Guard(source, indent, $"__bridgeWriter.TryWriteEnum32((int)({expression}))", onFail);
                 return;
             case BridgeTag.Utf8String:
-                Guard(source, indent, $"writer.TryWriteString({expression}, {BridgeTypeNames.Number(type.MaximumBytes)})", onFail);
+                Guard(source, indent, $"__bridgeWriter.TryWriteString({expression}, {BridgeTypeNames.Number(type.MaximumBytes)})", onFail);
                 return;
             case BridgeTag.Bytes:
-                Guard(source, indent, $"writer.TryWriteBytes({expression}, {BridgeTypeNames.Number(type.MaximumBytes)})", onFail);
+                // A null byte[] would otherwise become an empty ReadOnlySpan and
+                // encode as a well-formed empty value, silently substituting data
+                // where the sibling string path fails closed.
+                Guard(source, indent, $"{expression} is not null", onFail);
+                Guard(source, indent, $"__bridgeWriter.TryWriteBytes({expression}, {BridgeTypeNames.Number(type.MaximumBytes)})", onFail);
                 return;
             case BridgeTag.Handle:
                 Guard(
                     source,
                     indent,
                     payload
-                        ? $"writer.TryWriteHandle({BridgeTypeNames.Number(type.TypeId)}UL, ({expression}).ObjectId)"
-                        : $"writer.TryWriteHandle({BridgeTypeNames.Number(type.TypeId)}UL, Register{BridgeTypeNames.Number(type.TypeId)}(in admission, {expression}))",
+                        ? $"__bridgeWriter.TryWriteHandle({BridgeTypeNames.Number(type.TypeId)}UL, ({expression}).ObjectId)"
+                        : $"__bridgeWriter.TryWriteHandle({BridgeTypeNames.Number(type.TypeId)}UL, Register{BridgeTypeNames.Number(type.TypeId)}(in admission, {expression}))",
                     onFail);
                 return;
             case BridgeTag.Data:
                 Guard(
                     source,
                     indent,
-                    $"{BridgeNames.Codec(contract)}.TryWrite{BridgeNames.Value(contract.DataById[type.TypeId])}(ref writer, {expression})",
+                    $"{BridgeNames.Codec(contract)}.TryWrite{BridgeNames.Value(contract.DataById[type.TypeId])}(ref __bridgeWriter, {expression})",
                     onFail);
                 return;
             case BridgeTag.List:
@@ -206,17 +210,17 @@ internal static class BridgeCodecEmitter
         ref int temp)
     {
         int id = temp++;
-        string list = "list" + BridgeTypeNames.Number(id);
-        string count = "count" + BridgeTypeNames.Number(id);
-        string scope = "scope" + BridgeTypeNames.Number(id);
-        string loop = "index" + BridgeTypeNames.Number(id);
-        string item = "item" + BridgeTypeNames.Number(id);
+        string list = "__bridgeList" + BridgeTypeNames.Number(id);
+        string count = "__bridgeCount" + BridgeTypeNames.Number(id);
+        string scope = "__bridgeScope" + BridgeTypeNames.Number(id);
+        string loop = "__bridgeIndex" + BridgeTypeNames.Number(id);
+        string item = "__bridgeItem" + BridgeTypeNames.Number(id);
         source.Append(indent).Append("var ").Append(list).Append(" = ").Append(expression).AppendLine(";");
         source.Append(indent).Append("int ").Append(count).Append(" = ").Append(list).AppendLine(".Count;");
         Guard(
             source,
             indent,
-            $"writer.TryBeginList({count}, {BridgeTypeNames.Tag}.{TagName(type.Element!.Tag)}, {BridgeTypeNames.Number(type.MaximumCount)}, out int {scope})",
+            $"__bridgeWriter.TryBeginList({count}, {BridgeTypeNames.Tag}.{TagName(type.Element!.Tag)}, {BridgeTypeNames.Number(type.MaximumCount)}, out int {scope})",
             onFail);
         source.Append(indent).Append("for (int ").Append(loop).Append(" = 0; ").Append(loop).Append(" < ").Append(count)
             .Append("; ").Append(loop).AppendLine("++)");
@@ -224,7 +228,7 @@ internal static class BridgeCodecEmitter
         source.Append(indent).Append("    var ").Append(item).Append(" = ").Append(list).Append('[').Append(loop).AppendLine("];");
         EmitWrite(source, contract, type.Element!, item, indent + "    ", onFail, payload, ref temp);
         source.Append(indent).AppendLine("}");
-        Guard(source, indent, $"writer.TryEndList({scope})", onFail);
+        Guard(source, indent, $"__bridgeWriter.TryEndList({scope})", onFail);
     }
 
     internal static void EmitRead(
@@ -240,11 +244,11 @@ internal static class BridgeCodecEmitter
         if (type.IsNullable)
         {
             int id = temp++;
-            string tag = "tag" + BridgeTypeNames.Number(id);
-            Guard(source, indent, $"reader.TryPeekTag(out byte {tag})", onFail);
+            string tag = "__bridgeTag" + BridgeTypeNames.Number(id);
+            Guard(source, indent, $"__bridgeReader.TryPeekTag(out byte {tag})", onFail);
             source.Append(indent).Append("if (").Append(tag).Append(" == ").Append(BridgeTypeNames.Tag).AppendLine(".Null)");
             source.Append(indent).AppendLine("{");
-            Guard(source, indent + "    ", "reader.TryReadNull()", onFail);
+            Guard(source, indent + "    ", "__bridgeReader.TryReadNull()", onFail);
             source.Append(indent).Append("    ").Append(target).AppendLine(" = null;");
             source.Append(indent).AppendLine("}");
             source.Append(indent).AppendLine("else");
@@ -268,52 +272,52 @@ internal static class BridgeCodecEmitter
         ref int temp)
     {
         int id = temp++;
-        string local = "value" + BridgeTypeNames.Number(id);
+        string local = "__bridgeValue" + BridgeTypeNames.Number(id);
         switch (type.Tag)
         {
             case BridgeTag.Null:
-                Guard(source, indent, "reader.TryReadNull()", onFail);
+                Guard(source, indent, "__bridgeReader.TryReadNull()", onFail);
                 return;
             case BridgeTag.Bool:
-                Guard(source, indent, $"reader.TryReadBool(out bool {local})", onFail);
+                Guard(source, indent, $"__bridgeReader.TryReadBool(out bool {local})", onFail);
                 Assign(source, indent, target, local);
                 return;
             case BridgeTag.Int32:
-                Guard(source, indent, $"reader.TryReadInt32(out int {local})", onFail);
+                Guard(source, indent, $"__bridgeReader.TryReadInt32(out int {local})", onFail);
                 Assign(source, indent, target, local);
                 return;
             case BridgeTag.Int64:
-                Guard(source, indent, $"reader.TryReadInt64(out long {local})", onFail);
+                Guard(source, indent, $"__bridgeReader.TryReadInt64(out long {local})", onFail);
                 Assign(source, indent, target, local);
                 return;
             case BridgeTag.Double:
-                Guard(source, indent, $"reader.TryReadDouble(out double {local})", onFail);
+                Guard(source, indent, $"__bridgeReader.TryReadDouble(out double {local})", onFail);
                 Assign(source, indent, target, local);
                 return;
             case BridgeTag.Guid:
-                Guard(source, indent, $"reader.TryReadGuid(out global::System.Guid {local})", onFail);
+                Guard(source, indent, $"__bridgeReader.TryReadGuid(out global::System.Guid {local})", onFail);
                 Assign(source, indent, target, local);
                 return;
             case BridgeTag.Enum32:
             {
                 string enumType = type.Symbol!.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                Guard(source, indent, $"reader.TryReadEnum32(out int {local})", onFail);
+                Guard(source, indent, $"__bridgeReader.TryReadEnum32(out int {local})", onFail);
                 Guard(source, indent, $"{BridgeNames.Codec(contract)}.IsDefined{Sanitize(enumType)}({local})", onFail);
                 source.Append(indent).Append(target).Append(" = (").Append(enumType).Append(')').Append(local).AppendLine(";");
                 return;
             }
 
             case BridgeTag.Utf8String:
-                Guard(source, indent, $"reader.TryReadString({BridgeTypeNames.Number(type.MaximumBytes)}, out string? {local})", onFail);
+                Guard(source, indent, $"__bridgeReader.TryReadString({BridgeTypeNames.Number(type.MaximumBytes)}, out string? {local})", onFail);
                 Guard(source, indent, $"{local} is not null", onFail);
                 Assign(source, indent, target, local);
                 return;
             case BridgeTag.Bytes:
-                Guard(source, indent, $"reader.TryReadBytes({BridgeTypeNames.Number(type.MaximumBytes)}, out global::System.ReadOnlySpan<byte> {local})", onFail);
+                Guard(source, indent, $"__bridgeReader.TryReadBytes({BridgeTypeNames.Number(type.MaximumBytes)}, out global::System.ReadOnlySpan<byte> {local})", onFail);
                 source.Append(indent).Append(target).Append(" = ").Append(local).AppendLine(".ToArray();");
                 return;
             case BridgeTag.Handle:
-                Guard(source, indent, $"reader.TryReadHandle({BridgeTypeNames.Number(type.TypeId)}UL, out ulong {local})", onFail);
+                Guard(source, indent, $"__bridgeReader.TryReadHandle({BridgeTypeNames.Number(type.TypeId)}UL, out ulong {local})", onFail);
                 Guard(source, indent, $"{local} != 0UL", onFail);
                 if (payload)
                 {
@@ -339,7 +343,7 @@ internal static class BridgeCodecEmitter
                 Guard(
                     source,
                     indent,
-                    $"{BridgeNames.Codec(contract)}.TryRead{valueType}(ref reader, out {valueType}? {local})",
+                    $"{BridgeNames.Codec(contract)}.TryRead{valueType}(ref __bridgeReader, out {valueType}? {local})",
                     onFail);
                 Guard(source, indent, $"{local} is not null", onFail);
                 Assign(source, indent, target, local);
@@ -366,16 +370,16 @@ internal static class BridgeCodecEmitter
         int id,
         ref int temp)
     {
-        string count = "count" + BridgeTypeNames.Number(id);
-        string element = "element" + BridgeTypeNames.Number(id);
-        string buffer = "buffer" + BridgeTypeNames.Number(id);
-        string loop = "index" + BridgeTypeNames.Number(id);
-        string item = "item" + BridgeTypeNames.Number(id);
+        string count = "__bridgeCount" + BridgeTypeNames.Number(id);
+        string element = "__bridgeElement" + BridgeTypeNames.Number(id);
+        string buffer = "__bridgeBuffer" + BridgeTypeNames.Number(id);
+        string loop = "__bridgeIndex" + BridgeTypeNames.Number(id);
+        string item = "__bridgeItem" + BridgeTypeNames.Number(id);
         string elementType = BridgeTypeNames.Full(type.Element!, contract, payload);
         Guard(
             source,
             indent,
-            $"reader.TryReadListHeader({BridgeTypeNames.Number(type.MaximumCount)}, out int {count}, out byte {element})",
+            $"__bridgeReader.TryReadListHeader({BridgeTypeNames.Number(type.MaximumCount)}, out int {count}, out byte {element})",
             onFail);
         Guard(source, indent, $"{element} == {BridgeTypeNames.Tag}.{TagName(type.Element!.Tag)}", onFail);
         source.Append(indent).Append("var ").Append(buffer).Append(" = new ").Append(elementType).Append('[').Append(count).AppendLine("];");
@@ -386,7 +390,7 @@ internal static class BridgeCodecEmitter
         EmitRead(source, contract, type.Element!, item, indent + "    ", onFail, payload, ref temp);
         source.Append(indent).Append("    ").Append(buffer).Append('[').Append(loop).Append("] = ").Append(item).AppendLine(";");
         source.Append(indent).AppendLine("}");
-        Guard(source, indent, "reader.TryEndContainer()", onFail);
+        Guard(source, indent, "__bridgeReader.TryEndContainer()", onFail);
         source.Append(indent).Append(target).Append(" = ").Append(buffer).AppendLine(";");
     }
 
@@ -461,6 +465,11 @@ internal static class BridgeContractDataEmitter
     private static void EmitValue(StringBuilder source, BridgeContractModel contract, BridgeDataModel model)
     {
         string name = BridgeNames.Value(model);
+        // A parameter is qualified with `this.` on assignment and made unique
+        // against every declared field name, so a field that is already
+        // lowercase cannot produce a silent self-assignment and two fields that
+        // differ only by case cannot collide.
+        Dictionary<uint, string> parameters = ParameterNames(model);
         source.Append("/// <summary>A copied, bounded value of bridge data contract ")
             .Append(BridgeTypeNames.Number(model.Id)).AppendLine(".</summary>");
         source.Append("public sealed class ").Append(name).AppendLine();
@@ -475,15 +484,15 @@ internal static class BridgeContractDataEmitter
             }
 
             source.Append(BridgeTypeNames.Full(field.Type, contract, payload: true)).Append(' ')
-                .Append(BridgeNames.Identifier(Camel(field.Name)));
+                .Append(BridgeNames.Identifier(parameters[field.Ordinal]));
         }
 
         source.AppendLine(")");
         source.AppendLine("    {");
         foreach (BridgeFieldModel field in model.Fields)
         {
-            source.Append("        ").Append(BridgeNames.Identifier(field.Name)).Append(" = ")
-                .Append(BridgeNames.Identifier(Camel(field.Name))).AppendLine(";");
+            source.Append("        this.").Append(BridgeNames.Identifier(field.Name)).Append(" = ")
+                .Append(BridgeNames.Identifier(parameters[field.Ordinal])).AppendLine(";");
         }
 
         source.AppendLine("    }");
@@ -496,6 +505,35 @@ internal static class BridgeContractDataEmitter
 
         source.AppendLine("}");
         source.AppendLine();
+    }
+
+    /// <summary>
+    /// Assigns one deterministic, collision-free constructor parameter name per
+    /// field, in ascending ordinal order.
+    /// </summary>
+    private static Dictionary<uint, string> ParameterNames(BridgeDataModel model)
+    {
+        var declared = new HashSet<string>(StringComparer.Ordinal);
+        foreach (BridgeFieldModel field in model.Fields)
+        {
+            declared.Add(field.Name);
+        }
+
+        var used = new HashSet<string>(StringComparer.Ordinal);
+        var result = new Dictionary<uint, string>();
+        foreach (BridgeFieldModel field in model.Fields)
+        {
+            string candidate = Camel(field.Name);
+            while (used.Contains(candidate) || (declared.Contains(candidate) && candidate != field.Name))
+            {
+                candidate += "Value";
+            }
+
+            used.Add(candidate);
+            result.Add(field.Ordinal, candidate);
+        }
+
+        return result;
     }
 
     private static void EmitEnumGuard(StringBuilder source, BridgeEnumModel model)
@@ -521,47 +559,47 @@ internal static class BridgeContractDataEmitter
         string name = BridgeNames.Value(model);
         int temp = 0;
         source.Append("    internal static bool TryWrite").Append(name).Append("(ref ").Append(BridgeTypeNames.Writer)
-            .Append(" writer, ").Append(name).AppendLine("? value)");
+            .Append(" __bridgeWriter, ").Append(name).AppendLine("? value)");
         source.AppendLine("    {");
-        source.AppendLine("        if (value is null) { return writer.TryWriteNull(); }");
-        source.Append("        if (!writer.TryBeginData(").Append(BridgeTypeNames.Number(model.Id)).Append("UL, ")
-            .Append(BridgeTypeNames.Number(model.Fields.Count)).AppendLine(", out int scope)) { return false; }");
+        source.AppendLine("        if (value is null) { return __bridgeWriter.TryWriteNull(); }");
+        source.Append("        if (!__bridgeWriter.TryBeginData(").Append(BridgeTypeNames.Number(model.Id)).Append("UL, ")
+            .Append(BridgeTypeNames.Number(model.Fields.Count)).AppendLine(", out int __bridgeScope)) { return false; }");
         foreach (BridgeFieldModel field in model.Fields)
         {
-            source.Append("        if (!writer.TryWriteFieldOrdinal(").Append(BridgeTypeNames.Number(field.Ordinal))
+            source.Append("        if (!__bridgeWriter.TryWriteFieldOrdinal(").Append(BridgeTypeNames.Number(field.Ordinal))
                 .AppendLine("U)) { return false; }");
             BridgeCodecEmitter.EmitWrite(
                 source, contract, field.Type, "value." + BridgeNames.Identifier(field.Name), "        ", "return false;", payload: true, ref temp);
         }
 
-        source.AppendLine("        return writer.TryEndData(scope);");
+        source.AppendLine("        return __bridgeWriter.TryEndData(__bridgeScope);");
         source.AppendLine("    }");
         source.AppendLine();
 
         temp = 0;
         source.Append("    internal static bool TryRead").Append(name).Append("(ref ").Append(BridgeTypeNames.Reader)
-            .Append(" reader, out ").Append(name).AppendLine("? value)");
+            .Append(" __bridgeReader, out ").Append(name).AppendLine("? value)");
         source.AppendLine("    {");
         source.AppendLine("        value = null;");
-        source.AppendLine("        if (!reader.TryPeekTag(out byte tag)) { return false; }");
-        source.Append("        if (tag == ").Append(BridgeTypeNames.Tag).AppendLine(".Null) { return reader.TryReadNull(); }");
-        source.Append("        if (!reader.TryReadDataHeader(").Append(BridgeTypeNames.Number(model.Id)).AppendLine("UL, out int fieldCount)) { return false; }");
-        source.Append("        if (fieldCount != ").Append(BridgeTypeNames.Number(model.Fields.Count)).AppendLine(") { return false; }");
+        source.AppendLine("        if (!__bridgeReader.TryPeekTag(out byte __bridgeTag)) { return false; }");
+        source.Append("        if (__bridgeTag == ").Append(BridgeTypeNames.Tag).AppendLine(".Null) { return __bridgeReader.TryReadNull(); }");
+        source.Append("        if (!__bridgeReader.TryReadDataHeader(").Append(BridgeTypeNames.Number(model.Id)).AppendLine("UL, out int __bridgeFieldCount)) { return false; }");
+        source.Append("        if (__bridgeFieldCount != ").Append(BridgeTypeNames.Number(model.Fields.Count)).AppendLine(") { return false; }");
         var locals = new List<string>();
         for (int index = 0; index < model.Fields.Count; index++)
         {
             BridgeFieldModel field = model.Fields[index];
-            string local = "field" + BridgeTypeNames.Number(index);
+            string local = "__bridgeField" + BridgeTypeNames.Number(index);
             locals.Add(local);
             source.Append("        ").Append(BridgeTypeNames.Full(field.Type, contract, payload: true)).Append(' ')
                 .Append(local).AppendLine(" = default!;");
-            source.Append("        if (!reader.TryReadFieldOrdinal(").Append(BridgeTypeNames.Number(field.Ordinal))
+            source.Append("        if (!__bridgeReader.TryReadFieldOrdinal(").Append(BridgeTypeNames.Number(field.Ordinal))
                 .AppendLine("U)) { return false; }");
             BridgeCodecEmitter.EmitRead(
                 source, contract, field.Type, local, "        ", "return false;", payload: true, ref temp);
         }
 
-        source.AppendLine("        if (!reader.TryEndContainer()) { return false; }");
+        source.AppendLine("        if (!__bridgeReader.TryEndContainer()) { return false; }");
         source.Append("        value = new ").Append(name).Append('(').Append(string.Join(", ", locals)).AppendLine(");");
         source.AppendLine("        return true;");
         source.AppendLine("    }");
@@ -571,3 +609,9 @@ internal static class BridgeContractDataEmitter
     private static string Camel(string value) =>
         value.Length == 0 ? value : char.ToLowerInvariant(value[0]) + value.Substring(1);
 }
+
+
+
+
+
+

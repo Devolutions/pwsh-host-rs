@@ -43,11 +43,58 @@ internal static class BridgeContractAnalyzer
         internal ulong ResultObjectId;
     }
 
+    /// <summary>
+    /// The allow-list types resolved by symbol rather than by name. A closed
+    /// allow-list validated by string matching is not closed: a namespace leaf
+    /// comparison accepts <c>Acme.System.Guid</c>, and emission would then
+    /// silently substitute the real type.
+    /// </summary>
+    private sealed class WellKnownTypes
+    {
+        internal WellKnownTypes(Compilation compilation)
+        {
+            Guid = compilation.GetTypeByMetadataName("System.Guid");
+            ReadOnlyList = compilation.GetTypeByMetadataName("System.Collections.Generic.IReadOnlyList`1");
+        }
+
+        internal INamedTypeSymbol? Guid { get; }
+
+        internal INamedTypeSymbol? ReadOnlyList { get; }
+
+        internal bool IsGuid(ITypeSymbol type) =>
+            Guid is not null && SymbolEqualityComparer.Default.Equals(type, Guid);
+
+        internal bool TryGetListElement(ITypeSymbol type, out ITypeSymbol? element)
+        {
+            element = null;
+            if (ReadOnlyList is null ||
+                type is not INamedTypeSymbol { TypeArguments.Length: 1 } named ||
+                !SymbolEqualityComparer.Default.Equals(named.OriginalDefinition, ReadOnlyList))
+            {
+                return false;
+            }
+
+            element = named.TypeArguments[0];
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Names the generator reserves for its own locals. Declaring one would make
+    /// generated code fail with a raw compiler error instead of a diagnostic.
+    /// </summary>
+    private const string ReservedPrefix = "__bridge";
+
+    private static bool IsReservedName(string name) =>
+        name.StartsWith(ReservedPrefix, StringComparison.OrdinalIgnoreCase);
+
     internal static BridgeContractModel? Analyze(
         INamedTypeSymbol root,
         IReadOnlyList<INamedTypeSymbol> declarations,
+        Compilation compilation,
         List<Diagnostic> diagnostics)
     {
+        var well = new WellKnownTypes(compilation);
         bool valid = true;
         AttributeData? contractAttribute = GetAttribute(root, ContractAttribute);
         if (contractAttribute is null ||
@@ -90,7 +137,7 @@ internal static class BridgeContractAnalyzer
 
         var ordinals = new Dictionary<uint, string>();
         List<BridgeEnumModel> enums = AnalyzeEnums(declarations, diagnostics, ref valid);
-        List<BridgeDataModel> data = AnalyzeData(declarations, enums, diagnostics, ref valid);
+        List<BridgeDataModel> data = AnalyzeData(declarations, enums, well, diagnostics, ref valid);
         List<BridgeObjectModel> objects = AnalyzeObjects(declarations, ordinals, diagnostics, ref valid);
 
         if (objects.Count > BridgeLimits.MaximumObjects)
@@ -112,7 +159,7 @@ internal static class BridgeContractAnalyzer
 
         foreach (BridgeObjectModel model in objects)
         {
-            AnalyzeMembers(model, objects, data, enums, ordinals, diagnostics, ref valid);
+            AnalyzeMembers(model, objects, data, enums, well, ordinals, diagnostics, ref valid);
         }
 
         if (!valid)
@@ -271,6 +318,7 @@ internal static class BridgeContractAnalyzer
     private static List<BridgeDataModel> AnalyzeData(
         IReadOnlyList<INamedTypeSymbol> declarations,
         List<BridgeEnumModel> enums,
+        WellKnownTypes well,
         List<Diagnostic> diagnostics,
         ref bool valid)
     {
@@ -340,7 +388,7 @@ internal static class BridgeContractAnalyzer
                     ResultObjectId = GetNamedULong(field, "ResultObjectId"),
                 };
                 BridgeTypeRef? type = ResolveType(
-                    property.Type, bounds, Position.DataField, models, enums, member, diagnostics, ref valid);
+                    property.Type, bounds, Position.DataField, models, enums, well, member, diagnostics, ref valid);
                 if (type is not null)
                 {
                     model.Fields.Add(new BridgeFieldModel(member, member.Name, ordinal, type));
@@ -408,6 +456,7 @@ internal static class BridgeContractAnalyzer
         List<BridgeObjectModel> objects,
         List<BridgeDataModel> data,
         List<BridgeEnumModel> enums,
+        WellKnownTypes well,
         Dictionary<uint, string> ordinals,
         List<Diagnostic> diagnostics,
         ref bool valid)
@@ -431,15 +480,21 @@ internal static class BridgeContractAnalyzer
                 continue;
             }
 
+            if (IsReservedName(member.Name))
+            {
+                Report(diagnostics, ref valid, BridgeContractDiagnostics.InvalidMember, member, $"member '{member.Name}' uses the reserved '{ReservedPrefix}' prefix, which the generator uses for its own locals");
+                continue;
+            }
+
             if (member is IPropertySymbol property)
             {
-                AnalyzeProperty(owner, property, objects, data, enums, ordinals, diagnostics, ref valid);
+                AnalyzeProperty(owner, property, objects, data, enums, well, ordinals, diagnostics, ref valid);
                 continue;
             }
 
             if (member is IMethodSymbol method)
             {
-                AnalyzeMethod(owner, method, objects, data, enums, ordinals, diagnostics, ref valid);
+                AnalyzeMethod(owner, method, objects, data, enums, well, ordinals, diagnostics, ref valid);
                 continue;
             }
 
@@ -460,6 +515,7 @@ internal static class BridgeContractAnalyzer
         List<BridgeObjectModel> objects,
         List<BridgeDataModel> data,
         List<BridgeEnumModel> enums,
+        WellKnownTypes well,
         Dictionary<uint, string> ordinals,
         List<Diagnostic> diagnostics,
         ref bool valid)
@@ -511,11 +567,11 @@ internal static class BridgeContractAnalyzer
 
         if (property.IsIndexer)
         {
-            AnalyzeIndexer(owner, property, ordinal, bounds, permission, errorDataId, objects, data, enums, ordinals, diagnostics, ref valid);
+            AnalyzeIndexer(owner, property, ordinal, bounds, permission, errorDataId, objects, data, enums, well, ordinals, diagnostics, ref valid);
             return;
         }
 
-        BridgeTypeRef? type = ResolveType(property.Type, bounds, Position.Member, data, enums, property, diagnostics, ref valid);
+        BridgeTypeRef? type = ResolveType(property.Type, bounds, Position.Member, data, enums, well, property, diagnostics, ref valid);
         if (type is null)
         {
             return;
@@ -599,6 +655,7 @@ internal static class BridgeContractAnalyzer
         List<BridgeObjectModel> objects,
         List<BridgeDataModel> data,
         List<BridgeEnumModel> enums,
+        WellKnownTypes well,
         Dictionary<uint, string> ordinals,
         List<Diagnostic> diagnostics,
         ref bool valid)
@@ -612,7 +669,7 @@ internal static class BridgeContractAnalyzer
             return;
         }
 
-        BridgeTypeRef? element = ResolveType(property.Type, bounds, Position.Member, data, enums, property, diagnostics, ref valid);
+        BridgeTypeRef? element = ResolveType(property.Type, bounds, Position.Member, data, enums, well, property, diagnostics, ref valid);
         if (element is null)
         {
             return;
@@ -651,6 +708,7 @@ internal static class BridgeContractAnalyzer
         List<BridgeObjectModel> objects,
         List<BridgeDataModel> data,
         List<BridgeEnumModel> enums,
+        WellKnownTypes well,
         Dictionary<uint, string> ordinals,
         List<Diagnostic> diagnostics,
         ref bool valid)
@@ -693,6 +751,12 @@ internal static class BridgeContractAnalyzer
                 Report(diagnostics, ref valid, BridgeContractDiagnostics.UnsupportedType, method, "ref, out, and in parameters are not supported");
                 return;
             }
+
+            if (IsReservedName(parameter.Name))
+            {
+                Report(diagnostics, ref valid, BridgeContractDiagnostics.InvalidMember, method, $"parameter '{parameter.Name}' uses the reserved '{ReservedPrefix}' prefix, which the generator uses for its own locals");
+                return;
+            }
         }
 
         var bounds = new Bounds
@@ -714,7 +778,7 @@ internal static class BridgeContractAnalyzer
                 MaximumCollectionCount = bound is null ? 0 : GetNamedInt(bound, "MaximumCollectionCount"),
                 ResultObjectId = bound is null ? 0 : GetNamedULong(bound, "ResultObjectId"),
             };
-            BridgeTypeRef? resolved = ResolveType(parameter.Type, parameterBounds, Position.Member, data, enums, method, diagnostics, ref valid);
+            BridgeTypeRef? resolved = ResolveType(parameter.Type, parameterBounds, Position.Member, data, enums, well, method, diagnostics, ref valid);
             if (resolved is null)
             {
                 return;
@@ -793,7 +857,7 @@ internal static class BridgeContractAnalyzer
         }
         else
         {
-            BridgeTypeRef? resolved = ResolveType(method.ReturnType, bounds, Position.Member, data, enums, method, diagnostics, ref valid);
+            BridgeTypeRef? resolved = ResolveType(method.ReturnType, ReturnBounds(method, bounds), Position.Member, data, enums, well, method, diagnostics, ref valid);
             if (resolved is null)
             {
                 return;
@@ -819,6 +883,7 @@ internal static class BridgeContractAnalyzer
         Position position,
         List<BridgeDataModel> data,
         List<BridgeEnumModel> enums,
+        WellKnownTypes well,
         ISymbol owner,
         List<Diagnostic> diagnostics,
         ref bool valid)
@@ -851,7 +916,7 @@ internal static class BridgeContractAnalyzer
             return null;
         }
 
-        BridgeTypeRef? result = ResolveCore(resolved, bounds, position, data, enums, owner, diagnostics, ref valid);
+        BridgeTypeRef? result = ResolveCore(resolved, bounds, position, data, enums, well, owner, diagnostics, ref valid);
         if (result is not null)
         {
             result.IsNullable = nullable;
@@ -866,6 +931,7 @@ internal static class BridgeContractAnalyzer
         Position position,
         List<BridgeDataModel> data,
         List<BridgeEnumModel> enums,
+        WellKnownTypes well,
         ISymbol owner,
         List<Diagnostic> diagnostics,
         ref bool valid)
@@ -921,41 +987,41 @@ internal static class BridgeContractAnalyzer
             return new BridgeTypeRef(BridgeTag.Bytes, type) { MaximumBytes = bounds.MaximumByteCount };
         }
 
+        if (well.IsGuid(type))
+        {
+            return new BridgeTypeRef(BridgeTag.Guid, type);
+        }
+
+        if (well.TryGetListElement(type, out ITypeSymbol? listElement))
+        {
+            if (position is Position.ListElement or Position.DataFieldListElement)
+            {
+                Report(diagnostics, ref valid, BridgeContractDiagnostics.UnsupportedType, owner, "a collection element cannot itself be a collection");
+                return null;
+            }
+
+            if (!IsValidCollectionBound(bounds.MaximumCollectionCount))
+            {
+                Report(diagnostics, ref valid, BridgeContractDiagnostics.MissingBound, owner, $"a collection position requires MaximumCollectionCount between 1 and {BridgeLimits.MaximumCollectionCount}");
+                return null;
+            }
+
+            Position elementPosition = position == Position.DataField ? Position.DataFieldListElement : Position.ListElement;
+            BridgeTypeRef? resolvedElement = ResolveType(listElement!, bounds, elementPosition, data, enums, well, owner, diagnostics, ref valid);
+            if (resolvedElement is null)
+            {
+                return null;
+            }
+
+            return new BridgeTypeRef(BridgeTag.List, type)
+            {
+                MaximumCount = bounds.MaximumCollectionCount,
+                Element = resolvedElement,
+            };
+        }
+
         if (type is INamedTypeSymbol named)
         {
-            if (named is { Name: "Guid", ContainingNamespace.Name: "System" } && named.TypeArguments.Length == 0)
-            {
-                return new BridgeTypeRef(BridgeTag.Guid, type);
-            }
-
-            if (TryGetReadOnlyListElement(named, out ITypeSymbol? element))
-            {
-                if (position is Position.ListElement or Position.DataFieldListElement)
-                {
-                    Report(diagnostics, ref valid, BridgeContractDiagnostics.UnsupportedType, owner, "a collection element cannot itself be a collection");
-                    return null;
-                }
-
-                if (!IsValidCollectionBound(bounds.MaximumCollectionCount))
-                {
-                    Report(diagnostics, ref valid, BridgeContractDiagnostics.MissingBound, owner, $"a collection position requires MaximumCollectionCount between 1 and {BridgeLimits.MaximumCollectionCount}");
-                    return null;
-                }
-
-                Position elementPosition = position == Position.DataField ? Position.DataFieldListElement : Position.ListElement;
-                BridgeTypeRef? resolved = ResolveType(element!, bounds, elementPosition, data, enums, owner, diagnostics, ref valid);
-                if (resolved is null)
-                {
-                    return null;
-                }
-
-                return new BridgeTypeRef(BridgeTag.List, type)
-                {
-                    MaximumCount = bounds.MaximumCollectionCount,
-                    Element = resolved,
-                };
-            }
-
             if (named.TypeKind == TypeKind.Interface && HasAttribute(named, DataAttribute))
             {
                 if (position is Position.DataField or Position.DataFieldListElement)
@@ -1154,23 +1220,33 @@ internal static class BridgeContractAnalyzer
             return $"'{type.Name}' is not part of the closed bridge value system; use int, long, double, or a bounded string";
         }
 
+        // Everything below only improves the message. The security property comes
+        // from the allow-list above, which is matched by SpecialType, TypeKind, or
+        // symbol comparison, so an unlisted type is rejected by fall-through even
+        // when nothing here recognises it. These checks are therefore scoped to
+        // their real namespaces, so a legitimate contract type is never rejected
+        // with a misleading reason.
         string name = type.Name;
-        if (name is "Task" or "ValueTask")
+        string @namespace = type.ContainingNamespace is null || type.ContainingNamespace.IsGlobalNamespace
+            ? string.Empty
+            : type.ContainingNamespace.ToDisplayString();
+        if (@namespace == "System.Threading.Tasks" && name is "Task" or "ValueTask")
         {
             return "asynchronous return types are not supported; the transport is already request/reply";
         }
 
-        if (name is "Type" or "PSObject" or "PSCustomObject" or "ErrorRecord" or "Runspace" or "PSHost")
+        if (@namespace == "System.Management.Automation" || @namespace.StartsWith("System.Management.Automation.", StringComparison.Ordinal))
         {
-            return $"'{name}' exposes runtime type or SMA identity and is not supported";
+            return $"'{name}' is a PowerShell engine type; no SMA type crosses the bridge";
         }
 
-        if (name is "DateTimeOffset" or "TimeSpan" or "UIntPtr" or "IntPtr" or "Decimal")
+        if (@namespace == "System" && name is "Type" or "DateTimeOffset" or "TimeSpan")
         {
             return $"'{name}' is not part of the closed bridge value system; use int, long, double, or a bounded string";
         }
 
-        if (name is "SecureString" || name.IndexOf("Credential", StringComparison.OrdinalIgnoreCase) >= 0)
+        if ((@namespace == "System.Security" && name == "SecureString") ||
+            (@namespace == "System.Net" && name is "NetworkCredential" or "CredentialCache"))
         {
             return "secret and credential material never crosses the bridge";
         }
@@ -1178,23 +1254,31 @@ internal static class BridgeContractAnalyzer
         return null;
     }
 
-    private static bool TryGetReadOnlyListElement(INamedTypeSymbol type, out ITypeSymbol? element)
-    {
-        element = null;
-        if (type.Name != "IReadOnlyList" ||
-            type.ContainingNamespace?.ToDisplayString() != "System.Collections.Generic" ||
-            type.TypeArguments.Length != 1)
-        {
-            return false;
-        }
 
-        element = type.TypeArguments[0];
-        return true;
-    }
 
     private static bool IsValidByteBound(int value) => value > 0 && value <= BridgeLimits.MaximumUtf8Bytes;
 
     private static bool IsValidCollectionBound(int value) => value > 0 && value <= BridgeLimits.MaximumCollectionCount;
+
+    /// <summary>
+    /// Resolves the bound for a method's return position. A
+    /// <c>[return: BridgeBound]</c> declaration wins over the member-level
+    /// bound, because a bound is never inherited across positions.
+    /// </summary>
+    private static Bounds ReturnBounds(IMethodSymbol method, Bounds memberBounds)
+    {
+        AttributeData? bound = method.GetReturnTypeAttributes().FirstOrDefault(attribute =>
+            string.Equals(attribute.AttributeClass?.ToDisplayString(), BoundAttribute, StringComparison.Ordinal));
+        return bound is null
+            ? memberBounds
+            : new Bounds
+            {
+                MaximumUtf8Bytes = GetNamedInt(bound, "MaximumUtf8Bytes"),
+                MaximumByteCount = GetNamedInt(bound, "MaximumByteCount"),
+                MaximumCollectionCount = GetNamedInt(bound, "MaximumCollectionCount"),
+                ResultObjectId = GetNamedULong(bound, "ResultObjectId"),
+            };
+    }
 
     private static void Report(
         List<Diagnostic> diagnostics,
@@ -1230,3 +1314,9 @@ internal static class BridgeContractAnalyzer
             ? (byte)value
             : (byte)0;
 }
+
+
+
+
+
+

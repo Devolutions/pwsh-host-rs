@@ -217,23 +217,23 @@ internal static class BridgeContractDispatcherEmitter
         source.AppendLine("        }");
         source.AppendLine();
         source.AppendLine("        // 5. Decode arguments, dispatch, and encode the reply.");
-        source.Append("        var reader = new ").Append(BridgeTypeNames.Reader).Append("(request.Slice(")
+        source.Append("        var __bridgeReader = new ").Append(BridgeTypeNames.Reader).Append("(request.Slice(")
             .Append(BridgeTypeNames.Wire).AppendLine(".RequestHeaderSize));");
-        source.Append("        var writer = new ").Append(BridgeTypeNames.Writer).Append("(reply.Slice(")
+        source.Append("        var __bridgeWriter = new ").Append(BridgeTypeNames.Writer).Append("(reply.Slice(")
             .Append(BridgeTypeNames.Wire).AppendLine(".ReplyHeaderSize));");
-        source.AppendLine("        int status = DispatchMember(in admission, in context, memberId, ref reader, ref writer);");
+        source.AppendLine("        int status = DispatchMember(in admission, in context, memberId, ref __bridgeReader, ref __bridgeWriter);");
         source.AppendLine("        if (status != 0)");
         source.AppendLine("        {");
         source.AppendLine("            return status;");
         source.AppendLine("        }");
         source.AppendLine();
-        source.AppendLine("        if (!reader.IsComplete || !writer.IsComplete)");
+        source.AppendLine("        if (!__bridgeReader.IsComplete || !__bridgeWriter.IsComplete)");
         source.AppendLine("        {");
         source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".InvalidArgument;");
         source.AppendLine("        }");
         source.AppendLine();
         source.Append("        return CompleteReply(").Append(BridgeTypeNames.ReplyKind)
-            .AppendLine(".Value, writer.Length, reply, out replyLength);");
+            .AppendLine(".Value, __bridgeWriter.Length, reply, out replyLength);");
         source.AppendLine("    }");
         source.AppendLine();
     }
@@ -264,9 +264,9 @@ internal static class BridgeContractDispatcherEmitter
         source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".BufferTooSmall;");
         source.AppendLine("        }");
         source.AppendLine();
-        source.Append("        var reader = new ").Append(BridgeTypeNames.Reader).Append("(request.Slice(")
+        source.Append("        var __bridgeReader = new ").Append(BridgeTypeNames.Reader).Append("(request.Slice(")
             .Append(BridgeTypeNames.Wire).AppendLine(".RequestHeaderSize));");
-        source.AppendLine("        if (!reader.TryReadBytes(32, out global::System.ReadOnlySpan<byte> payloadHash) || !reader.IsComplete)");
+        source.AppendLine("        if (!__bridgeReader.TryReadBytes(32, out global::System.ReadOnlySpan<byte> payloadHash) || !__bridgeReader.IsComplete)");
         source.AppendLine("        {");
         source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".InvalidArgument;");
         source.AppendLine("        }");
@@ -290,15 +290,15 @@ internal static class BridgeContractDispatcherEmitter
         source.AppendLine("        global::System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(leaseSpan.Slice(8), generation);");
         source.AppendLine("        global::System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(leaseSpan.Slice(12), rootObjectId);");
         source.Append("        ").Append(constants).AppendLine(".DescriptorHash.CopyTo(leaseSpan.Slice(20));");
-        source.Append("        var writer = new ").Append(BridgeTypeNames.Writer).Append("(reply.Slice(")
+        source.Append("        var __bridgeWriter = new ").Append(BridgeTypeNames.Writer).Append("(reply.Slice(")
             .Append(BridgeTypeNames.Wire).AppendLine(".ReplyHeaderSize));");
-        source.AppendLine("        if (!writer.TryWriteBytes(lease, 52) || !writer.IsComplete)");
+        source.AppendLine("        if (!__bridgeWriter.TryWriteBytes(lease, 52) || !__bridgeWriter.IsComplete)");
         source.AppendLine("        {");
         source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".InvalidArgument;");
         source.AppendLine("        }");
         source.AppendLine();
         source.Append("        return CompleteReply(").Append(BridgeTypeNames.ReplyKind)
-            .AppendLine(".Value, writer.Length, reply, out replyLength);");
+            .AppendLine(".Value, __bridgeWriter.Length, reply, out replyLength);");
         source.AppendLine("    }");
         source.AppendLine();
     }
@@ -359,15 +359,15 @@ internal static class BridgeContractDispatcherEmitter
         source.AppendLine("        }");
         source.AppendLine();
         source.AppendLine("        leases.TryRelease(header.LeaseId, header.Generation, header.ObjectId);");
-        source.Append("        var writer = new ").Append(BridgeTypeNames.Writer).Append("(reply.Slice(")
+        source.Append("        var __bridgeWriter = new ").Append(BridgeTypeNames.Writer).Append("(reply.Slice(")
             .Append(BridgeTypeNames.Wire).AppendLine(".ReplyHeaderSize));");
-        source.AppendLine("        if (!writer.TryWriteNull() || !writer.IsComplete)");
+        source.AppendLine("        if (!__bridgeWriter.TryWriteNull() || !__bridgeWriter.IsComplete)");
         source.AppendLine("        {");
         source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".InvalidArgument;");
         source.AppendLine("        }");
         source.AppendLine();
         source.Append("        return CompleteReply(").Append(BridgeTypeNames.ReplyKind)
-            .AppendLine(".Value, writer.Length, reply, out replyLength);");
+            .AppendLine(".Value, __bridgeWriter.Length, reply, out replyLength);");
         source.AppendLine("    }");
         source.AppendLine();
     }
@@ -382,8 +382,8 @@ internal static class BridgeContractDispatcherEmitter
         source.AppendLine("        in global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeAdmission admission,");
         source.Append("        in ").Append(context).AppendLine(" context,");
         source.AppendLine("        uint memberId,");
-        source.Append("        ref ").Append(BridgeTypeNames.Reader).AppendLine(" reader,");
-        source.Append("        ref ").Append(BridgeTypeNames.Writer).AppendLine(" writer)");
+        source.Append("        ref ").Append(BridgeTypeNames.Reader).AppendLine(" __bridgeReader,");
+        source.Append("        ref ").Append(BridgeTypeNames.Writer).AppendLine(" __bridgeWriter)");
         source.AppendLine("    {");
         source.AppendLine("        switch (memberId)");
         source.AppendLine("        {");
@@ -418,13 +418,13 @@ internal static class BridgeContractDispatcherEmitter
         string handler = BridgeNames.Handler(model);
         source.Append("            case ").Append(constants).Append(".Member").Append(BridgeTypeNames.Number(member.Ordinal)).AppendLine(":");
         source.AppendLine("            {");
-        source.Append(Indent).Append("var target = (").Append(handler).AppendLine(")admission.Handler!;");
+        source.Append(Indent).Append("var __bridgeTarget = (").Append(handler).AppendLine(")admission.Handler!;");
         int temp = 0;
         var arguments = new List<string>();
         for (int index = 0; index < member.Parameters.Count; index++)
         {
             BridgeParameterModel parameter = member.Parameters[index];
-            string local = "argument" + BridgeTypeNames.Number(index);
+            string local = "__bridgeArgument" + BridgeTypeNames.Number(index);
             arguments.Add(local);
             source.Append(Indent).Append(BridgeTypeNames.Full(parameter.Type, contract, payload: false)).Append(' ')
                 .Append(local).AppendLine(" = default!;");
@@ -433,9 +433,9 @@ internal static class BridgeContractDispatcherEmitter
 
         string call = member.Kind switch
         {
-            BridgeRecordKind.Getter => "target.Get" + BridgeNames.Identifier(member.Name) + "(in context)",
-            BridgeRecordKind.Setter => "target.Set" + BridgeNames.Identifier(member.Name) + "(in context, " + arguments[0] + ")",
-            _ => "target." + BridgeNames.Identifier(MethodName(member)) + "(in context" +
+            BridgeRecordKind.Getter => "__bridgeTarget.Get" + BridgeNames.Identifier(member.Name) + "(in context)",
+            BridgeRecordKind.Setter => "__bridgeTarget.Set" + BridgeNames.Identifier(member.Name) + "(in context, " + arguments[0] + ")",
+            _ => "__bridgeTarget." + BridgeNames.Identifier(MethodName(member)) + "(in context" +
                  (arguments.Count == 0 ? string.Empty : ", " + string.Join(", ", arguments)) + ")",
         };
 
@@ -443,13 +443,13 @@ internal static class BridgeContractDispatcherEmitter
         if (isVoid)
         {
             source.Append(Indent).Append(call).AppendLine(";");
-            BridgeCodecEmitter.Guard(source, Indent, "writer.TryWriteNull()", fail);
+            BridgeCodecEmitter.Guard(source, Indent, "__bridgeWriter.TryWriteNull()", fail);
         }
         else
         {
             source.Append(Indent).Append(BridgeTypeNames.Full(member.Result, contract, payload: false))
-                .Append(" result = ").Append(call).AppendLine(";");
-            BridgeCodecEmitter.EmitWrite(source, contract, member.Result, "result", Indent, fail, payload: false, ref temp);
+                .Append(" __bridgeResult = ").Append(call).AppendLine(";");
+            BridgeCodecEmitter.EmitWrite(source, contract, member.Result, "__bridgeResult", Indent, fail, payload: false, ref temp);
         }
 
         source.Append(Indent).AppendLine("return 0;");
@@ -526,3 +526,4 @@ internal static class BridgeContractDispatcherEmitter
     private static string MethodName(BridgeMemberModel member) =>
         member.Name == "get_Item" ? "GetAt" : member.Name;
 }
+

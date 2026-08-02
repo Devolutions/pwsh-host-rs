@@ -332,8 +332,8 @@ internal static class BridgeContractPayloadEmitter
         source.AppendLine(")");
         source.AppendLine("    {");
         int request = member.MaximumRequestBytes(contract.DataById);
-        source.Append("        byte[] request = new byte[").Append(BridgeTypeNames.Number(request)).AppendLine("];");
-        source.Append("        var writer = new ").Append(BridgeTypeNames.Writer).Append("(request.AsSpan(")
+        source.Append("        byte[] __bridgeRequest = new byte[").Append(BridgeTypeNames.Number(request)).AppendLine("];");
+        source.Append("        var __bridgeWriter = new ").Append(BridgeTypeNames.Writer).Append("(__bridgeRequest.AsSpan(")
             .Append(BridgeTypeNames.Wire).AppendLine(".RequestHeaderSize));");
         int temp = 0;
         string onFail = "throw new " + BridgeTypeNames.BridgeException + "(" + BridgeTypeNames.Status +
@@ -343,10 +343,10 @@ internal static class BridgeContractPayloadEmitter
             BridgeCodecEmitter.EmitWrite(source, contract, member.Parameters[index].Type, names[index], "        ", onFail, payload: true, ref temp);
         }
 
-        BridgeCodecEmitter.Guard(source, "        ", "writer.IsComplete", onFail);
+        BridgeCodecEmitter.Guard(source, "        ", "__bridgeWriter.IsComplete", onFail);
         source.Append("        client.PostEvent(ObjectId, ").Append(constants).Append(".Member").Append(BridgeTypeNames.Number(member.Ordinal))
-            .Append(", ").Append(BridgeTypeNames.Number(member.OrderingKey)).Append("UL, request, ")
-            .Append(BridgeTypeNames.Number(member.Parameters.Count)).AppendLine(", writer.Length);");
+            .Append(", ").Append(BridgeTypeNames.Number(member.OrderingKey)).Append("UL, __bridgeRequest, ")
+            .Append(BridgeTypeNames.Number(member.Parameters.Count)).AppendLine(", __bridgeWriter.Length);");
         source.AppendLine("    }");
         source.AppendLine();
     }
@@ -364,8 +364,8 @@ internal static class BridgeContractPayloadEmitter
         int reply = member.MaximumReplyBytes(contract.DataById);
         string onFail = "throw new " + BridgeTypeNames.BridgeException + "(" + BridgeTypeNames.Status +
             ".InvalidArgument, \"Bridge contract '" + BridgeNames.Escape(contract.ContractId) + "' rejected a frame that violates its declared bounds.\");";
-        source.Append(indent).Append("byte[] request = new byte[").Append(BridgeTypeNames.Number(request)).AppendLine("];");
-        source.Append(indent).Append("var writer = new ").Append(BridgeTypeNames.Writer).Append("(request.AsSpan(")
+        source.Append(indent).Append("byte[] __bridgeRequest = new byte[").Append(BridgeTypeNames.Number(request)).AppendLine("];");
+        source.Append(indent).Append("var __bridgeWriter = new ").Append(BridgeTypeNames.Writer).Append("(__bridgeRequest.AsSpan(")
             .Append(BridgeTypeNames.Wire).AppendLine(".RequestHeaderSize));");
         int temp = 0;
         for (int index = 0; index < member.Parameters.Count && index < arguments.Count; index++)
@@ -373,23 +373,23 @@ internal static class BridgeContractPayloadEmitter
             BridgeCodecEmitter.EmitWrite(source, contract, member.Parameters[index].Type, arguments[index], indent, onFail, payload: true, ref temp);
         }
 
-        BridgeCodecEmitter.Guard(source, indent, "writer.IsComplete", onFail);
-        source.Append(indent).Append("byte[] replyBuffer = client.Invoke(ObjectId, ").Append(constants).Append(".Member")
+        BridgeCodecEmitter.Guard(source, indent, "__bridgeWriter.IsComplete", onFail);
+        source.Append(indent).Append("byte[] __bridgeReply = client.Invoke(ObjectId, ").Append(constants).Append(".Member")
             .Append(BridgeTypeNames.Number(member.Ordinal)).Append(", ").Append(BridgeTypeNames.Number(member.Parameters.Count))
-            .Append(", request, writer.Length, ").Append(BridgeTypeNames.Number(reply)).AppendLine(");");
-        BridgeCodecEmitter.Guard(source, indent, BridgeTypeNames.ReplyHeader + ".TryRead(replyBuffer, out var replyHeader)", onFail);
-        source.Append(indent).Append("if (replyHeader.ReplyKind == ").Append(BridgeTypeNames.ReplyKind).AppendLine(".Error)");
+            .Append(", __bridgeRequest, __bridgeWriter.Length, ").Append(BridgeTypeNames.Number(reply)).AppendLine(");");
+        BridgeCodecEmitter.Guard(source, indent, BridgeTypeNames.ReplyHeader + ".TryRead(__bridgeReply, out var __bridgeReplyHeader)", onFail);
+        source.Append(indent).Append("if (__bridgeReplyHeader.ReplyKind == ").Append(BridgeTypeNames.ReplyKind).AppendLine(".Error)");
         source.Append(indent).AppendLine("{");
         source.Append(indent).Append("    throw new ").Append(BridgeTypeNames.BridgeException).Append('(').Append(BridgeTypeNames.Status)
             .Append(".AccessDenied, \"Bridge contract '").Append(BridgeNames.Escape(contract.ContractId))
             .AppendLine("' returned a declared application failure.\");");
         source.Append(indent).AppendLine("}");
         source.AppendLine();
-        source.Append(indent).Append("var reader = new ").Append(BridgeTypeNames.Reader).Append("(replyBuffer.AsSpan(")
-            .Append(BridgeTypeNames.Wire).AppendLine(".ReplyHeaderSize, replyHeader.BodyLength));");
+        source.Append(indent).Append("var __bridgeReader = new ").Append(BridgeTypeNames.Reader).Append("(__bridgeReply.AsSpan(")
+            .Append(BridgeTypeNames.Wire).AppendLine(".ReplyHeaderSize, __bridgeReplyHeader.BodyLength));");
         if (member.Result.Tag == BridgeTag.Null && !member.Result.IsNullable)
         {
-            BridgeCodecEmitter.Guard(source, indent, "reader.TryReadNull() && reader.IsComplete", onFail);
+        BridgeCodecEmitter.Guard(source, indent, "__bridgeReader.TryReadNull() && __bridgeReader.IsComplete", onFail);
             if (resultType != "void")
             {
                 source.Append(indent).AppendLine("return default!;");
@@ -398,12 +398,14 @@ internal static class BridgeContractPayloadEmitter
             return;
         }
 
-        source.Append(indent).Append(resultType).AppendLine(" result = default!;");
-        BridgeCodecEmitter.EmitRead(source, contract, member.Result, "result", indent, onFail, payload: true, ref temp);
-        BridgeCodecEmitter.Guard(source, indent, "reader.IsComplete", onFail);
-        source.Append(indent).AppendLine("return result;");
+        source.Append(indent).Append(resultType).AppendLine(" __bridgeResult = default!;");
+        BridgeCodecEmitter.EmitRead(source, contract, member.Result, "__bridgeResult", indent, onFail, payload: true, ref temp);
+        BridgeCodecEmitter.Guard(source, indent, "__bridgeReader.IsComplete", onFail);
+        source.Append(indent).AppendLine("return __bridgeResult;");
     }
 
     private static string MethodName(BridgeMemberModel member) =>
         member.Name == "get_Item" ? "GetAt" : member.Name;
 }
+
+

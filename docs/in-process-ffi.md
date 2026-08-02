@@ -1446,8 +1446,15 @@ public enum RdmConnectionState { Closed = 0, Open = 1 }
 
 Bounds are **per position, never inherited**. A member-level cap applies only to
 the property or method result; every bounded parameter declares its own
-`[BridgeBound]`. A setter's value position is the property's own type and reuses
-the property's declared cap, because it is the same position.
+`[BridgeBound]`. A `[return: BridgeBound]` declaration **wins over** the
+member-level cap for the result position. A setter's value position is the
+property's own type and reuses the property's declared cap, because it is the
+same position.
+
+Declared member, parameter, and field names must not begin with `__bridge`. The
+generator reserves that prefix for its own locals, and a contract that used it
+would fail with a raw compiler error inside generated code instead of a
+diagnostic. This is `MPWLC014`.
 
 The accepted CLR spellings are closed:
 
@@ -1464,7 +1471,13 @@ The accepted CLR spellings are closed:
 
 `byte[]` and `IReadOnlyList<T>` are the **only** array and generic spellings the
 compiler accepts, plus `Nullable<T>` over a supported scalar. Every other array
-and every other generic is rejected.
+and every other generic is rejected. `System.Guid`, `IReadOnlyList<T>`, and
+`Nullable<T>` are matched by **symbol**, not by name: a namespace-leaf comparison
+would accept `Acme.System.Guid` and emission would then silently substitute the
+real type, so an allow-list validated by string matching is not closed.
+
+A null in a non-nullable `byte[]` or `string` position is rejected rather than
+encoded. Both fail closed; neither substitutes an empty value.
 
 A reference-type position must be declared in an enabled nullable context. An
 unannotated reference type is rejected, because inferring nullability from
@@ -2109,8 +2122,8 @@ inside `Data`, `Handle` inside `Data`, `List` inside `List`, `List` of `Data`
 inside `Data`, unbounded strings, unbounded byte payloads, unbounded
 collections, indexers without an explicit bound, `[Flags]` enums, aliased or
 non-`Int32` enum members, `Mutation.Staged`, duplicate ordinals, zero ordinals,
-an object unreachable from the root, and any member without an explicit
-attribute.
+names beginning with the reserved `__bridge` prefix, an object unreachable from
+the root, and any member without an explicit attribute.
 
 `[Flags]` is rejected because a combined flag value is not equal to any declared
 member, so the closed `Enum32` allow-list cannot validate it.
