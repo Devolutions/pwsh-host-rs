@@ -4101,6 +4101,40 @@ namespace NativeHost
                         throw new InvalidOperationException("PowerShell session has been closed.");
                     }
 
+                    var bound = new List<(FfiLiveObjectLease Lease, object Previous)>();
+                    try
+                    {
+                        foreach (FfiLiveObjectLease lease in GetInvocationBoundLeasesLocked())
+                        {
+                            object previous = lease.Value;
+                            object current = lease.BeginInvocationBinding();
+                            bound.Add((lease, previous));
+                            ReplaceLiveObjectReferencesLocked(previous, current);
+                        }
+                    }
+                    catch
+                    {
+                        for (int index = bound.Count - 1; index >= 0; index--)
+                        {
+                            (FfiLiveObjectLease lease, object previous) = bound[index];
+                            object current = TryReadLeaseValue(lease);
+                            try
+                            {
+                                lease.EndInvocationBinding();
+                            }
+                            finally
+                            {
+                                object unbound = TryReadLeaseValue(lease);
+                                if (current is not null && unbound is not null)
+                                {
+                                    ReplaceLiveObjectReferencesLocked(current, unbound);
+                                }
+                            }
+                        }
+
+                        throw;
+                    }
+
                     activePipelineCount++;
                     AddEventLocked(StateRunning);
                 }
@@ -4110,8 +4144,45 @@ namespace NativeHost
             {
                 lock (gate)
                 {
+                    Exception failure = null;
                     activePipelineCount = Math.Max(0, activePipelineCount - 1);
-                    ReconcileLiveObjectVariablesLocked();
+                    foreach (FfiLiveObjectLease lease in GetInvocationBoundLeasesLocked())
+                    {
+                        object previous = TryReadLeaseValue(lease);
+                        try
+                        {
+                            lease.EndInvocationBinding();
+                        }
+                        catch (Exception exception)
+                        {
+                            failure ??= exception;
+                        }
+                        finally
+                        {
+                            object current = TryReadLeaseValue(lease);
+                            if (previous is not null && current is not null)
+                            {
+                                try
+                                {
+                                    ReplaceLiveObjectReferencesLocked(previous, current);
+                                }
+                                catch (Exception exception)
+                                {
+                                    failure ??= exception;
+                                }
+                            }
+                        }
+                    }
+
+                    try
+                    {
+                        ReconcileLiveObjectVariablesLocked();
+                    }
+                    catch (Exception exception)
+                    {
+                        failure ??= exception;
+                    }
+
                     invocationCount++;
                     if (addToHistory)
                     {
@@ -4119,6 +4190,10 @@ namespace NativeHost
                     }
 
                     AddEventLocked(faulted ? StateFaulted : StateOpened);
+                    if (failure is not null)
+                    {
+                        throw failure;
+                    }
                 }
             }
 
@@ -4200,6 +4275,22 @@ namespace NativeHost
                     throw new InvalidOperationException("Live session object pointer is null.");
                 }
 
+                if ((contract.Directions & PowerShellLiveObjectDirection.BridgeContract) != 0)
+                {
+                    lock (gate)
+                    {
+                        EnsureVariableMutationAllowed();
+                        ValidateVariableName(name);
+                        FfiBridgeContractLease shared = FindBridgeLeaseLocked(contract, ptrComObject);
+                        if (shared is not null)
+                        {
+                            runspace.SessionStateProxy.SetVariable(name, shared.Value);
+                            ReconcileLiveObjectVariablesLocked();
+                            return;
+                        }
+                    }
+                }
+
                 FfiLiveObjectLease value = FfiLiveObjectContracts.CreateLease(contract, ptrComObject);
 
                 lock (gate)
@@ -4208,6 +4299,18 @@ namespace NativeHost
                     {
                         EnsureVariableMutationAllowed();
                         ValidateVariableName(name);
+                        if (value is FfiBridgeContractLease)
+                        {
+                            FfiBridgeContractLease shared = FindBridgeLeaseLocked(contract, ptrComObject);
+                            if (shared is not null)
+                            {
+                                value.Dispose();
+                                runspace.SessionStateProxy.SetVariable(name, shared.Value);
+                                ReconcileLiveObjectVariablesLocked();
+                                return;
+                            }
+                        }
+
                         runspace.SessionStateProxy.SetVariable(name, value.Value);
                     }
                     catch
@@ -4492,6 +4595,58 @@ namespace NativeHost
                 // walk meant a failure part-way left disposed leases still listed
                 // as live.
                 DisposeAll(dropped);
+            }
+
+            private IEnumerable<FfiLiveObjectLease> GetInvocationBoundLeasesLocked()
+            {
+                var seen = new HashSet<FfiLiveObjectLease>();
+                foreach (FfiLiveObjectLease lease in liveObjectVariables.Values)
+                {
+                    if (lease.RequiresInvocationBinding && seen.Add(lease))
+                    {
+                        yield return lease;
+                    }
+                }
+            }
+
+            private FfiBridgeContractLease FindBridgeLeaseLocked(
+                PowerShellLiveObjectContract contract,
+                IntPtr ptrComObject)
+            {
+                var seen = new HashSet<FfiLiveObjectLease>();
+                foreach (FfiLiveObjectLease lease in liveObjectVariables.Values)
+                {
+                    if (seen.Add(lease) &&
+                        lease is FfiBridgeContractLease bridge &&
+                        bridge.Matches(contract, ptrComObject))
+                    {
+                        return bridge;
+                    }
+                }
+
+                return null;
+            }
+
+            private void ReplaceLiveObjectReferencesLocked(object previous, object current)
+            {
+                if (ReferenceEquals(previous, current))
+                {
+                    return;
+                }
+
+                PSVariable[] variables = runspace.SessionStateProxy.InvokeProvider.Item
+                    .Get("Variable:\\*")
+                    .Select(static variable => variable.BaseObject as PSVariable)
+                    .Where(static variable => variable is not null)
+                    .Select(static variable => variable!)
+                    .ToArray();
+                foreach (PSVariable variable in variables)
+                {
+                    if (ReferenceEquals(variable.Value, previous))
+                    {
+                        variable.Value = current;
+                    }
+                }
             }
 
             private static object TryReadLeaseValue(FfiLiveObjectLease lease)

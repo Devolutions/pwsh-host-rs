@@ -15,6 +15,7 @@ internal static class BridgeContractPayloadEmitter
     internal static void Emit(StringBuilder source, BridgeContractModel contract)
     {
         EmitClient(source, contract);
+        EmitBinding(source, contract);
         foreach (BridgeObjectModel model in contract.Objects)
         {
             EmitWrapper(source, contract, model);
@@ -43,6 +44,10 @@ internal static class BridgeContractPayloadEmitter
         source.AppendLine("    }");
         source.AppendLine();
         source.AppendLine("    internal ulong RootObjectId { get; private set; }");
+        source.AppendLine();
+        source.AppendLine("    internal ulong LeaseId => leaseId;");
+        source.AppendLine();
+        source.AppendLine("    internal uint Generation => generation;");
         source.AppendLine();
         source.AppendLine("    /// <summary>Performs the lease-open handshake and verifies the echoed descriptor hash.</summary>");
         source.Append("    internal static ").Append(client).Append(" Open(").Append(BridgeTypeNames.Transport).AppendLine(" transport)");
@@ -196,6 +201,227 @@ internal static class BridgeContractPayloadEmitter
         }
 
         source.Append("    internal ").Append(root).Append(" Root => Resolve").Append(root).AppendLine("(RootObjectId);");
+        source.AppendLine("}");
+        source.AppendLine();
+    }
+
+    private static void EmitBinding(StringBuilder source, BridgeContractModel contract)
+    {
+        string binding = BridgeNames.Binding(contract);
+        string client = BridgeNames.Client(contract);
+        string root = BridgeNames.Wrapper(contract.RootObject);
+        string constants = BridgeNames.Contract(contract);
+        string transport = contract.TransportInterfaceType;
+        source.Append("internal sealed class ").Append(binding).AppendLine();
+        source.AppendLine("{");
+        source.AppendLine("    private static readonly global::System.Runtime.InteropServices.Marshalling.StrategyBasedComWrappers ComWrappers = new();");
+        source.AppendLine("    private readonly object gate = new();");
+        source.AppendLine("    private readonly global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeContractSink sink;");
+        source.AppendLine("    private global::System.Runtime.InteropServices.Marshalling.ComObject? sinkComObject;");
+        source.Append("    private ").Append(client).AppendLine("? client;");
+        source.Append("    private ").Append(transport).AppendLine("? contract;");
+        source.AppendLine("    private global::System.Runtime.InteropServices.Marshalling.ComObject? contractComObject;");
+        source.AppendLine("    private int bound;");
+        source.AppendLine("    private int disposed;");
+        source.AppendLine();
+        source.Append("    private ").Append(binding).Append("(")
+            .Append("global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeContractSink sink, ")
+            .AppendLine("global::System.Runtime.InteropServices.Marshalling.ComObject sinkComObject)");
+        source.AppendLine("    {");
+        source.AppendLine("        this.sink = sink;");
+        source.AppendLine("        this.sinkComObject = sinkComObject;");
+        source.AppendLine("    }");
+        source.AppendLine();
+        source.Append("    internal static ").Append(binding).Append(" Create(")
+            .Append("global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeContractSink sink, ")
+            .AppendLine("global::System.Runtime.InteropServices.Marshalling.ComObject sinkComObject)");
+        source.AppendLine("    {");
+        source.AppendLine("        global::System.ArgumentNullException.ThrowIfNull(sink);");
+        source.AppendLine("        global::System.ArgumentNullException.ThrowIfNull(sinkComObject);");
+        source.AppendLine("        try");
+        source.AppendLine("        {");
+        source.AppendLine("            global::System.Guid expected = global::System.Guid.Parse(" + constants + ".TransportInterfaceId);");
+        source.AppendLine("            byte[] identity = expected.ToByteArray();");
+        source.AppendLine("            ulong expectedLow = global::System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(identity);");
+        source.AppendLine("            ulong expectedHigh = global::System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(identity.AsSpan(8));");
+        source.AppendLine("            int status = sink.GetRequestedContract(out ulong requestedLow, out ulong requestedHigh, out ushort requestedMajor, out ushort requestedMinor);");
+        source.AppendLine("            if (status != global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeStatus.Success)");
+        source.AppendLine("            {");
+        source.AppendLine("                throw global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeException.FromStatus(status, " + constants + ".ContractId);");
+        source.AppendLine("            }");
+        source.AppendLine();
+        source.Append("            if (requestedLow != expectedLow || requestedHigh != expectedHigh || requestedMajor != ")
+            .Append(constants).Append(".MajorVersion || requestedMinor != ").Append(constants).AppendLine(".MinorVersion)");
+        source.AppendLine("            {");
+        source.AppendLine("                throw new global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeException(");
+        source.AppendLine("                    global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeStatus.ContractMismatch,");
+        source.AppendLine("                    \"The bridge sink requested a different contract identity.\");");
+        source.AppendLine("            }");
+        source.AppendLine();
+        source.Append("            return new ").Append(binding).AppendLine("(sink, sinkComObject);");
+        source.AppendLine("        }");
+        source.AppendLine("        catch");
+        source.AppendLine("        {");
+        source.AppendLine("            sinkComObject.FinalRelease();");
+        source.AppendLine("            throw;");
+        source.AppendLine("        }");
+        source.AppendLine("    }");
+        source.AppendLine();
+        source.Append("    internal static void Declare(")
+            .Append("global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeContractSink sink, nint callback)").AppendLine();
+        source.AppendLine("    {");
+        source.AppendLine("        global::System.ArgumentNullException.ThrowIfNull(sink);");
+        source.AppendLine("        if (callback == 0)");
+        source.AppendLine("        {");
+        source.AppendLine("            throw new global::System.ArgumentException(\"The bridge callback pointer is null.\", nameof(callback));");
+        source.AppendLine("        }");
+        source.AppendLine();
+        source.AppendLine("        global::System.Guid expected = global::System.Guid.Parse(" + constants + ".TransportInterfaceId);");
+        source.AppendLine("        byte[] identity = expected.ToByteArray();");
+        source.AppendLine("        ulong expectedLow = global::System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(identity);");
+        source.AppendLine("        ulong expectedHigh = global::System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(identity.AsSpan(8));");
+        source.AppendLine("        int status = sink.Declare(expectedLow, expectedHigh, checked((ushort)" + constants + ".MajorVersion), checked((ushort)" + constants + ".MinorVersion), callback);");
+        source.AppendLine("        if (status != global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeStatus.Success)");
+        source.AppendLine("        {");
+        source.AppendLine("            throw global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeException.FromStatus(status, " + constants + ".ContractId);");
+        source.AppendLine("        }");
+        source.AppendLine("    }");
+        source.AppendLine();
+        source.AppendLine("    public object Bind()");
+        source.AppendLine("    {");
+        source.AppendLine("        if (global::System.Threading.Volatile.Read(ref disposed) != 0)");
+        source.AppendLine("        {");
+        source.AppendLine("            throw new global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeException(");
+        source.AppendLine("                global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeStatus.AccessDenied,");
+        source.AppendLine("                \"The bridge payload proxy was released; rediscover the contract before binding it again.\");");
+        source.AppendLine("        }");
+        source.AppendLine();
+        source.AppendLine("        lock (gate)");
+        source.AppendLine("        {");
+        source.AppendLine("            if (bound != 0)");
+        source.AppendLine("            {");
+        source.AppendLine("                return client!.Root;");
+        source.AppendLine("            }");
+        source.AppendLine();
+        source.AppendLine("            nint pointer = 0;");
+        source.AppendLine("            global::System.Runtime.InteropServices.Marshalling.ComObject? imported = null;");
+        source.AppendLine("            try");
+        source.AppendLine("            {");
+        source.AppendLine("                int status = sink.GetConsumerContract(out pointer);");
+        source.AppendLine("                if (status != global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeStatus.Success || pointer == 0)");
+        source.AppendLine("                {");
+        source.AppendLine("                    throw global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeException.FromStatus(status, " + constants + ".ContractId);");
+        source.AppendLine("                }");
+        source.AppendLine();
+        source.AppendLine("                object projected = ComWrappers.GetOrCreateObjectForComInstance(pointer, global::System.Runtime.InteropServices.CreateObjectFlags.UniqueInstance);");
+        source.AppendLine("                imported = projected as global::System.Runtime.InteropServices.Marshalling.ComObject");
+        source.AppendLine("                    ?? throw new global::System.InvalidOperationException(\"The bridge sink did not return a source-generated COM transport.\");");
+        source.Append("                ").Append(transport).Append(" typed = projected as ").Append(transport)
+            .AppendLine(" ?? throw new global::System.InvalidOperationException(\"The bridge sink returned the wrong transport interface.\");");
+        source.AppendLine("                var bridgeTransport = new global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeComTransport(");
+        source.AppendLine("                    typed.Invoke,");
+        source.AppendLine("                    projected as global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeEventSink);");
+        source.Append("                ").Append(client).Append(" opened = ").Append(client).AppendLine(".Open(bridgeTransport);");
+        source.AppendLine("                client = opened;");
+        source.AppendLine("                contract = typed;");
+        source.AppendLine("                contractComObject = imported;");
+        source.AppendLine("                bound = 1;");
+        source.AppendLine("                imported = null;");
+        source.AppendLine("                return opened.Root;");
+        source.AppendLine("            }");
+        source.AppendLine("            finally");
+        source.AppendLine("            {");
+        source.AppendLine("                if (pointer != 0)");
+        source.AppendLine("                {");
+        source.AppendLine("                    global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeComReference.Release(pointer);");
+        source.AppendLine("                }");
+        source.AppendLine();
+        source.AppendLine("                imported?.FinalRelease();");
+        source.AppendLine("            }");
+        source.AppendLine("        }");
+        source.AppendLine("    }");
+        source.AppendLine();
+        source.AppendLine("    public void Unbind()");
+        source.AppendLine("    {");
+        source.Append(client).AppendLine("? previousClient;");
+        source.Append(transport).AppendLine("? previousContract;");
+        source.AppendLine("        global::System.Runtime.InteropServices.Marshalling.ComObject? previousComObject;");
+        source.AppendLine("        lock (gate)");
+        source.AppendLine("        {");
+        source.AppendLine("            if (bound == 0)");
+        source.AppendLine("            {");
+        source.AppendLine("                return;");
+        source.AppendLine("            }");
+        source.AppendLine();
+        source.AppendLine("            bound = 0;");
+        source.AppendLine("            previousClient = client;");
+        source.AppendLine("            previousContract = contract;");
+        source.AppendLine("            previousComObject = contractComObject;");
+        source.AppendLine("            client = null;");
+        source.AppendLine("            contract = null;");
+        source.AppendLine("            contractComObject = null;");
+        source.AppendLine("        }");
+        source.AppendLine();
+        source.AppendLine("        global::System.Exception? failure = null;");
+        source.AppendLine("        try");
+        source.AppendLine("        {");
+        source.AppendLine("            previousClient?.Close();");
+        source.AppendLine("            if (previousContract is not null && previousClient is not null)");
+        source.AppendLine("            {");
+        source.AppendLine("                int status = previousContract.CloseLease(previousClient.LeaseId, previousClient.Generation);");
+        source.AppendLine("                if (status != global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeStatus.Success)");
+        source.AppendLine("                {");
+        source.AppendLine("                    failure = global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeException.FromStatus(status, " + constants + ".ContractId);");
+        source.AppendLine("                }");
+        source.AppendLine("            }");
+        source.AppendLine("        }");
+        source.AppendLine("        catch (global::System.Exception exception)");
+        source.AppendLine("        {");
+        source.AppendLine("            failure = exception;");
+        source.AppendLine("        }");
+        source.AppendLine("        finally");
+        source.AppendLine("        {");
+        source.AppendLine("            previousComObject?.FinalRelease();");
+        source.AppendLine("        }");
+        source.AppendLine();
+        source.AppendLine("        if (failure is not null)");
+        source.AppendLine("        {");
+        source.AppendLine("            throw failure;");
+        source.AppendLine("        }");
+        source.AppendLine("    }");
+        source.AppendLine();
+        source.AppendLine("    public void Dispose()");
+        source.AppendLine("    {");
+        source.AppendLine("        if (global::System.Threading.Interlocked.Exchange(ref disposed, 1) != 0)");
+        source.AppendLine("        {");
+        source.AppendLine("            return;");
+        source.AppendLine("        }");
+        source.AppendLine();
+        source.AppendLine("        global::System.Exception? failure = null;");
+        source.AppendLine("        try");
+        source.AppendLine("        {");
+        source.AppendLine("            Unbind();");
+        source.AppendLine("        }");
+        source.AppendLine("        catch (global::System.Exception exception)");
+        source.AppendLine("        {");
+        source.AppendLine("            failure = exception;");
+        source.AppendLine("        }");
+        source.AppendLine("        finally");
+        source.AppendLine("        {");
+        source.AppendLine("            global::System.Runtime.InteropServices.Marshalling.ComObject? previous;");
+        source.AppendLine("            lock (gate)");
+        source.AppendLine("            {");
+        source.AppendLine("                previous = sinkComObject;");
+        source.AppendLine("                sinkComObject = null;");
+        source.AppendLine("            }");
+        source.AppendLine("            previous?.FinalRelease();");
+        source.AppendLine("        }");
+        source.AppendLine();
+        source.AppendLine("        if (failure is not null)");
+        source.AppendLine("        {");
+        source.AppendLine("            throw failure;");
+        source.AppendLine("        }");
+        source.AppendLine("    }");
         source.AppendLine("}");
         source.AppendLine();
     }
@@ -417,5 +643,3 @@ internal static class BridgeContractPayloadEmitter
     private static string MethodName(BridgeMemberModel member) =>
         member.Name == "get_Item" ? "GetAt" : member.Name;
 }
-
-

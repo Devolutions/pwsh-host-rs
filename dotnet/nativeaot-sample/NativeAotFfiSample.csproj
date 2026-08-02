@@ -12,6 +12,7 @@
   <ItemGroup>
     <ProjectReference Include="..\live-contracts\Devolutions.MultiPwsh.LiveContracts.csproj" />
     <ProjectReference Include="..\sdk-ffi\Devolutions.MultiPwsh.Sdk.csproj" />
+    <ProjectReference Include="..\bridge-contract-test-host\BridgeContractTestHost.csproj" />
     <ProjectReference Include="..\live-contract-generator\Devolutions.MultiPwsh.LiveContract.Generator.csproj"
                       OutputItemType="Analyzer"
                       ReferenceOutputAssembly="false" />
@@ -30,6 +31,8 @@
     <PwshFfiNativeLibrary>$(RepositoryRoot)\target\release\multi_pwsh_sdk.dll</PwshFfiNativeLibrary>
     <LiveObjectTestPackProject>$(MSBuildThisFileDirectory)..\live-object-test-pack\LiveObjectTestPack.csproj</LiveObjectTestPackProject>
     <LiveObjectTestPackAssembly>$(MSBuildThisFileDirectory)..\live-object-test-pack\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.LiveObject.TestPack.dll</LiveObjectTestPackAssembly>
+    <BridgeContractTestPackProject>$(MSBuildThisFileDirectory)..\bridge-contract-test-pack\BridgeContractTestPack.csproj</BridgeContractTestPackProject>
+    <BridgeContractTestPackAssembly>$(MSBuildThisFileDirectory)..\bridge-contract-test-pack\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.BridgeContract.TestPack.dll</BridgeContractTestPackAssembly>
     <IncompatibleLiveObjectTestPackProject>$(MSBuildThisFileDirectory)..\live-object-incompatible-test-pack\Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.csproj</IncompatibleLiveObjectTestPackProject>
     <IncompatibleLiveObjectTestPackAssembly>$(MSBuildThisFileDirectory)..\live-object-incompatible-test-pack\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.dll</IncompatibleLiveObjectTestPackAssembly>
   </PropertyGroup>
@@ -37,6 +40,9 @@
   <Target Name="BuildAndStagePwshFfiNativeLibrary" BeforeTargets="Publish">
     <Exec Command="cargo build --release -p pwsh-sdk-ffi" WorkingDirectory="$(RepositoryRoot)" />
     <MSBuild Projects="$(LiveObjectTestPackProject)"
+             Targets="Restore;Build"
+             Properties="Configuration=$(Configuration)" />
+    <MSBuild Projects="$(BridgeContractTestPackProject)"
              Targets="Restore;Build"
              Properties="Configuration=$(Configuration)" />
     <MSBuild Projects="$(IncompatibleLiveObjectTestPackProject)"
@@ -48,6 +54,8 @@
     <Copy SourceFiles="$(PwshFfiNativeLibrary)" DestinationFiles="$(PublishDir)multi-pwsh-sdk.dll" />
     <Copy SourceFiles="$(LiveObjectTestPackAssembly)"
           DestinationFiles="$(PublishDir)Devolutions.MultiPwsh.LiveObject.TestPack.dll" />
+    <Copy SourceFiles="$(BridgeContractTestPackAssembly)"
+          DestinationFiles="$(PublishDir)Devolutions.MultiPwsh.BridgeContract.TestPack.dll" />
     <Copy SourceFiles="$(IncompatibleLiveObjectTestPackAssembly)"
           DestinationFiles="$(PublishDir)Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.dll" />
   </Target>

@@ -2241,14 +2241,25 @@ exercised shape rather than a new capability. Neither side ever forwards an
 interface identifier it does not know: the payload exposes one fixed interface it
 owns, and the pack consumes one fixed interface it was generated against.
 
-**The handshake exchanges two interfaces, not one.** A sink the payload owns
-carries pack-to-payload traffic — asking for the requested identity, and asking
-for the contract object. Bind and unbind travel the other way: the payload knows
-where an invocation begins and ends, and has to tell the pack to open and close
-its lease. All the payload holds after `CreatePayloadProxy` is an opaque handle
-it cannot call, so the pack must hand back its own interface when it declares.
-Both interfaces are fixed and known to both sides at compile time, which is what
-keeps this small.
+**The handshake exchanges two fixed COM interfaces, not one.**
+`IPowerShellBridgeContractSink`, which the payload owns, exposes
+`GetRequestedContract`, `Declare`, and `GetConsumerContract`. The generated pack
+projects that sink through its payload-local `ComWrappers`, verifies the
+requested transport IID/version, creates its generated binding, and declares a
+`[GeneratedComClass] IPowerShellBridgePayloadCallback`. The callback exposes
+`Bind(out rootHandle)`, `Unbind`, and `ReleaseRoot(rootHandle)`.
+
+The callback is necessary because the payload knows the invocation boundary, but
+the pack owns the generated root wrapper. On `Bind`, the callback opens the
+generated client, roots its root wrapper in one `GCHandle`, and returns that
+owned handle. The payload installs the root in direct runspace variables. On
+unbind it first publishes the unbound placeholder, then calls `Unbind` so the
+generated client tombstones every escaped wrapper, and finally calls
+`ReleaseRoot`. A close failure therefore cannot leave the live root reachable.
+The callback permits only one active root handle; the sink owns the obligation to
+release the handle after a successful bind. Both interfaces are fixed and known
+to both sides at compile time, so no plain managed interface crosses the
+payload-pack assembly boundary and no arbitrary-IID forwarding is required.
 
 **The substitution point already exists and already has what it needs.** The
 registry's `CreateLease` receives the contract descriptor alongside the pointer,
@@ -2266,35 +2277,33 @@ rather than something a pack has to infer from a failed `QueryInterface`.
 **Discovery and lifetime are separate mechanisms inside one increment.** The
 proxy is created once, when the live-object variable is set; the lease is opened
 at each invocation bind and closed at unbind. Discovery is a `QueryInterface`
-plus a declaration over metadata that never changes — contract identity,
-descriptor hash, variable name, frame bounds — so repeating it per invocation
-would buy nothing and cost a round trip per invocation per contract. The two can
-hold different lifetimes because `liveObjectVariables` already retains a proxy
-across invocations and reconciles after each one, releasing at session teardown.
-That was verified rather than assumed, and it returned three constraints this
-increment must respect, recorded above: retention is by exact reference,
-reconciliation used to be non-transactional and is now fixed, and the invocation
-window has two escape hatches. The third is the sharpest: lease close must be
-idempotent and exception-safe **on its own terms**, because `Stop` alone does not
-close the window and `Cleanup` marks itself done before doing any work. Placing a
-close in
-that path and assuming it runs is not enough.
+plus a declaration over metadata that never changes — contract identity and
+version — so repeating it per invocation would buy nothing and cost a round trip
+per invocation per contract. The descriptor hash is compared during `Open`, not
+doubled in this handshake. The two can hold different lifetimes because
+`liveObjectVariables` retains a proxy across invocations and reconciles after
+each one, releasing at session teardown.
 
-**The declaration state machine.** The registry accepts any callback that
-returns a non-zero proxy, so today it cannot tell a missing declaration from a
-duplicated one, or reject traffic that arrives before binding finished. The
-handshake is therefore a state machine with exactly one legal path —
-`Created -> Declared -> Bound -> Unbound` — and every other transition is a
-defined failure rather than an unobserved one:
+Binding and cleanup retain their own unwind guarantees. A failed bind releases
+the callback's root handle and returns the lease to `Unbound`; invocation cleanup
+keeps variable restoration and `EndInvocation` in must-run `finally` paths.
+`Stop` alone does not close the window, so only completion or disposal can run
+the unbind transition.
+
+**The declaration state machine.** The sink accepts exactly one matching
+declaration, retains a projected callback COM object, and rejects traffic before
+the declaration or outside a bind. The handshake therefore has exactly one legal
+path — `Created -> Declared -> Bound -> Unbound` — and every other transition is
+a defined failure rather than an unobserved one:
 
 | From | Event | To | Otherwise |
 | --- | --- | --- | --- |
-| `Created` | `Declare` once, matching the requested identity | `Declared` | A second `Declare`, or one naming a contract that was not requested, fails the publish |
+| `Created` | `Declare` once, matching the requested identity and callback | `Declared` | A second `Declare`, a null callback, or a different identity fails the publish |
 | `Created` | anything else | — | Traffic before declaration fails; the pack has not yet said what it is |
-| `Declared` | `Open` at invocation start | `Bound` | A bind naming a proxy that reconciliation already released fails with a named status; re-discovery is explicit |
-| `Declared` | `Open` while another proxy over the same broker is bound | `Bound` | Receives the lease already open rather than being refused |
-| `Bound` | `Close` at invocation end | `Unbound` | A second `Close` is the same first-caller-wins transition, not an error |
-| `Unbound` | `Open` at the next invocation | `Bound` | — |
+| `Declared` | `Bind` at invocation start | `Bound` | A bind naming a proxy that reconciliation already released fails with a named status; re-discovery is explicit |
+| `Bound` | `Unbind` at invocation end | `Unbound` | The sink publishes the unbound state before calling pack code; a later duplicate unbind is first-caller-wins |
+| `Unbound` | `Bind` at the next invocation | `Bound` | — |
+| any live state | proxy release | `Disposed` | The consumer COM reference and projected callback are released |
 
 A pack that never declares is not silently tolerated: the publish fails and the
 variable is not set, because a proxy that never said what it is cannot be routed
@@ -2302,10 +2311,10 @@ to and would otherwise sit in the table looking healthy.
 
 **Requested identity.** A pack holding two v2 contracts cannot tell which one it
 is being asked for, because the registry stores one `create_payload_proxy` per
-pack and calls it with only a pointer. The interposed object exposes the
-requested contract identity for the pack to read **before** it declares, so
-selection is something the pack does deliberately rather than something it
-guesses from the order it was called in.
+pack and calls it with only a pointer. The sink exposes the requested contract
+identity for the pack to read **before** it declares, so selection is something
+the pack does deliberately rather than something it guesses from the order it
+was called in.
 
 Identity is the interface identifier and version, and **not** the descriptor
 hash. The second pass asked for the hash here and it cannot be had: the inbound
@@ -2317,14 +2326,14 @@ hash is already compared during `Open` and a mismatch is already rejected there
 with a status that names it. Checking it twice would have bought a slightly
 earlier message at the cost of a breaking ABI change.
 
-**Several proxies over one broker share one lease.** The same broker can be
-assigned to more than one variable — nothing prevents it, and each assignment
-creates a distinct payload proxy — while a consumer lease table deliberately
-serves one lease at a time, because one consumer broker owns one lease and
-closure is first-wins rather than reference counted. A second bind must
-therefore **receive the lease that is already open**, not be refused. Refusing it
-leaves the first proxy `Bound` and the second permanently unable to reach a
-state, which is a stuck handshake rather than a defined failure.
+**Several variables over one broker share one lease.** The same broker can be
+assigned to more than one variable. `PowerShellLiveObject<TContract>` exports it
+through its one static source-generated `ComWrappers` instance, so repeated
+assignments for the same `TContract` and broker produce the same transport
+pointer. The registry compares that pointer while the first sink retains an
+owned COM reference, then reuses the existing bridge proxy instead of creating a
+second one. The NativeAOT acceptance fixture counts `Open` frames and proves two
+variables produce one open per invocation.
 
 Sharing is coherent precisely because leases are invocation-scoped: every proxy
 over one broker binds and unbinds inside the same invocation, so a first-wins

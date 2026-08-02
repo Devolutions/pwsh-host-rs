@@ -7,6 +7,11 @@ using System.Runtime.InteropServices;
 namespace Devolutions.PowerShell.Ffi.LiveObjects;
 
 [Flags]
+/// <summary>
+/// Describes the direction of a live-object contract and, for generated Bridge
+/// Contract v2 surfaces, carries the protocol marker paired with
+/// <see cref="ConsumerToSession"/>.
+/// </summary>
 public enum PowerShellLiveObjectDirection : uint
 {
     None = 0,

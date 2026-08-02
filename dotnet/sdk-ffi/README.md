@@ -206,11 +206,19 @@ accepts a mismatched artifact. There is no contract-layer minor compatibility
 lane, no member negotiation, and no additive-member tolerance.
 
 Request, release, and lease-open frames travel over the contract's COM transport
-through the existing consumer-to-session pack registry. **Duplex broker delivery
-of declared events is not wired yet**: a payload pack receives only a
-consumer-owned `IUnknown`, so an event sink is obtained by `QueryInterface` and
-a consumer that supplies one must return without blocking. A lease with no sink
-fails an event call deterministically instead of degrading silently.
+through the existing consumer-to-session pack registry. A v2 descriptor declares
+`ConsumerToSession | BridgeContract`; only for that marker the payload supplies
+its fixed `IPowerShellBridgeContractSink` to `CreatePayloadProxy`, leaving v1
+packs bit-for-bit unchanged. The generated pack binding reads the requested
+IID/version, declares its fixed `IPowerShellBridgePayloadCallback`, and receives
+an invocation-scoped generated root through an owned GC handle. The payload
+unbinds that root at completion before releasing the handle, so escaped wrappers
+are deterministically revoked.
+
+**Duplex broker delivery of declared events is not wired yet**: a consumer event
+sink is obtained by `QueryInterface` on the contract transport and a consumer
+that supplies one must return without blocking. A lease with no sink fails an
+event call deterministically instead of degrading silently.
 
 ### One channel, one purpose
 

@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Devolutions.MultiPwsh.BridgeTest;
 using Devolutions.PowerShell.Ffi;
 using Devolutions.PowerShell.Ffi.LiveObjects;
 using NativeAotFfiSample;
@@ -14,6 +15,9 @@ string contractPackPath = System.IO.Path.Combine(
 string incompatibleContractPackPath = System.IO.Path.Combine(
     AppContext.BaseDirectory,
     "Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.dll");
+string bridgeContractPackPath = System.IO.Path.Combine(
+    AppContext.BaseDirectory,
+    "Devolutions.MultiPwsh.BridgeContract.TestPack.dll");
 if (!System.IO.File.Exists(contractPackPath))
 {
     Console.Error.WriteLine("NativeAOT facade did not publish the external live-object contract pack.");
@@ -24,12 +28,20 @@ if (!System.IO.File.Exists(incompatibleContractPackPath))
     Console.Error.WriteLine("NativeAOT facade did not publish the incompatible live-object contract pack fixture.");
     return 1;
 }
+if (!System.IO.File.Exists(bridgeContractPackPath))
+{
+    Console.Error.WriteLine("NativeAOT facade did not publish the bridge contract test pack.");
+    return 1;
+}
 
 PowerShellLiveObjectContractPack[] contractPacks =
 [
     new PowerShellLiveObjectContractPack(
         contractPackPath,
         "Devolutions.MultiPwsh.LiveObject.TestPack.LiveObjectTestPack, Devolutions.MultiPwsh.LiveObject.TestPack"),
+    new PowerShellLiveObjectContractPack(
+        bridgeContractPackPath,
+        "Devolutions.MultiPwsh.BridgeTest.BridgeContractTestPack, Devolutions.MultiPwsh.BridgeContract.TestPack"),
 ];
 
 if (args.Length == 2 && args[1].StartsWith("--expect-rejected-contract-pack:", StringComparison.Ordinal))
@@ -455,6 +467,103 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
         {
             Console.Error.WriteLine(
                 $"NativeAOT facade did not preserve the expected leaked-child teardown probe behavior: {lateAccessDescription}");
+            return 1;
+        }
+    }
+
+    using (var bridgeBroker = new BridgeTestCountBroker(41))
+    using (var bridgeLiveObject = new PowerShellLiveObject<IPowerShellBridgeTestCountTransport>(
+        new PowerShellLiveObjectContract(
+            typeof(IPowerShellBridgeTestCountTransport).GUID,
+            majorVersion: 1,
+            minorVersion: 0,
+            PowerShellLiveObjectDirection.ConsumerToSession | PowerShellLiveObjectDirection.BridgeContract),
+        bridgeBroker))
+    {
+        // Both variables refer to one consumer COM identity. The payload must
+        // create one discovery proxy and share its one invocation lease rather
+        // than making the dispatcher reject a second Open.
+        session.SetLiveObjectVariable("bridgeOne", bridgeLiveObject);
+        session.SetLiveObjectVariable("bridgeTwo", bridgeLiveObject);
+
+        using PowerShell firstBridgeInvocation = session.CreatePowerShell();
+        PowerShellInvocationResult firstBridgeOutput = firstBridgeInvocation
+            .AddScript("\"$($bridgeOne.Increment())|$($bridgeTwo.Count)\"")
+            .Invoke();
+        if (firstBridgeOutput.Output.Records.Count != 1 ||
+            firstBridgeOutput.Output.Records[0].DisplayText != "42|42" ||
+            bridgeBroker.Count != 42 ||
+            bridgeBroker.OpenedLeaseCount != 1)
+        {
+            Console.Error.WriteLine("NativeAOT facade did not bind one shared bridge lease for two payload variables.");
+            return 1;
+        }
+
+        // A fresh invocation must reopen a fresh lease after the prior unbind.
+        using PowerShell secondBridgeInvocation = session.CreatePowerShell();
+        PowerShellInvocationResult secondBridgeOutput = secondBridgeInvocation
+            .AddScript("\"$($bridgeOne.Increment())|$($bridgeTwo.Count)\"")
+            .Invoke();
+        if (secondBridgeOutput.Output.Records.Count != 1 ||
+            secondBridgeOutput.Output.Records[0].DisplayText != "43|43" ||
+            bridgeBroker.Count != 43 ||
+            bridgeBroker.OpenedLeaseCount != 2)
+        {
+            Console.Error.WriteLine("NativeAOT facade did not rebind the bridge contract for a later invocation.");
+            return 1;
+        }
+
+        // The list prevents direct-reference reconciliation from rewriting the
+        // captured root. Its generated client must therefore tombstone itself at
+        // unbind instead of becoming the v1-style silently inert wrapper.
+        using PowerShell captureBridgeRoot = session.CreatePowerShell();
+        PowerShellInvocationResult captureBridgeOutput = captureBridgeRoot
+            .AddScript("""
+                $global:bridgeEscaped = [System.Collections.Generic.List[object]]::new()
+                [void]$global:bridgeEscaped.Add($bridgeOne)
+                $bridgeOne.Increment()
+                """)
+            .Invoke();
+        if (captureBridgeOutput.Output.Records.Count != 1 ||
+            captureBridgeOutput.Output.Records[0].DisplayText != "44" ||
+            bridgeBroker.Count != 44)
+        {
+            Console.Error.WriteLine("NativeAOT facade could not capture the bridge root for its tombstone probe.");
+            return 1;
+        }
+
+        using PowerShell readEscapedBridgeRoot = session.CreatePowerShell();
+        PowerShellInvocationResult escapedBridgeOutput = readEscapedBridgeRoot
+            .AddScript("""
+                try
+                {
+                    $null = $global:bridgeEscaped[0].Increment()
+                    'unexpected'
+                }
+                catch
+                {
+                    $_.Exception.Message
+                }
+                """)
+            .Invoke();
+        using PowerShell clearEscapedBridgeRoot = session.CreatePowerShell();
+        _ = clearEscapedBridgeRoot
+            .AddScript("Remove-Variable -Scope Global -Name bridgeEscaped -ErrorAction SilentlyContinue")
+            .Invoke();
+        if (escapedBridgeOutput.Output.Records.Count != 1 ||
+            !escapedBridgeOutput.Output.Records[0].DisplayText.Contains("lease has been released", StringComparison.Ordinal))
+        {
+            string observed = escapedBridgeOutput.Output.Records.Count == 1
+                ? escapedBridgeOutput.Output.Records[0].DisplayText
+                : $"records={escapedBridgeOutput.Output.Records.Count}; errors={escapedBridgeOutput.Errors.Records.Count}";
+            Console.Error.WriteLine($"NativeAOT facade did not tombstone an escaped bridge root after invocation unbind: {observed}");
+            return 1;
+        }
+
+        if (!session.RemoveVariable("bridgeOne") ||
+            !session.RemoveVariable("bridgeTwo"))
+        {
+            Console.Error.WriteLine("NativeAOT facade did not release the bridge contract variables.");
             return 1;
         }
     }

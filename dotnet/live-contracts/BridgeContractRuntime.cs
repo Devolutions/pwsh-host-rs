@@ -7,6 +7,100 @@ using System.Runtime.InteropServices.Marshalling;
 namespace Devolutions.PowerShell.Ffi.LiveObjects;
 
 /// <summary>
+/// Fixed payload-owned COM handshake for a generated Bridge Contract v2 pack.
+/// The existing contract-pack ABI passes this object in place of the consumer
+/// contract object only for descriptors marked <c>BridgeContract</c>.
+/// </summary>
+[GeneratedComInterface]
+[Guid("C30D32FE-91ED-4D39-A15A-F87C4A6E5CD4")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public partial interface IPowerShellBridgeContractSink
+{
+    /// <summary>Reads the descriptor identity the payload is asking the pack to project.</summary>
+    [PreserveSig]
+    int GetRequestedContract(
+        out ulong interfaceIdLow,
+        out ulong interfaceIdHigh,
+        out ushort majorVersion,
+        out ushort minorVersion);
+
+    /// <summary>
+    /// Declares the one contract this proxy represents. It succeeds exactly once
+    /// and only when the supplied identity matches the requested contract.
+    /// </summary>
+    [PreserveSig]
+    int Declare(
+        ulong interfaceIdLow,
+        ulong interfaceIdHigh,
+        ushort majorVersion,
+        ushort minorVersion,
+        nint callback);
+
+    /// <summary>
+    /// Returns an owned COM reference to the consumer's declared transport while
+    /// the payload has bound this proxy to an invocation.
+    /// </summary>
+    [PreserveSig]
+    int GetConsumerContract(out nint contract);
+}
+
+/// <summary>
+/// Fixed pack-owned callback the payload uses to bind and unbind one invocation
+/// after the pack has declared its proxy.
+/// </summary>
+/// <remarks>
+/// Contract packs compile a payload-local copy of the shared sources, so a plain
+/// managed interface would have the wrong assembly identity on the two sides.
+/// This fixed generated-COM interface preserves the closed surface while its
+/// root handle gives the payload the script object to install for the invocation.
+/// </remarks>
+[GeneratedComInterface]
+[Guid("634BD669-E77A-4860-B688-8E53B40F794A")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public partial interface IPowerShellBridgePayloadCallback
+{
+    /// <summary>Opens one invocation lease and returns an owned GC handle to its root wrapper.</summary>
+    [PreserveSig]
+    int Bind(out nint rootHandle);
+
+    /// <summary>
+    /// Closes the current invocation's lease. Implementations must tombstone
+    /// escaped wrappers even if the consumer close operation fails.
+    /// </summary>
+    [PreserveSig]
+    int Unbind();
+
+    /// <summary>Releases the root handle returned by <see cref="Bind"/>.</summary>
+    [PreserveSig]
+    int ReleaseRoot(nint rootHandle);
+}
+
+/// <summary>Releases one transit COM reference returned by a bridge handshake.</summary>
+public static unsafe class PowerShellBridgeComReference
+{
+    /// <summary>
+    /// Releases an owned reference. The pointer must be a non-null IUnknown
+    /// reference obtained from the payload sink or from a COM wrapper factory.
+    /// </summary>
+    public static void Release(nint value)
+    {
+        if (value == 0)
+        {
+            throw new ArgumentException("A bridge COM reference is null.", nameof(value));
+        }
+
+        nint* vtable = *(nint**)value;
+        if (vtable == null || vtable[2] == 0)
+        {
+            throw new InvalidOperationException("A bridge COM reference has an invalid IUnknown vtable.");
+        }
+
+        var release = (delegate* unmanaged[MemberFunction]<nint, uint>)vtable[2];
+        _ = release(value);
+    }
+}
+
+/// <summary>
 /// One entry of a generated static member table. The table is emitted as a
 /// literal array and looked up through a generated switch, so dispatch never
 /// touches reflection, a dynamic binder, or a member name.

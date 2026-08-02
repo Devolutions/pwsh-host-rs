@@ -298,6 +298,8 @@ internal static class BridgeNames
 
     internal static string Client(BridgeContractModel contract) => Prefix(contract.Root) + "Client";
 
+    internal static string Binding(BridgeContractModel contract) => Prefix(contract.Root) + "BridgeBinding";
+
     internal static string Wrapper(BridgeObjectModel model) => Prefix(model.Symbol) + "Bridge";
 
     internal static string Value(BridgeDataModel model) => Prefix(model.Symbol) + "Value";
@@ -318,4 +320,3 @@ internal static class BridgeNames
 
     internal static string Escape(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"");
 }
-

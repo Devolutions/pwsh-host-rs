@@ -104,6 +104,7 @@ internal static class BridgeContractTests
         VerifyDescriptorParity(run, assertNoErrors);
         VerifyNoDynamicDispatch(run, assertNoErrors);
         VerifyReleaseOrdinals(run, assertNoErrors);
+        VerifyPayloadBindingSurface(run, assertNoErrors);
 
         // Every rejection is a compile-time diagnostic, never a runtime failure.
         VerifyDiagnostic(run, Valid.Replace(", MaximumUtf8Bytes = 256", string.Empty, StringComparison.Ordinal), "MPWLC016");
@@ -335,6 +336,37 @@ internal static class BridgeContractTests
     }
 
     /// <summary>
+    /// The pack-side bridge binding is generated alongside the wrappers. Keeping
+    /// this surface explicit prevents a source-only payload pack from silently
+    /// losing the fixed COM declaration and invocation-close path.
+    /// </summary>
+    private static void VerifyPayloadBindingSurface(
+        Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run,
+        Action<IEnumerable<Diagnostic>> assertNoErrors)
+    {
+        var (result, output) = run(Valid, "Payload");
+        assertNoErrors(Diagnostics(result));
+        assertNoErrors(output.GetDiagnostics());
+        string generated = Generated(result);
+        foreach (string required in new[]
+        {
+            "class SampleRootBridgeBinding",
+            "internal static void Declare(",
+            "IPowerShellBridgeContractSink sink, nint callback",
+            "sink.GetConsumerContract(out pointer)",
+            "previousClient?.Close();",
+            ".CloseLease(previousClient.LeaseId, previousClient.Generation)",
+        })
+        {
+            if (!generated.Contains(required, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"The generated payload binding must retain its fixed handshake surface: missing '{required}'.");
+            }
+        }
+    }
+
+    /// <summary>
     /// A legitimate contract type whose name merely contains "Credential" must
     /// not be rejected as secret material.
     /// </summary>
@@ -495,6 +527,5 @@ internal static class BridgeContractTests
     private static string Generated(GeneratorDriverRunResult result) =>
         string.Join(Environment.NewLine, result.GeneratedTrees.Select(static tree => tree.GetText().ToString()));
 }
-
 
 
