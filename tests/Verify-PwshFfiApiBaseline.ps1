@@ -158,6 +158,8 @@ $expectedManagedStructs = [ordered]@{
     'NativeRuntimeDiagnosticsInfo' = @{ Size = 40; Fields = @('Size|0|System.UInt32', 'BindingsAbiVersion|4|System.UInt32', 'PayloadTableSize|8|System.UIntPtr', 'PayloadTableSlotCount|16|System.UInt32', 'PayloadTableShape|20|System.UInt32', 'PowerShellFileVersionAvailable|24|System.UInt32', 'ContractPackCount|28|System.UInt32', 'Reserved|32|System.UInt32') }
     'NativeLiveObjectContractDescriptor' = @{ Size = 32; Fields = @('Size|0|System.UInt32', 'Directions|4|System.UInt32', 'InterfaceIdLow|8|System.UInt64', 'InterfaceIdHigh|16|System.UInt64', 'MajorVersion|24|System.UInt16', 'MinorVersion|26|System.UInt16', 'Reserved|28|System.UInt32') }
     'NativeLiveObjectContractPackApi' = @{ Size = 40; Fields = @('Size|0|System.UIntPtr', 'AbiVersion|8|System.UInt32', 'ContractCount|12|System.UInt32', 'Contracts|16|Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor*', 'CreatePayloadProxy|24|System.IntPtr', 'ReleasePayloadProxy|32|System.IntPtr') }
+    'NativeBrokerChannelOptions' = @{ Size = 24; Fields = @('Size|0|System.UInt32', 'AbiVersion|4|System.UInt32', 'MaximumInflightFrames|8|System.UInt32', 'MaximumBodyBytes|12|System.UInt32', 'DefaultDeadlineMilliseconds|16|System.UInt32', 'Flags|20|System.UInt32') }
+    'NativeBrokerFrameInfo' = @{ Size = 56; Fields = @('Size|0|System.UInt32', 'AbiVersion|4|System.UInt32', 'CorrelationId|8|System.UInt64', 'OrderingKey|16|System.UInt64', 'DeadlineEpochMilliseconds|24|System.UInt64', 'RemainingMilliseconds|32|System.UInt32', 'Kind|36|System.UInt32', 'Flags|40|System.UInt32', 'BodyLength|44|System.UInt32', 'State|48|System.UInt32', 'DroppedBefore|52|System.UInt32') }
 }
 
 Assert-Sequence -Actual @(
@@ -202,6 +204,12 @@ $expectedFacadeStatuses = [ordered]@{
     'OperationCancelled' = -11
     'OperationNotTerminal' = -12
     'UnsupportedCapability' = -17
+    'BrokerBusy' = -18
+    'BrokerNoConsumer' = -19
+    'BrokerClosed' = -20
+    'BrokerInvalidTerminalState' = -21
+    'BrokerDispatchViolation' = -22
+    'BrokerTimeout' = -23
 }
 $actualFacadeStatusNames = @($facadeInspection.Statuses.PSObject.Properties.Name)
 Assert-Equal -Actual $actualFacadeStatusNames.Count -Expected $expectedFacadeStatuses.Count -Description 'Managed FFI status enumeration count'
@@ -340,10 +348,13 @@ $expectedSessionPreflightTableSlots = @(
 $expectedRuntimeDiagnosticsTableSlots = @(
     @{ Field = 'RuntimeDiagnostics_CopyPowerShellFileVersionUtf8'; Rust = 'runtime_diagnostics_copy_power_shell_file_version_utf8_fn'; Alias = 'FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8'; Method = 'FfiRuntimeDiagnostics_CopyPowerShellFileVersionUtf8'; Signature = 'byte*,int,int*,int*,FfiCallResult*,int' }
 )
+$expectedBrokerTableSlots = @(
+    @{ Field = 'PowerShell_SetBrokerContext'; Rust = 'power_shell_set_broker_context_fn'; Alias = 'FnFfiPowerShellSetBrokerContext'; Method = 'FfiPowerShell_SetBrokerContext'; Signature = 'IntPtr,ulong,ulong,IntPtr,IntPtr,FfiCallResult*,int' }
+)
 $compactFfiBindingsSource = $ffiBindingsSource -replace '\s+', ''
-$allTableSlots = @($expectedTableSlots) + @($expectedLiveTableSlots) + @($expectedTypedResultTableSlots) + @($expectedObservedInvocationTableSlots) + @($expectedSessionPreflightTableSlots) + @($expectedRuntimeDiagnosticsTableSlots)
+$allTableSlots = @($expectedTableSlots) + @($expectedLiveTableSlots) + @($expectedTypedResultTableSlots) + @($expectedObservedInvocationTableSlots) + @($expectedSessionPreflightTableSlots) + @($expectedRuntimeDiagnosticsTableSlots) + @($expectedBrokerTableSlots)
 $ffiApiType = $bindingsAssemblyObject.GetType('NativeHost.Bindings+FfiApiV1', $true)
-Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::SizeOf([Type]$ffiApiType)) -Expected 688 -Description 'Managed FfiApiV1 size'
+Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::SizeOf([Type]$ffiApiType)) -Expected 696 -Description 'Managed FfiApiV1 size'
 $ffiApiFields = @($ffiApiType.GetFields($instanceFields) | Sort-Object MetadataToken)
 $expectedFfiApiFieldNames = @('Size', 'AbiVersion', 'FeatureFlags') + @($allTableSlots | ForEach-Object { $_.Field })
 Assert-Sequence -Actual @($ffiApiFields | ForEach-Object Name) -Expected $expectedFfiApiFieldNames -Description 'Managed FfiApiV1 slot order'
@@ -355,7 +366,7 @@ for ($index = 0; $index -lt $ffiApiFields.Count; $index++) {
     Assert-Equal -Actual (Get-ManagedTypeName $field.FieldType) -Expected $expectedType -Description "Managed FfiApiV1 '$($field.Name)' type"
 }
 
-$expectedBridgeFeatures = 'FeatureFlags=(1UL<<4)|(1UL<<5)|(1UL<<6)|FfiFeatureAsyncOperationPrimitives|FfiFeatureSessionPrimitives|FfiFeatureSessionPolling|FfiFeatureSnapshotProjections|FfiFeatureSessionConfiguration|FfiFeatureSessionVariables|FfiFeatureCapabilityRpc|FfiFeatureLiveObjectProbe|FfiFeatureLiveSessionObjectProbe|FfiFeatureLiveObjectContracts|FfiFeatureLiveStreamPolling|FfiFeatureTypedResultPaging|FfiFeatureObservedInvocation|FfiFeatureSessionPreflight|FfiFeatureRuntimeDiagnostics'
+$expectedBridgeFeatures = 'FeatureFlags=(1UL<<4)|(1UL<<5)|(1UL<<6)|FfiFeatureAsyncOperationPrimitives|FfiFeatureSessionPrimitives|FfiFeatureSessionPolling|FfiFeatureSnapshotProjections|FfiFeatureSessionConfiguration|FfiFeatureSessionVariables|FfiFeatureCapabilityRpc|FfiFeatureLiveObjectProbe|FfiFeatureLiveSessionObjectProbe|FfiFeatureLiveObjectContracts|FfiFeatureLiveStreamPolling|FfiFeatureTypedResultPaging|FfiFeatureObservedInvocation|FfiFeatureSessionPreflight|FfiFeatureRuntimeDiagnostics|FfiFeatureDuplexBrokerChannel'
 if (-not $compactFfiBindingsSource.Contains($expectedBridgeFeatures)) {
     throw 'Managed FfiApiV1 feature flags no longer advertise the checked bridge capabilities.'
 }
@@ -391,7 +402,8 @@ $expectedRustApiTableFields = @('size', 'abi_version', 'feature_flags') +
     @($expectedTypedResultTableSlots | ForEach-Object Rust) +
     @($expectedObservedInvocationTableSlots | ForEach-Object Rust) +
     @($expectedSessionPreflightTableSlots | ForEach-Object Rust) +
-    @($expectedRuntimeDiagnosticsTableSlots | ForEach-Object Rust)
+    @($expectedRuntimeDiagnosticsTableSlots | ForEach-Object Rust) +
+    @($expectedBrokerTableSlots | ForEach-Object Rust)
 Assert-Sequence -Actual $rustApiTableFields -Expected $expectedRustApiTableFields -Description 'Rust FfiApiV1 slot order'
 
 $rustBindingsTableMatch = [regex]::Match($rustBindingsSource, '(?s)pub\(crate\)\s+struct\s+FfiBindings\s*\{(?<body>.*?)\n\s*\}')
@@ -413,7 +425,8 @@ Assert-Sequence -Actual $rustBindingsFields -Expected (
         'typed_result_paging|FfiTypedResultPagingBindings',
         'observed_invocation|FfiObservedInvocationBindings',
         'session_preflight_configured_fn|FnFfiPowerShellSessionPreflightConfigured',
-        'runtime_diagnostics_copy_power_shell_file_version_utf8_fn|FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8'
+        'runtime_diagnostics_copy_power_shell_file_version_utf8_fn|FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8',
+        'power_shell_set_broker_context_fn|FnFfiPowerShellSetBrokerContext'
     )
 ) -Description 'Rust FfiBindings slot order and aliases'
 if (-not $rustFfiSource.Contains('const FEATURE_TYPED_RESULT_PAGING: u64 = 1 << 21;')) {

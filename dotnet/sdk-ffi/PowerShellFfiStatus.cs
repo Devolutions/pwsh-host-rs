@@ -17,4 +17,10 @@ public enum PowerShellFfiStatus
     OperationCancelled = -11,
     OperationNotTerminal = -12,
     UnsupportedCapability = -17,
+    BrokerBusy = -18,
+    BrokerNoConsumer = -19,
+    BrokerClosed = -20,
+    BrokerInvalidTerminalState = -21,
+    BrokerDispatchViolation = -22,
+    BrokerTimeout = -23,
 }

@@ -28,6 +28,7 @@ const FFI_FEATURE_TYPED_RESULT_PAGING: u64 = 1 << 21;
 const FFI_FEATURE_OBSERVED_INVOCATION: u64 = 1 << 22;
 const FFI_FEATURE_SESSION_PREFLIGHT: u64 = 1 << 23;
 const FFI_FEATURE_RUNTIME_DIAGNOSTICS: u64 = 1 << 24;
+const FFI_FEATURE_DUPLEX_BROKER_CHANNEL: u64 = 1 << 25;
 const FFI_REQUIRED_FEATURES: u64 = FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
     | FFI_FEATURE_SESSION_PRIMITIVES
     | FFI_FEATURE_SESSION_POLLING
@@ -42,7 +43,8 @@ const FFI_REQUIRED_FEATURES: u64 = FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
     | FFI_FEATURE_TYPED_RESULT_PAGING
     | FFI_FEATURE_OBSERVED_INVOCATION
     | FFI_FEATURE_SESSION_PREFLIGHT
-    | FFI_FEATURE_RUNTIME_DIAGNOSTICS;
+    | FFI_FEATURE_RUNTIME_DIAGNOSTICS
+    | FFI_FEATURE_DUPLEX_BROKER_CHANNEL;
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_BUFFER_TOO_SMALL: i32 = 1;
 
@@ -166,6 +168,7 @@ struct FfiApiV1 {
     observed_diagnostic_page_release_fn: *const libc::c_void,
     session_preflight_configured_fn: *const libc::c_void,
     runtime_diagnostics_copy_power_shell_file_version_utf8_fn: *const libc::c_void,
+    power_shell_set_broker_context_fn: *const libc::c_void,
 }
 
 type FnBindingsGetFfiApiV1 = unsafe extern "system" fn() -> *const FfiApiV1;
@@ -372,6 +375,14 @@ type FnFfiPowerShellSessionGetVariableSnapshot = unsafe extern "system" fn(
     *mut i32,
     *mut FfiCallResult,
 ) -> i32;
+type FnFfiPowerShellSetBrokerContext = unsafe extern "system" fn(
+    PowerShellHandle,
+    u64,
+    u64,
+    *const libc::c_void,
+    *const libc::c_void,
+    *mut FfiCallResult,
+) -> i32;
 type FnFfiPowerShellSetCapabilityContext =
     unsafe extern "system" fn(PowerShellHandle, u64, u64, *const libc::c_void, *mut FfiCallResult) -> i32;
 type FnFfiInvocationResultGetStreamTotals =
@@ -463,6 +474,7 @@ pub(crate) struct FfiBindings {
     observed_invocation: FfiObservedInvocationBindings,
     session_preflight_configured_fn: FnFfiPowerShellSessionPreflightConfigured,
     runtime_diagnostics_copy_power_shell_file_version_utf8_fn: FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8,
+    power_shell_set_broker_context_fn: FnFfiPowerShellSetBrokerContext,
 }
 
 pub struct FfiPayloadRuntimeDiagnostics {
@@ -680,6 +692,7 @@ impl FfiBindings {
             api.observed_diagnostic_page_release_fn,
             api.session_preflight_configured_fn,
             api.runtime_diagnostics_copy_power_shell_file_version_utf8_fn,
+            api.power_shell_set_broker_context_fn,
         ];
         if fields.iter().any(|field| field.is_null()) {
             return Err(Error::IO(std::io::Error::new(
@@ -988,6 +1001,11 @@ impl FfiBindings {
             session_get_variable_snapshot_fn: unsafe {
                 mem::transmute::<*const libc::c_void, FnFfiPowerShellSessionGetVariableSnapshot>(
                     api.session_get_variable_snapshot_fn,
+                )
+            },
+            power_shell_set_broker_context_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSetBrokerContext>(
+                    api.power_shell_set_broker_context_fn,
                 )
             },
             power_shell_set_capability_context_fn: unsafe {
@@ -1552,6 +1570,21 @@ impl FfiPowerShell {
                 dispatcher,
                 result,
             )
+        })
+    }
+
+    /// # Safety
+    ///
+    /// `enqueue` and `post` must remain valid for the lifetime of the configured invocation.
+    pub unsafe fn set_broker_context(
+        &self,
+        channel_handle: u64,
+        generation: u64,
+        enqueue: *const libc::c_void,
+        post: *const libc::c_void,
+    ) -> Result<(), FfiBindingError> {
+        self.call(|handle, result| unsafe {
+            (self.bindings.power_shell_set_broker_context_fn)(handle, channel_handle, generation, enqueue, post, result)
         })
     }
 
