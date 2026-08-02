@@ -92,7 +92,41 @@ internal static class BridgeRoundTripTests
         AReadPermissionCannotAuthorizeASetter(entry, bridge);
         AnUnknownOrdinalIsRejectedWithoutMutation(entry, bridge);
         AMismatchedDescriptorHashIsRejected(entry, bridge);
+        AClosedLeaseCanBeReopenedWithAFreshIdentity(entry, bridge);
         RepeatedCreateInvokeReleaseCyclesAreStable(entry, bridge);
+    }
+
+    /// <summary>
+    /// The specification says an open after closure allocates a new lease whose
+    /// identifier the process never reuses. The first implementation tombstoned
+    /// the lease but left it in the table, so the one-lease-per-broker rule
+    /// rejected every later open and a wrapper rebuilt against the same
+    /// dispatcher could never work again.
+    /// </summary>
+    private static void AClosedLeaseCanBeReopenedWithAFreshIdentity(Type entry, Type bridge)
+    {
+        var transport = new Transport(entry);
+        try
+        {
+            object first = bridge.GetMethod("Open", BindingFlags.Public | BindingFlags.Static)!.Invoke(null, [transport])!;
+            (ulong firstLease, uint firstGeneration) = transport.Lease;
+            Require(firstLease != 0UL, "the first open allocates a lease");
+            Require((string)Get(first, "ProductVersion")! == "1.2.3", "the first lease works");
+
+            transport.CloseLease();
+            RequireBridgeFailure(() => Get(first, "ProductVersion"), "the first wrapper is revoked after close");
+
+            object second = bridge.GetMethod("Open", BindingFlags.Public | BindingFlags.Static)!.Invoke(null, [transport])!;
+            (ulong secondLease, uint secondGeneration) = transport.Lease;
+            Require(secondLease != firstLease, "a reopened lease has a fresh identifier");
+            Require(secondGeneration != firstGeneration, "a reopened lease has a fresh generation");
+            Require((string)Get(second, "ProductVersion")! == "1.2.3", "the reopened lease works");
+            RequireBridgeFailure(() => Get(first, "ProductVersion"), "the old wrapper stays revoked after reopen");
+        }
+        finally
+        {
+            transport.Dispose();
+        }
     }
 
     private static void ReadsWriteAndReleaseRoundTrip(Type entry, Type bridge)

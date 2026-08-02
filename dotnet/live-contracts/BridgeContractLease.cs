@@ -227,6 +227,12 @@ public sealed class PowerShellBridgeLeaseTable
             }
 
             CloseLocked(lease);
+
+            // The closed lease is removed so a later open can allocate a fresh
+            // one. Nothing escapes by doing so: lease identifiers are
+            // process-monotonic and generations are never reused, so a wrapper
+            // holding the old pair can never match the new lease.
+            leases.Remove(leaseId);
             return PowerShellBridgeStatus.Success;
         }
     }
@@ -353,3 +359,4 @@ public sealed class PowerShellBridgeLeaseTable
         }
     }
 }
+

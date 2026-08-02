@@ -1823,66 +1823,112 @@ must be able to hand a pack a broker trampoline. The concrete shape follows.
 
 #### Planned: the v2 broker binding
 
-`NativeLiveObjectContractPackApi` already validates `Size` header-first and
-carries an `abi_version`, so it is shaped for a safe append. Two slots are
-appended after the existing final slot:
+**Decided: v2 will have one carrier.** Every v2 frame — `Open`, `Invoke`,
+`Release`, `Event` — will travel over the duplex broker channel, and the COM
+transport carrier will be deleted for v2, not left dormant behind a flag. v1
+keeps every COM mechanism unchanged, bit for bit.
 
-```c
-typedef struct {
-    size_t   size;                  /* validated first, before any slot is read */
-    uint32_t abi_version;
-    uint32_t contract_count;
-    descriptor* contracts;
-    void* create_payload_proxy;     /* existing v1 consumer-to-session projection */
-    void* release_payload_proxy;    /* existing                                    */
-    void* create_bridge_proxy;      /* appended: (request_fn, post_fn, context, out handle) */
-    void* release_bridge_proxy;     /* appended                                    */
-} multi_pwsh_contract_pack_api;
-```
+A single carrier is not simplification for its own sake. Two carriers means two
+paths in which the allow-list, lease, and authorization invariants can drift
+apart, and v2 is unreleased with zero consumers, so there is no compatibility
+obligation to weigh against that.
 
-`create_bridge_proxy` receives the payload-local request and post trampolines —
-the same two the broker context already installs as `$DpsBroker` — plus an
-opaque context. The pack returns a generated payload wrapper, and the payload
-bindings install it as a session variable. Binding happens when a broker context
-is attached to an invocation and is cleared on every completion, stop, release,
-and failed-start path, exactly like `$DpsBroker` itself.
+**The sections below this one still describe the COM carrier.** They are
+authoritative for what is implemented today and will be rewritten when the
+carrier moves. Until then, treat this subsection as the record of what the move
+must solve, not as a design that is ready to build.
 
-This is a synchronized breaking extension of the **single required** pack ABI,
-not a second table and not an optional lane: an older or smaller pack is rejected
-loudly by the existing header-first check, all-or-nothing, before any contract is
-registered.
+##### Verified constraints the design must satisfy
 
-Event routing then uses **one reserved DBC `kind`** for all Bridge Contract v2
-traffic, with `{ contractId: u32, ordinal: u32 }` as a body prefix. Packing the
-ordinal into the `kind` word was considered and rejected: it steals bits from an
-application-owned field and still collides when two contracts share a channel.
-One reserved `kind` plus an in-body discriminator removes the collision entirely
-without constraining contract identifiers or channel sharing.
+Each of these was checked against the implementation, and each invalidated part
+of a first design pass.
 
-#### Planned consequence: v2 stops needing a COM transport interface
+1. **The pump may not dispatch inline.** `PowerShellBrokerChannel.TryReceive`
+   releases the delivery handle before it returns, so the Rust
+   dispatch-violation guard no longer covers work done after it. A pump that
+   called the generated dispatcher inline would therefore neither be protected
+   by that guard nor be able to return to `wait`, and one blocking handler would
+   wedge the only pump. The pump must copy, hand off to a worker, and return.
+   Consequently the move buys **"application code is off the pipeline thread and
+   the producer's wait is bounded by its deadline"** — it does **not** make the
+   dispatcher's no-wait and no-lock rules structural. Claiming otherwise would
+   be false.
+2. **`TryReplyError` cannot carry the bridge status.** Rust converts a reply
+   error into diagnostic text and the payload observes only
+   `MULTI_PWSH_MANAGED_FAILURE`, so `InvalidArgument`, `AccessDenied`,
+   `ContractMismatch`, and `Bounds` would all collapse into one value. The
+   bridge status must ride in a **normal reply envelope**, with `TryReplyError`
+   reserved for pump and infrastructure failures.
+3. **Reply capacity is not conveyed over the broker.** The dispatcher checks
+   `outputCapacity` before dispatch precisely so a handler cannot mutate and then
+   fail on an undersized buffer. Nothing in the broker path supplies that value,
+   so the envelope must carry a required length and the payload must size its
+   buffer from the member's compile-time maximum rather than discovering the
+   need afterwards.
+4. **The frame budget must be derived from the final envelope.** A channel's
+   `MaximumBodyBytes` and the bridge's `MaximumFrameBytes` are both 65536, so any
+   routing prefix or envelope header makes a maximally-sized contract frame
+   unroutable on a maximally-configured channel. The compile-time budget has to
+   be `65536` minus the envelope, and the actual channel capacity has to reach
+   the validation point, which today it does not: the broker context hardcodes
+   65536 rather than receiving the channel's configured value.
+5. **Reserving a `kind` conflicts with the DBC contract.** DBC states that
+   `kind` is application-defined and that there is no registration table, and it
+   permits multiple waiters on one channel with each frame going to exactly one
+   of them. So an application pump and a bridge pump on a shared channel can
+   take each other's frames. The move needs either a dedicated bridge channel or
+   one channel-owned multiplexer that routes before anything else sees a frame.
+6. **A 32-bit contract discriminator is too weak.** Deriving it from the
+   descriptor hash keeps it from drifting, but a collision is only detectable
+   inside a single registration set, and the contract hash identifies a schema
+   rather than a dispatcher instance. A full-width route key plus a binding
+   identifier is the smaller risk.
+7. **Bind, unbind, and events need real control frames.** A one-way broker frame
+   may be coalesced away and carries no ordering guarantee, so unbind cannot be
+   one. The generated dispatcher also rejects `Event` outright today, by design,
+   because events were never valid on the request/reply carrier; a one-way
+   dispatch path with its own admission, authorization, and drop semantics has to
+   be generated.
+8. **Lease reopen and per-invocation binding interact.** A payload wrapper
+   performs `Open` when it is created. If a wrapper is created per invocation,
+   the lease must be reopenable, which it now is, and the ownership of close
+   must be stated: recreating a proxy each invocation must not silently
+   implement the invocation-scoped lease that is deliberately deferred.
+9. **One failed-start path does not clear managed state.** When the Rust side
+   fails to spawn the operation thread it invalidates its own generation but does
+   not perform the all-zero managed clear, so a retried builder can observe a
+   stale managed broker context. That must be closed before anything else is
+   installed in that window.
 
-Routing v2 request/reply through the broker channel means the consumer no longer
-projects an object into the session at all — it owns a channel and a pump. The
-following therefore become unnecessary for v2, and keeping them would be dead
-weight the reviewer has to reason about:
+##### What is settled
 
-- the per-contract hand-written `[GeneratedComInterface]` and the `MPWLC012`
-  rule that requires it;
-- `PowerShellLiveObject<TContract>` and `SetLiveObjectVariable` for v2;
-- the hand-written `[GeneratedComClass]` forwarding wrapper, replaced by a pump
-  loop that hands each received frame to the same transport-neutral `Dispatch`
-  the dispatcher already exposes;
-- the `create_payload_proxy` path for v2 contracts, which stays exactly as it is
-  for v1.
+- The pointer question: `create_payload_proxy` forwards an arbitrary non-null
+  `IUnknown`, and the payload bindings already project their own objects with
+  `GetOrCreateComInterfaceForObject`, so a payload-owned sink can reach a pack
+  without changing the pack ABI. What is **not** settled is discovery: the native
+  contract descriptor carries no v2 marker, payload variable name, descriptor
+  hash, or frame bounds, and `create_payload_proxy` returns only a handle, so the
+  payload cannot yet select v2 registrations or learn where to install a proxy.
+  That needs explicit negotiation with an unambiguous "not supported" answer from
+  a v1 pack.
+- Ownership: a payload sink must be a `[GeneratedComClass]`, the transit pointer
+  must be released after `create_payload_proxy` returns, and the pack proxy must
+  own its imported `ComObject` until release, matching the existing v1 pattern
+  on both sides.
+- The binding window: `$DpsBroker` is installed on `powerShell.Runspace` at
+  invocation start and removed at cleanup, which is genuinely per-invocation and
+  covers session and standalone pipelines alike.
+- Ordinals are not packed into `kind`.
 
-v1 keeps every one of them unchanged. The dispatcher's span-based `Dispatch`
-core was written to make this substitution a transport change rather than a
-regeneration of dispatch logic.
+##### Blocked on a defect in the existing window
 
-For the same reason, routing `Invoke` through the broker is **not** what v2 does
-today. The generated consumer dispatcher runs on the PowerShell pipeline thread,
-exactly like v1 and like `PowerShellCapabilitySet`. That is a real constraint,
-not an oversight, and the dispatcher rules below exist because of it.
+The `$DpsBroker` and `$DpsCapabilities` save/restore keeps a `PSVariable`
+reference and later reads its `Value`. `SessionStateProxy.SetVariable` mutates
+that same object, so the saved reference reports the **replacement** value and
+restore reinstalls the bridge object instead of the caller's original. Any
+mechanism that installs contract variables in that window inherits the defect, so
+it must be fixed — snapshot the value before mutation and restore by
+replacement — before v2 binds anything there.
 
 ### Consumer dispatcher rules
 
@@ -1900,9 +1946,11 @@ lock or dispatcher cycle that makes no FFI call at all:
 4. A handler must not acquire a lock that any pipeline-blocking thread can
    hold.
 
-Routing request/reply through the broker channel makes rules 1-4 structural
-instead of contractual, and is the approved target end state. Until the pack
-binding above lands, these rules are load-bearing and enforced by review.
+Routing request/reply through the broker channel moves application code off the
+pipeline thread and bounds the producer's wait by its deadline. It does **not**
+make rules 1-4 structural: the delivery handle is released before `TryReceive`
+returns, so the dispatch-violation guard does not cover a pump's later work.
+These rules stay load-bearing and enforced by review either way.
 
 ### Failure semantics
 
@@ -2029,13 +2077,10 @@ n)]`), not an implicit finalizer.
 | Staged intents per member call | 16 | the call fails and aborts every intent it staged |
 | Tombstoned object IDs retained per lease | none — IDs are monotonic, so a released ID is simply never re-allocated |
 
-- the channel's `MaximumBodyBytes` must be validated against the contract's
-  largest frame **in the bind callback**, not at lease open: no channel exists
-  when a lease is opened, because a channel is attached per invocation while a
-  lease is created when a session variable is assigned. Binding a lease to one
-  invocation becomes possible for the first time at that point, because bind and
-  unbind are exactly the invocation-start and invocation-end signals that do not
-  exist today.
+The channel's `MaximumBodyBytes` is validated against the contract's largest
+frame **when the bridge variable is bound**, not at lease open: a channel is
+attached per invocation, while today a lease is created when a session variable
+is assigned, so no channel exists at that point.
 
 ### Lease lifetime
 
