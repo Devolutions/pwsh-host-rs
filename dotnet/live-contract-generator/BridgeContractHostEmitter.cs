@@ -19,6 +19,8 @@ internal static class BridgeContractHostEmitter
         {
             EmitHandler(source, contract, model);
         }
+
+        BridgeContractDispatcherEmitter.Emit(source, contract);
     }
 
     private static void EmitContext(StringBuilder source, BridgeContractModel contract)

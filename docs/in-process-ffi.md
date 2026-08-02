@@ -1891,17 +1891,30 @@ A lease is `(leaseId, generation)`. It is allocated by the consumer during
    disagrees with the transport parameters. Nothing is dispatched.
 2. Check `outputCapacity` against the member's declared maximum reply size.
 3. **Admit the call**: resolve `(leaseId, generation)` and resolve `objectId`
-   within that lease in one atomic step under the lease's own lock, and take an
-   active-call token. Admission is atomic precisely so a call cannot pass the
-   lease check, lose a race to closure, and then fail object resolution. A
-   closed, superseded, or unknown lease, and a handle minted by another lease or
-   forged, are all rejected here with the same revoked error. Object IDs are
-   allocated monotonically per lease and never reused inside it, so a released
-   wrapper can never target a later object.
+   within that lease in one atomic step under the lease's own lock. Admission is
+   atomic precisely so a call cannot pass the lease check, lose a race to
+   closure, and then fail object resolution. A closed, superseded, or unknown
+   lease, and a handle minted by another lease or forged, are all rejected here
+   with the same revoked error. Object IDs are allocated monotonically per lease
+   and never reused inside it, so a released wrapper can never target a later
+   object.
 4. Authorize. Getter, setter, and each method are authorized separately. The
    declared `Permission` is passed to the authorizer as input; it never stands
-   in for the call.
-5. Dispatch, encode the reply, then drop the active-call token.
+   in for the call. The authorizer is application code and is therefore called
+   **outside** the lease lock, so it can never deadlock against a handler.
+5. Dispatch and encode the reply.
+
+An admitted call holds its resolved handler reference **by value**. A concurrent
+closure clears the lease's object table but cannot revoke a reference the call
+already holds, which is why closure never has to block on, interrupt, or wait
+for work already in flight.
+
+**The application never invents an object identifier.** A handler returns a
+child *handler interface*, and the dispatcher registers it and allocates the
+identifier; an inbound handle is resolved back to its registered handler within
+its own lease before the handler sees it. Returning the same handler twice
+yields the same identifier until it is released. This removes handle forgery
+from the application's responsibility entirely.
 
 **`Mutation.Staged` is rejected at compile time** (`MPWLC023`) until the staged
 lifecycle is deliverable. `PowerShellStagedIntentCoordinator` exposes no
@@ -1937,11 +1950,11 @@ returns nothing and is idempotent, so repeating it is simply a no-op rather than
 a failure.
 
 The transition increments the generation, so every later frame carrying the old
-generation fails admission. Closure does not interrupt a call that already holds
-an active-call token; such a call keeps its resolved object reference until it
-returns. Closure takes effect for every call that has not yet been admitted, and
-because admission is one atomic step there is no window in which a call passes
-the lease check and then fails object resolution.
+generation fails admission. Closure does not interrupt a call that has already
+been admitted; that call holds its resolved handler reference by value and runs
+to completion. Closure takes effect for every call that has not yet been
+admitted, and because admission is one atomic step there is no window in which a
+call passes the lease check and then fails object resolution.
 
 At closure every handle in the lease's object table is tombstoned in the same
 locked transition, before the lease becomes unreachable. A payload wrapper that
@@ -1983,14 +1996,41 @@ and runtime lease lifecycles beyond that remain unqualified.
 | copied data classes and their typed codecs | yes | yes |
 | closed enumeration allow-list guards | yes | yes |
 | typed handler interfaces, call context, and authorizer interface | yes | no |
+| the dispatcher: admission, authorization, decode, dispatch, encode | yes | no |
 | CLR wrapper classes, lease client, and inline typed codecs | no | yes |
 
-The generated consumer **dispatcher** — the `[GeneratedComClass]` broker adapter
-that implements the contract's transport interface, decodes frames, admits calls
-against the lease table, calls the authorizer, and encodes replies — is part of
-the lease runtime and is delivered with it. Until then an application implements
-the COM transport interface itself, exactly as the v1 preview requires, and the
-handler interfaces above are the stable typed surface that dispatcher will call.
+The dispatcher exposes two entry points. `Dispatch` is **transport-neutral** and
+takes spans, so a later carrier can feed it without changing a line of generated
+logic. `Invoke` is the COM-shaped entry point, and it copies through managed
+buffers so a consumer project never needs `AllowUnsafeBlocks` to host a
+dispatcher.
+
+A source generator cannot see another generator's output, so the generator
+cannot emit the `[GeneratedComClass]` that implements the contract's transport
+interface. The application supplies it, and it is deliberately trivial:
+
+```csharp
+[GeneratedComClass]
+internal sealed partial class RdmBroker : IRdmBridgeTransport, IPowerShellLiveObjectBroker
+{
+    private readonly RdmBridgeDispatcher dispatcher;
+
+    internal RdmBroker(IRdmBridgeBridgeHandler root, IRdmBridgeAuthorizer authorizer)
+        => dispatcher = new RdmBridgeDispatcher(root, authorizer);
+
+    public int Invoke(ulong leaseId, uint generation, ulong objectId, uint memberId,
+                      nint input, int inputLength, nint output, int outputCapacity, out int outputLength)
+        => dispatcher.Invoke(leaseId, generation, objectId, memberId,
+                             input, inputLength, output, outputCapacity, out outputLength);
+
+    public int CloseLease(ulong leaseId, uint generation) => dispatcher.CloseLease(leaseId, generation);
+
+    public void Dispose() => dispatcher.Dispose();
+}
+```
+
+That is the whole hand-written surface, and it is pure forwarding: it holds no
+lease state, decodes nothing, and authorizes nothing.
 
 ### Lock-step builds
 

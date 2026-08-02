@@ -163,15 +163,24 @@ Both sides compile the same declaration — the consumer with
 `LiveContractMode=Payload`. The generator emits, identically in both modes, a
 canonical descriptor byte sequence, its SHA-256 hash, static member tables, the
 copied data classes, and their typed binary codecs. Host mode additionally emits
-typed handler interfaces, a call context, and an authorizer interface the
-application implements; payload mode emits the CLR wrapper classes that script
-uses with ordinary property and method syntax.
+typed handler interfaces, a call context, an authorizer interface, and the
+dispatcher; payload mode emits the CLR wrapper classes that script uses with
+ordinary property and method syntax.
 
-The generated consumer dispatcher that decodes frames, admits calls against the
-lease table, and calls the authorizer ships with the lease runtime. Until then an
-application implements its contract's COM transport interface itself, and the
-generated handler interfaces are the stable typed surface that dispatcher will
-call.
+The dispatcher admits every frame against bounded lease and object tables,
+resolving the lease and the object handle in one atomic step, then authorizes
+the getter, the setter, or the method independently before the handler runs. The
+application never invents an object identifier: a handler returns a child
+handler interface and the dispatcher allocates the identifier, so a forged,
+stale, or cross-lease handle can never reach application code. At lease closure
+every handle is tombstoned in the same locked transition, so a payload wrapper
+that escaped into a longer-lived script variable fails with a deterministic
+revoked error.
+
+A source generator cannot see another generator's output, so the application
+supplies a small `[GeneratedComClass]` that implements its contract's transport
+interface and forwards to the dispatcher. It holds no lease state, decodes
+nothing, and authorizes nothing; `docs/in-process-ffi.md` shows it in full.
 
 Everything the compiler accepts is enumerated in source. `object`, `dynamic`,
 `Type`, `PSObject`, delegates, `Task`, generics other than `IReadOnlyList<T>`

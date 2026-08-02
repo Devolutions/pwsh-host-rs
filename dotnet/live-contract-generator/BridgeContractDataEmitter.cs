@@ -48,7 +48,7 @@ internal static class BridgeTypeNames
             case BridgeTag.Handle:
                 return payload
                     ? BridgeNames.Wrapper(contract.Objects.Find(model => model.Id == type.TypeId)!)
-                    : "ulong";
+                    : BridgeNames.Handler(contract.Objects.Find(model => model.Id == type.TypeId)!);
             case BridgeTag.Data:
                 return BridgeNames.Value(contract.DataById[type.TypeId]);
             case BridgeTag.List:
@@ -84,7 +84,6 @@ internal static class BridgeTypeNames
         {
             BridgeTag.Bool or BridgeTag.Int32 or BridgeTag.Int64 or BridgeTag.Double
                 or BridgeTag.Guid or BridgeTag.Enum32 => true,
-            BridgeTag.Handle => !payload,
             _ => false,
         };
     }
@@ -177,7 +176,7 @@ internal static class BridgeCodecEmitter
                     indent,
                     payload
                         ? $"writer.TryWriteHandle({BridgeTypeNames.Number(type.TypeId)}UL, ({expression}).ObjectId)"
-                        : $"writer.TryWriteHandle({BridgeTypeNames.Number(type.TypeId)}UL, {expression})",
+                        : $"writer.TryWriteHandle({BridgeTypeNames.Number(type.TypeId)}UL, Register{BridgeTypeNames.Number(type.TypeId)}(in admission, {expression}))",
                     onFail);
                 return;
             case BridgeTag.Data:
@@ -324,7 +323,13 @@ internal static class BridgeCodecEmitter
                 }
                 else
                 {
-                    Assign(source, indent, target, local);
+                    string resolved = local + "Handler";
+                    Guard(
+                        source,
+                        indent,
+                        $"TryResolve{BridgeTypeNames.Number(type.TypeId)}(in admission, {local}, out var {resolved})",
+                        onFail);
+                    Assign(source, indent, target, resolved);
                 }
 
                 return;

@@ -207,6 +207,41 @@ public sealed class BridgeContractGenerator : IIncrementalGenerator
         source.AppendLine("        return false;");
         source.AppendLine("    }");
         source.AppendLine();
+        source.AppendLine("    /// <summary>Resolves a member from its globally unique ordinal alone, before any lease lookup.</summary>");
+        source.AppendLine("    internal static bool TryGetMemberByOrdinal(uint ordinal, out global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeMemberEntry entry)");
+        source.AppendLine("    {");
+        source.AppendLine("        switch (ordinal)");
+        source.AppendLine("        {");
+        index = 0;
+        foreach (BridgeObjectModel model in contract.Objects)
+        {
+            foreach (BridgeMemberModel member in model.Members)
+            {
+                source.Append("            case ").Append(Number(member.Ordinal)).Append("U: entry = Members[")
+                    .Append(Number(index)).AppendLine("]; return true;");
+                index++;
+            }
+        }
+
+        source.AppendLine("            default: entry = default; return false;");
+        source.AppendLine("        }");
+        source.AppendLine("    }");
+        source.AppendLine();
+        source.AppendLine("    /// <summary>Resolves the object type whose declared release ordinal this is.</summary>");
+        source.AppendLine("    internal static bool TryGetReleaseObjectType(uint ordinal, out ulong objectTypeId)");
+        source.AppendLine("    {");
+        source.AppendLine("        switch (ordinal)");
+        source.AppendLine("        {");
+        foreach (BridgeObjectModel model in contract.Objects)
+        {
+            source.Append("            case ").Append(Number(model.ReleaseId)).Append("U: objectTypeId = ")
+                .Append(Number(model.Id)).AppendLine("UL; return true;");
+        }
+
+        source.AppendLine("            default: objectTypeId = 0UL; return false;");
+        source.AppendLine("        }");
+        source.AppendLine("    }");
+        source.AppendLine();
         source.AppendLine("    /// <summary>Resolves the declared release ordinal for one object type.</summary>");
         source.AppendLine("    internal static bool TryGetReleaseOrdinal(ulong objectTypeId, out uint ordinal)");
         source.AppendLine("    {");
