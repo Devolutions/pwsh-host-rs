@@ -71,7 +71,7 @@ public sealed class PowerShellBridgeLeaseTable
     public const int MaximumObjectsPerLease = 1024;
 
     private static readonly object ProcessGate = new();
-    private static int activeLeaseCount;
+    private static readonly List<WeakReference<PowerShellBridgeLeaseTable>> ActiveTables = new();
     private static ulong nextLeaseId;
     private static uint nextGeneration;
 
@@ -124,7 +124,12 @@ public sealed class PowerShellBridgeLeaseTable
             uint allocatedGeneration;
             lock (ProcessGate)
             {
-                if (activeLeaseCount >= MaximumLeases)
+                // The budget is process-wide, so it must be reclaimed when a
+                // dispatcher is dropped without disposal. Sweeping collected
+                // tables here makes the counter self-healing; a plain counter
+                // would leak a slot per abandoned dispatcher, permanently.
+                SweepCollectedTablesLocked();
+                if (ActiveTables.Count >= MaximumLeases)
                 {
                     return PowerShellBridgeStatus.OutOfMemory;
                 }
@@ -133,7 +138,7 @@ public sealed class PowerShellBridgeLeaseTable
                 allocatedGeneration = checked(nextGeneration + 1);
                 nextLeaseId = allocated;
                 nextGeneration = allocatedGeneration;
-                activeLeaseCount++;
+                ActiveTables.Add(new WeakReference<PowerShellBridgeLeaseTable>(this));
             }
 
             var lease = new Lease(allocated, allocatedGeneration);
@@ -142,7 +147,7 @@ public sealed class PowerShellBridgeLeaseTable
             {
                 lock (ProcessGate)
                 {
-                    activeLeaseCount--;
+                    ForgetTableLocked();
                 }
 
                 return PowerShellBridgeStatus.OutOfMemory;
@@ -227,6 +232,7 @@ public sealed class PowerShellBridgeLeaseTable
             }
 
             CloseLocked(lease);
+            ReleaseTableSlot();
 
             // The closed lease is removed so a later open can allocate a fresh
             // one. Nothing escapes by doing so: lease identifiers are
@@ -254,6 +260,7 @@ public sealed class PowerShellBridgeLeaseTable
             }
 
             leases.Clear();
+            ReleaseTableSlot();
         }
     }
 
@@ -262,9 +269,36 @@ public sealed class PowerShellBridgeLeaseTable
         // One locked transition: tombstone every handle, then supersede the
         // generation so no frame carrying the old one is ever admitted again.
         lease.TombstoneLocked();
+    }
+
+    private void ReleaseTableSlot()
+    {
         lock (ProcessGate)
         {
-            activeLeaseCount--;
+            ForgetTableLocked();
+        }
+    }
+
+    private void ForgetTableLocked()
+    {
+        for (int index = ActiveTables.Count - 1; index >= 0; index--)
+        {
+            if (!ActiveTables[index].TryGetTarget(out PowerShellBridgeLeaseTable? table) ||
+                ReferenceEquals(table, this))
+            {
+                ActiveTables.RemoveAt(index);
+            }
+        }
+    }
+
+    private static void SweepCollectedTablesLocked()
+    {
+        for (int index = ActiveTables.Count - 1; index >= 0; index--)
+        {
+            if (!ActiveTables[index].TryGetTarget(out _))
+            {
+                ActiveTables.RemoveAt(index);
+            }
         }
     }
 
@@ -359,4 +393,6 @@ public sealed class PowerShellBridgeLeaseTable
         }
     }
 }
+
+
 

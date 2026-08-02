@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using Devolutions.PowerShell.Ffi.LiveObjects;
@@ -124,7 +125,47 @@ internal static class BridgeRoundTripTests
         AMismatchedDescriptorHashIsRejected(entry, bridge);
         AClosedLeaseCanBeReopenedWithAFreshIdentity(entry, bridge);
         AFailedOpenReplyRollsBackItsLease(entry, probe, bridge);
+        ADroppedDispatcherDoesNotLeakItsLeaseSlot(entry, bridge);
         RepeatedCreateInvokeReleaseCyclesAreStable(entry, bridge);
+    }
+
+    /// <summary>
+    /// The process-wide lease budget is a static counter incremented on open and
+    /// decremented only by an explicit close. A dispatcher dropped without
+    /// disposal would therefore consume a slot forever, and once enough leaked,
+    /// no bridge in the process could ever open a lease again.
+    /// </summary>
+    private static void ADroppedDispatcherDoesNotLeakItsLeaseSlot(Type entry, Type bridge)
+    {
+        MethodInfo open = bridge.GetMethod("Open", BindingFlags.Public | BindingFlags.Static)!;
+
+        // Two batches, each below the live bound, with a collection between. The
+        // second batch only fits if the first batch's slots were reclaimed, which
+        // is the whole point: 16 *live* leases is the intended bound, 16
+        // *abandoned* ones must not be permanent.
+        for (int batch = 0; batch < 2; batch++)
+        {
+            for (int index = 0; index < 12; index++)
+            {
+                AbandonOneLease(entry, open);
+            }
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+
+        using var session = new Session(entry, bridge);
+        Require(
+            (string)session.Get("ProductVersion")! == "1.2.3",
+            "a dispatcher dropped without disposal must not permanently consume its process-wide lease slot");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void AbandonOneLease(Type entry, MethodInfo open)
+    {
+        var transport = new Transport(entry);
+        _ = open.Invoke(null, [transport]);
     }
 
     /// <summary>
@@ -571,4 +612,5 @@ internal static class BridgeRoundTripTests
         }
     }
 }
+
 
