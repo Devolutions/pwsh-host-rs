@@ -1804,25 +1804,67 @@ without a sink fails that call with a deterministic
 `InvalidOperationException`; it never silently degrades, because an event that
 blocks a pipeline is a different primitive with different liveness.
 
-Making non-blocking delivery *structural* rather than contractual requires
-appending mandatory transport bind/unbind callbacks to the contract-pack API so
-the payload can hand the pack an opaque payload-local post trampoline. That is a
-synchronized breaking extension of the single required pack ABI — header-first
-`Size` validation, no optional lane, no second table — and it is a Task 3.2
-item, tracked here rather than assumed. When it lands:
+Making non-blocking delivery *structural* rather than contractual, and moving
+request/reply off the pipeline thread, both require the same change: the payload
+must be able to hand a pack a broker trampoline. The concrete shape follows.
 
-- bridge events use DBC `kind = 0x42520000 | ordinal` with the declared
-  `OrderingKey` passed out of band, because DBC requires `kind` and
-  `ordering_key` as explicit trampoline parameters and forbids inferring them
-  from an opaque body;
-- because that `kind` encodes only a 16-bit ordinal, **two contracts sharing one
-  channel would collide**. Either a channel carries exactly one contract, or the
-  frame's own header tuple — which already carries `leaseId` — is the
-  discriminator and lease IDs must be process-unique and never reused;
-- the channel's `MaximumBodyBytes` must be validated against the contract's
-  largest event frame **in the bind callback**, not at lease open: no channel
-  exists when a lease is opened, because a channel is attached per invocation
-  while a lease is created when a session variable is assigned.
+#### Planned: the v2 broker binding
+
+`NativeLiveObjectContractPackApi` already validates `Size` header-first and
+carries an `abi_version`, so it is shaped for a safe append. Two slots are
+appended after the existing final slot:
+
+```c
+typedef struct {
+    size_t   size;                  /* validated first, before any slot is read */
+    uint32_t abi_version;
+    uint32_t contract_count;
+    descriptor* contracts;
+    void* create_payload_proxy;     /* existing v1 consumer-to-session projection */
+    void* release_payload_proxy;    /* existing                                    */
+    void* create_bridge_proxy;      /* appended: (request_fn, post_fn, context, out handle) */
+    void* release_bridge_proxy;     /* appended                                    */
+} multi_pwsh_contract_pack_api;
+```
+
+`create_bridge_proxy` receives the payload-local request and post trampolines —
+the same two the broker context already installs as `$DpsBroker` — plus an
+opaque context. The pack returns a generated payload wrapper, and the payload
+bindings install it as a session variable. Binding happens when a broker context
+is attached to an invocation and is cleared on every completion, stop, release,
+and failed-start path, exactly like `$DpsBroker` itself.
+
+This is a synchronized breaking extension of the **single required** pack ABI,
+not a second table and not an optional lane: an older or smaller pack is rejected
+loudly by the existing header-first check, all-or-nothing, before any contract is
+registered.
+
+Event routing then uses **one reserved DBC `kind`** for all Bridge Contract v2
+traffic, with `{ contractId: u32, ordinal: u32 }` as a body prefix. Packing the
+ordinal into the `kind` word was considered and rejected: it steals bits from an
+application-owned field and still collides when two contracts share a channel.
+One reserved `kind` plus an in-body discriminator removes the collision entirely
+without constraining contract identifiers or channel sharing.
+
+#### Planned consequence: v2 stops needing a COM transport interface
+
+Routing v2 request/reply through the broker channel means the consumer no longer
+projects an object into the session at all — it owns a channel and a pump. The
+following therefore become unnecessary for v2, and keeping them would be dead
+weight the reviewer has to reason about:
+
+- the per-contract hand-written `[GeneratedComInterface]` and the `MPWLC012`
+  rule that requires it;
+- `PowerShellLiveObject<TContract>` and `SetLiveObjectVariable` for v2;
+- the hand-written `[GeneratedComClass]` forwarding wrapper, replaced by a pump
+  loop that hands each received frame to the same transport-neutral `Dispatch`
+  the dispatcher already exposes;
+- the `create_payload_proxy` path for v2 contracts, which stays exactly as it is
+  for v1.
+
+v1 keeps every one of them unchanged. The dispatcher's span-based `Dispatch`
+core was written to make this substitution a transport change rather than a
+regeneration of dispatch logic.
 
 For the same reason, routing `Invoke` through the broker is **not** what v2 does
 today. The generated consumer dispatcher runs on the PowerShell pipeline thread,
@@ -1845,9 +1887,9 @@ lock or dispatcher cycle that makes no FFI call at all:
 4. A handler must not acquire a lock that any pipeline-blocking thread can
    hold.
 
-Routing request/reply through the broker channel, which would make rules 1-4
-structural instead of contractual, is the target end state and depends on the
-same pack-API change as events.
+Routing request/reply through the broker channel makes rules 1-4 structural
+instead of contractual, and is the approved target end state. Until the pack
+binding above lands, these rules are load-bearing and enforced by review.
 
 ### Failure semantics
 
@@ -1973,6 +2015,14 @@ n)]`), not an implicit finalizer.
 | Live object handles per lease | 1024 | the allocating call fails with `E_OUTOFMEMORY` |
 | Staged intents per member call | 16 | the call fails and aborts every intent it staged |
 | Tombstoned object IDs retained per lease | none — IDs are monotonic, so a released ID is simply never re-allocated |
+
+- the channel's `MaximumBodyBytes` must be validated against the contract's
+  largest frame **in the bind callback**, not at lease open: no channel exists
+  when a lease is opened, because a channel is attached per invocation while a
+  lease is created when a session variable is assigned. Binding a lease to one
+  invocation becomes possible for the first time at that point, because bind and
+  unbind are exactly the invocation-start and invocation-end signals that do not
+  exist today.
 
 ### Lease lifetime
 
