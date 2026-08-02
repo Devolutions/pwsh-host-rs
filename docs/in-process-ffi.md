@@ -1877,6 +1877,14 @@ deterministically there rather than at the first oversized call. A
 buffer-too-small outcome then cannot arise at all between matched artifacts,
 because both sides size from the same hash-verified member table.
 
+This works only because bridge traffic goes through its own sink rather than
+through `$DpsBroker`. `FfiBrokerContext.Request` allocates a reply buffer of the
+full channel bound on every call and gives the caller no way to size it, so a
+bridge riding that path would allocate up to 64 KiB to read a short string. The
+sink sizes each reply buffer from the member maximum the pack declared, which is
+both the correctness argument above and the reason an ordinary property read
+costs a few hundred bytes rather than the channel's whole body.
+
 ##### Bind and unbind need no new frame kinds
 
 A one-way broker frame may be coalesced away and carries no ordering guarantee,
@@ -1910,8 +1918,9 @@ proxy it calls back on the sink to declare what the payload needs to know.
 public partial interface IPowerShellBridgeBrokerSink
 {
     // The pack calls this once, before returning a proxy.
-    [PreserveSig] int Declare(in Guid contractIdentity, ReadOnlySpan<byte> descriptorHash,
-                              ReadOnlySpan<byte> payloadVariableUtf8,
+    [PreserveSig] int Declare(in Guid contractIdentity,
+                              nint descriptorHash, int descriptorHashLength,
+                              nint payloadVariableUtf8, int payloadVariableLength,
                               int maximumRequestBytes, int maximumReplyBytes);
 
     [PreserveSig] int Request(uint kind, ulong orderingKey, nint body, int bodyLength,
@@ -1919,6 +1928,11 @@ public partial interface IPowerShellBridgeBrokerSink
     [PreserveSig] int Post(uint kind, ulong orderingKey, nint body, int bodyLength);
 }
 ```
+
+Every buffer crosses as a pointer and a length rather than a span. That is not a
+style choice: a `ReadOnlySpan<byte>` parameter on a `[GeneratedComInterface]`
+method fails to compile with `SYSLIB1051`, because the span marshaller does not
+support the unmanaged-to-managed direction a callback into the payload requires.
 
 The unambiguous "not supported" answer a v1 pack must give comes from the
 **descriptor**, not from a return code: a v2 contract sets a new
