@@ -36,11 +36,12 @@ internal static class BridgeRoundTripTests
         {
             public readonly SampleChildHandler Child = new();
             public int Progress = -1;
+            public bool BreakIndexer;
 
             public string GetProductVersion(in SampleRootCallContext context) => "1.2.3";
             public System.Collections.Generic.IReadOnlyList<string> GetTags(in SampleRootCallContext context) => new[] { "alpha", "beta" };
             public ISampleChildBridgeHandler? FindChild(in SampleRootCallContext context, string name) => name == "missing" ? null : Child;
-            public ISampleChildBridgeHandler GetAt(in SampleRootCallContext context, int index) => Child;
+            public ISampleChildBridgeHandler GetAt(in SampleRootCallContext context, int index) => BreakIndexer ? null! : Child;
             public SampleState GetState(in SampleRootCallContext context) => SampleState.Open;
             public SampleFailureValue? GetLastFailure(in SampleRootCallContext context) => new SampleFailureValue("denied", 7);
             public void OnReportProgress(in SampleRootCallContext context, int percent) => Progress = percent;
@@ -126,7 +127,46 @@ internal static class BridgeRoundTripTests
         AClosedLeaseCanBeReopenedWithAFreshIdentity(entry, bridge);
         AFailedOpenReplyRollsBackItsLease(entry, probe, bridge);
         ADroppedDispatcherDoesNotLeakItsLeaseSlot(entry, bridge);
+        ANullHandlerFromANonNullableMemberFailsClosed(entry, bridge);
         RepeatedCreateInvokeReleaseCyclesAreStable(entry, bridge);
+    }
+
+    /// <summary>
+    /// A non-nullable handle result is an annotation, not a runtime guarantee: the
+    /// application is ordinary code and can return null from a member the contract
+    /// declares as never null. The generated writer must reject that as a malformed
+    /// frame, because the alternative is an exception thrown from inside the
+    /// dispatcher and out through whatever the application wrapped it in.
+    /// </summary>
+    private static void ANullHandlerFromANonNullableMemberFailsClosed(Type entry, Type bridge)
+    {
+        using var session = new Session(entry, bridge);
+        Require(session.Call("GetAt", 0) is not null, "the indexer round-trips before the handler is broken");
+
+        HostSet(entry, "CurrentHandler", "BreakIndexer", true);
+        try
+        {
+            Unwrap(() => session.Call("GetAt", 0));
+            throw new InvalidOperationException("Bridge round trip failed: a null handler was accepted.");
+        }
+        catch (PowerShellBridgeException exception)
+        {
+            // Not a revoked status: the lease is healthy and the frame is the
+            // thing that is wrong, so it must read as malformed rather than as a
+            // lease that has ended.
+            Require(
+                exception.Status == PowerShellBridgeStatus.InvalidArgument,
+                $"a null handler reports InvalidArgument (saw {exception.Status:X8})");
+        }
+        finally
+        {
+            HostSet(entry, "CurrentHandler", "BreakIndexer", false);
+        }
+
+        // The lease survives a member that failed this way, so the failure is
+        // contained rather than poisoning everything reached afterwards.
+        Require((string)session.Get("ProductVersion")! == "1.2.3", "the lease still works after a broken member");
+        Require(session.Call("GetAt", 0) is not null, "the same member works again once the application is fixed");
     }
 
     /// <summary>
