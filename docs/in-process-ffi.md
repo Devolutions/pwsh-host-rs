@@ -1990,6 +1990,55 @@ surfaces are unreleased, so the capability being withheld has no users.
 The attach failure must name the rule rather than only its mechanism, and say
 that two invocations are the supported alternative.
 
+##### How this is decomposed
+
+Two design passes on one increment produced twelve findings and then nine. A
+design that does not converge across two passes usually means the increment is
+too large rather than the review too harsh — two passes on the compiler
+converged. So the carrier move is split, and each piece is independently
+testable and survives a decision already made.
+
+**One correction first.** It is tempting to say the sink is what creates the
+invocation signal that lease scoping needs. It is not: the signal already exists,
+because `$DpsBroker` is installed at invocation start and removed at cleanup.
+What is missing is a **pack-reachable object** to deliver it to. The sink is that
+object. That distinction is what makes the split below work.
+
+1. **The sink handshake — payload and pack only.** The direction bit, including
+   the validation mask on both sides and the baseline; the sink interface; the
+   registry accepting and routing v2 contracts; the payload bindings driving the
+   handshake; a declaration state machine; and the requested identity exposed so
+   a pack holding two v2 contracts can select. COM still carries `Invoke`
+   throughout, and no facade surface moves.
+
+   It is self-contained only with an explicit split inside it: **discovery
+   happens once, when the live-object variable is set, and the transport is
+   bound and unbound per invocation through the sink.** A pack proxy created at
+   variable-set time survives across invocations — `liveObjectVariables` retains
+   it and reconciles after each one — so the two halves genuinely can have
+   different lifetimes. Without that split, discovery would have to happen inside
+   the invocation window, the proxy would be created per invocation, and lease
+   scope would be decided by accident rather than on purpose.
+
+2. **Lease scope.** Once a sink exists and its transport binds per invocation,
+   opening lazily on first bound invocation or per bind is a free choice made on
+   its own evidence, not under pressure inside a carrier move.
+
+3. **The host-side construction API.** Retiring the COM carrier removes what an
+   author writes but requires the SDK to grow a replacement that associates a
+   dispatcher, a channel, and a payload variable. That is new public facade
+   surface and gets its own design and its own adversarial review rather than
+   riding along with a transport swap.
+
+4. **The carrier move.** By then the handshake and the lease semantics exist and
+   are tested, so this is closer to the transport swap it was originally scoped
+   as: reply envelope, transport-failure mapping, routing prefix, `Open`/`Close`
+   over the channel, one-way events, and the pump.
+
+If a third design pass on the first of these also fails to converge, the agreed
+outcome is to ship the compiler and the lease runtime on their own and revisit
+the carrier move as separate work. Both stand alone and both are green.
+
 ##### What this pass still does not solve
 
 The second pass was reviewed and did not fully survive either. It is closer, and
