@@ -4216,8 +4216,49 @@ namespace NativeHost
                         throw;
                     }
 
-                    ReconcileLiveObjectVariablesLocked();
-                    liveObjectVariables.Add(name, value);
+                    try
+                    {
+                        ReconcileLiveObjectVariablesLocked();
+                        liveObjectVariables.Add(name, value);
+                    }
+                    catch
+                    {
+                        // The variable is already published at this point, so the
+                        // lease is reachable from script while being owned by
+                        // nobody: it is not in the table, so neither reconciliation
+                        // nor session teardown would ever release it. Take it back
+                        // out of reach first, then release it.
+                        UnpublishLiveObjectVariableLocked(name, value);
+                        value.Dispose();
+                        throw;
+                    }
+                }
+            }
+
+            /// <summary>
+            /// Removes a variable that was published for a lease whose adoption then
+            /// failed. Nothing here may throw: it runs while an earlier failure is
+            /// already propagating, and replacing that failure would hide the reason
+            /// the lease is being unwound at all.
+            /// </summary>
+            private void UnpublishLiveObjectVariableLocked(string name, FfiLiveObjectLease lease)
+            {
+                try
+                {
+                    object published = lease.Value;
+                    PSVariable variable = runspace.SessionStateProxy.PSVariable.Get(name);
+
+                    // Only reclaim the name if it still holds this lease's value.
+                    // Anything else means something took the name over, and
+                    // removing it would destroy an unrelated variable.
+                    if (variable is not null && ReferenceEquals(variable.Value, published))
+                    {
+                        runspace.SessionStateProxy.PSVariable.Remove(name);
+                    }
+                }
+                catch
+                {
+                    // Best effort by construction.
                 }
             }
 
@@ -4419,17 +4460,25 @@ namespace NativeHost
                     .Select(static variable => variable!)
                     .ToArray();
                 var reconciled = new Dictionary<string, FfiLiveObjectLease>(StringComparer.OrdinalIgnoreCase);
+                var dropped = new List<FfiLiveObjectLease>();
                 foreach (KeyValuePair<string, FfiLiveObjectLease> entry in liveObjectVariables)
                 {
-                    object value = entry.Value.Value;
-                    PSVariable variable = variables.FirstOrDefault(variable => ReferenceEquals(variable.Value, value));
+                    // A lease whose value cannot be read is unusable, so it is
+                    // dropped rather than allowed to abort the walk. Letting it
+                    // throw here used to leave already-disposed leases in the
+                    // table, and every later reconciliation then threw on the same
+                    // entry -- one bad proxy permanently broke the session.
+                    object value = TryReadLeaseValue(entry.Value);
+                    PSVariable variable = value is null
+                        ? null
+                        : variables.FirstOrDefault(variable => ReferenceEquals(variable.Value, value));
                     if (variable is not null && !reconciled.ContainsKey(variable.Name))
                     {
                         reconciled.Add(variable.Name, entry.Value);
                     }
                     else
                     {
-                        entry.Value.Dispose();
+                        dropped.Add(entry.Value);
                     }
                 }
 
@@ -4438,16 +4487,56 @@ namespace NativeHost
                 {
                     liveObjectVariables.Add(entry.Key, entry.Value);
                 }
+
+                // Release only once the table is consistent. Disposing during the
+                // walk meant a failure part-way left disposed leases still listed
+                // as live.
+                DisposeAll(dropped);
+            }
+
+            private static object TryReadLeaseValue(FfiLiveObjectLease lease)
+            {
+                try
+                {
+                    return lease.Value;
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            /// <summary>
+            /// Releases every lease even if one of them throws, then reports the
+            /// first failure. Stopping at the first would leak the remainder, which
+            /// is how one misbehaving pack could strand every other proxy.
+            /// </summary>
+            private static void DisposeAll(IReadOnlyList<FfiLiveObjectLease> leases)
+            {
+                Exception failure = null;
+                foreach (FfiLiveObjectLease lease in leases)
+                {
+                    try
+                    {
+                        lease.Dispose();
+                    }
+                    catch (Exception exception)
+                    {
+                        failure = failure ?? exception;
+                    }
+                }
+
+                if (failure is not null)
+                {
+                    throw failure;
+                }
             }
 
             private void ReleaseAllLiveObjectVariablesLocked()
             {
                 FfiLiveObjectLease[] values = liveObjectVariables.Values.ToArray();
                 liveObjectVariables.Clear();
-                foreach (FfiLiveObjectLease value in values)
-                {
-                    value.Dispose();
-                }
+                DisposeAll(values);
             }
         }
 
