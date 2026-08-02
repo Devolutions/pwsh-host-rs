@@ -2213,33 +2213,54 @@ adds a Rust export, a payload binding-table slot, a public facade member, or an
 ABI baseline entry. That is what makes it a self-contained increment; it is not
 what makes it small.
 
-**How a pack is reached today, and the single slot that has to carry everything.**
+**How a pack is reached today, and why the sink can simply be the object.**
 A pack exposes `CreatePayloadProxy` as
 `delegate* unmanaged<IntPtr, IntPtr*, int>`, and the registry calls it as
 `create(comObject, &proxyHandle)`. There is exactly **one** inbound pointer, and
-today it is the consumer's object passed through untouched. So the sink cannot
-simply be "also passed": either the pack API grows a parameter — which is a
-synchronized breaking change to the one required pack ABI, and is exactly what
-this decomposition exists to avoid — or the payload stops passing the consumer
-object raw and passes **a payload-owned object that answers `QueryInterface` for
-both the contract interface and the sink**, forwarding the contract interface to
-the consumer.
+today it is the consumer's object passed through untouched.
 
-The second is the one that keeps the increment inside its boundary, and it is
-worth being explicit that this is interposition rather than an extra argument.
-The earlier framing — that a sink can be handed over through the existing
-callback — is true in its conclusion and understates its mechanism: it requires
-the payload to own a COM identity it does not own today, forward `QueryInterface`
-across it, and hold a reference to the consumer object for as long as the pack
-may use it.
+An earlier reading of that concluded the payload must **interpose**: pass an
+object answering `QueryInterface` for both the sink and the contract, forwarding
+the contract identifier onward. That would have been the largest piece of work in
+this increment, because it means the payload owning a COM identity that forwards
+an arbitrary interface identifier it does not know at compile time.
 
-**Interposition is gated on the direction bit, which is why the bit came first.**
-A v1 pack must keep receiving exactly what it receives now, byte for byte and
-identity for identity. Interposing for every contract would change what every
-existing pack sees, which is a behaviour change to shipped packages dressed up
-as an internal refactor. So the payload interposes **only** for a contract whose
-descriptor carries `BridgeContract`, and a v1 contract takes the untouched path.
-That also makes "this payload does not support v2" a property of the descriptor
+It is not necessary, and the reason is visible in how a pack actually consumes
+the pointer: it projects it with its own `ComWrappers` and pattern-matches
+against interfaces **it** knows, rather than being handed a specific interface.
+So the pointer can simply *be* the sink. For a contract marked `BridgeContract`,
+the payload passes a payload-owned sink, and the pack — which knows the sink
+interface, having been generated against this protocol — matches it and asks the
+sink for the consumer's contract object, then wraps that object exactly as it
+wraps a v1 one today.
+
+Nothing about this needs new machinery. The payload already exposes its own
+managed objects as COM interfaces through `GetOrCreateComInterfaceForObject`
+when it exports a live-object probe, so a payload-owned sink is an existing,
+exercised shape rather than a new capability. Neither side ever forwards an
+interface identifier it does not know: the payload exposes one fixed interface it
+owns, and the pack consumes one fixed interface it was generated against.
+
+**The handshake exchanges two interfaces, not one.** A sink the payload owns
+carries pack-to-payload traffic — asking for the requested identity, and asking
+for the contract object. Bind and unbind travel the other way: the payload knows
+where an invocation begins and ends, and has to tell the pack to open and close
+its lease. All the payload holds after `CreatePayloadProxy` is an opaque handle
+it cannot call, so the pack must hand back its own interface when it declares.
+Both interfaces are fixed and known to both sides at compile time, which is what
+keeps this small.
+
+**The substitution point already exists and already has what it needs.** The
+registry's `CreateLease` receives the contract descriptor alongside the pointer,
+and it is the last place both are in scope before the pack is called. So the
+branch is a single decision at a single site: a contract marked `BridgeContract`
+gets a sink, and anything else gets the pointer it gets today.
+
+**A v1 pack is unaffected, bit for bit.** It must keep receiving exactly what it
+receives now, and interposing or substituting for every contract would be a
+behaviour change to shipped packages dressed up as an internal refactor. Gating
+on the marker is what prevents that, and it is why the marker landed first. It
+also makes "this payload does not support v2" a property of the descriptor
 rather than something a pack has to infer from a failed `QueryInterface`.
 
 **Discovery and lifetime are separate mechanisms inside one increment.** The
