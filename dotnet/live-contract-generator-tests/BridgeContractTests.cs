@@ -138,6 +138,7 @@ internal static class BridgeContractTests
         VerifySpoofedAllowListTypeIsRejected(run);
         VerifyLegitimateCredentialNameIsAccepted(run, assertNoErrors);
         VerifyNullBytesFailClosed(run, assertNoErrors);
+        VerifyUnannotatedReferenceTypeIsRejectedForHashParity(run);
         VerifyDiagnostic(run, Valid.Replace("string ProductVersion { get; }", "string __bridgeProductVersion { get; }", StringComparison.Ordinal), "MPWLC014");
         VerifyDiagnostic(run, Valid.Replace("[BridgeBound(MaximumUtf8Bytes = 128)] string name", "[BridgeBound(MaximumUtf8Bytes = 128)] string __bridgeRequest", StringComparison.Ordinal), "MPWLC014");
         VerifyMissingMode(run);
@@ -273,6 +274,41 @@ internal static class BridgeContractTests
         if (!generated.AsSpan(Math.Max(0, write - 400), 400).ToString().Contains("value.Blob is not null", StringComparison.Ordinal))
         {
             throw new InvalidOperationException("A non-nullable byte[] position must reject null instead of encoding an empty value.");
+        }
+    }
+
+    /// <summary>
+    /// An unannotated reference type must be rejected, and the diagnostic must
+    /// say why.
+    /// </summary>
+    /// <remarks>
+    /// This is the only project-setting-dependent input anywhere near the
+    /// canonical descriptor. Rejecting it is what keeps Host and Payload hash
+    /// parity true; inferring nullability instead would let two sides diverge on
+    /// a hash they both believe. The message is asserted, not just the rule, so
+    /// relaxing the check fails a test rather than only contradicting a comment.
+    /// </remarks>
+    private static void VerifyUnannotatedReferenceTypeIsRejectedForHashParity(
+        Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run)
+    {
+        GeneratorDriverRunResult result = run("#nullable disable\n" + Valid, "Host").Result;
+        Diagnostic[] reported = Diagnostics(result)
+            .Where(static diagnostic => diagnostic.Id == "MPWLC017")
+            .ToArray();
+        if (reported.Length == 0)
+        {
+            throw new InvalidOperationException(
+                "An unannotated reference type must be rejected: inferring nullability would make the descriptor " +
+                "depend on project settings and silently break Host/Payload hash parity.");
+        }
+
+        if (!reported.Any(static diagnostic =>
+                diagnostic.GetMessage(System.Globalization.CultureInfo.InvariantCulture)
+                    .Contains("hash parity", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                "The unannotated-reference-type diagnostic must state that it protects Host/Payload hash parity, " +
+                "so the reason survives a future edit to that check.");
         }
     }
 
