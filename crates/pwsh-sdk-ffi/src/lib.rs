@@ -1461,7 +1461,12 @@ unsafe fn live_object_contract_input<'a>(
     let value = &*value;
     if value.size < mem::size_of::<FfiLiveObjectContractDescriptor>() as u32
         || value.directions == 0
-        || value.directions & !0x03 != 0
+        || value.directions & !0x07 != 0
+        // A bridge contract marker (0x04) is an addition to a consumer-to-session
+        // surface (0x02), never a replacement for it. This validator is
+        // independent of the managed one on purpose, so it enforces the pairing
+        // itself rather than trusting the caller to have done so.
+        || value.directions & 0x04 != 0 && value.directions & 0x02 == 0
         || value.interface_id_low == 0 && value.interface_id_high == 0
         || value.major_version == 0
         || value.reserved != 0
@@ -9145,6 +9150,44 @@ mod tests {
             error.1,
             "PowerShell session variables cannot be read or changed while any PowerShell pipeline is running."
         );
+    }
+
+    #[test]
+    fn live_object_contract_directions_accept_a_paired_bridge_marker_and_reject_a_lone_one() {
+        fn descriptor(directions: u32) -> FfiLiveObjectContractDescriptor {
+            FfiLiveObjectContractDescriptor {
+                size: mem::size_of::<FfiLiveObjectContractDescriptor>() as u32,
+                directions,
+                interface_id_low: 1,
+                interface_id_high: 2,
+                major_version: 1,
+                minor_version: 0,
+                reserved: 0,
+            }
+        }
+
+        // Accepted: the existing directions, and the bridge marker paired with
+        // the consumer-to-session surface it augments.
+        for directions in [0x01u32, 0x02, 0x03, 0x06, 0x07] {
+            let value = descriptor(directions);
+            assert!(
+                unsafe { live_object_contract_input(&value) }.is_ok(),
+                "directions {:#x} should be accepted",
+                directions
+            );
+        }
+
+        // Rejected: a bridge marker on its own, which would leave every existing
+        // consumer-to-session check reading false for a contract that is one.
+        // Rejected: anything outside the defined set.
+        for directions in [0x00u32, 0x04, 0x05, 0x08, 0x10, 0xFFFF_FFFF] {
+            let value = descriptor(directions);
+            assert!(
+                unsafe { live_object_contract_input(&value) }.is_err(),
+                "directions {:#x} should be rejected",
+                directions
+            );
+        }
     }
 
     #[test]

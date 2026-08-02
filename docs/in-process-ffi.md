@@ -134,6 +134,7 @@ fixtures in `dotnet/live-object-incompatible-test-pack`, run as
 | `direction-violation` | Contract omits `ConsumerToSession` | `unsupported direction` |
 | `reserved-identifier` | Pack re-declares an identifier the payload already owns | `has already been registered` |
 | `unsupported-pack-abi` | Pack reports an unimplemented `AbiVersion` | `contract pack API is invalid` |
+| `bridge-marker-without-direction` | Raw descriptor sets the Bridge Contract v2 marker without `ConsumerToSession` | `must be declared together with ConsumerToSession` |
 
 Because activation is all-or-nothing, a rejected pack never leaves a partially
 registered contract behind, and there is no path by which a stale consumer
@@ -2532,6 +2533,7 @@ dotnet publish dotnet/nativeaot-sample/NativeAotFfiSample.csproj -c Release
 ./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe <payload> --expect-rejected-contract-pack:direction-violation
 ./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe <payload> --expect-rejected-contract-pack:reserved-identifier
 ./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe <payload> --expect-rejected-contract-pack:unsupported-pack-abi
+./dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe <payload> --expect-rejected-contract-pack:bridge-marker-without-direction
 
 dotnet pack dotnet/sdk-ffi/Devolutions.MultiPwsh.Sdk.csproj -c Release -o artifacts/sdk-nuget
 pwsh -NoLogo -NoProfile -File tests/Test-PwshFfiPackage.ps1 `

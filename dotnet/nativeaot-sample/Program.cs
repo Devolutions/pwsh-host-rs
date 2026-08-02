@@ -52,6 +52,9 @@ if (args.Length == 2 && args[1].StartsWith("--expect-rejected-contract-pack:", S
         "unsupported-pack-abi" => (
             "Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.UnsupportedAbiLiveObjectTestPack",
             "contract pack API is invalid"),
+        "bridge-marker-without-direction" => (
+            "Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.BridgeMarkerWithoutDirectionLiveObjectTestPack",
+            "must be declared together with ConsumerToSession"),
         _ => null,
     };
 

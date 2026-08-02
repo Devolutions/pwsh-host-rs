@@ -12,6 +12,20 @@ public enum PowerShellLiveObjectDirection : uint
     None = 0,
     PayloadToConsumer = 1,
     ConsumerToSession = 1 << 1,
+
+    /// <summary>
+    /// Marks a contract as a generated Bridge Contract v2 surface. It is declared
+    /// alongside <see cref="ConsumerToSession"/>, never instead of it, so every
+    /// existing direction check keeps its meaning and the bit carries only the
+    /// extra fact that this contract speaks the v2 protocol.
+    /// </summary>
+    /// <remarks>
+    /// The bit exists so the payload can tell which registered contracts to
+    /// offer a v2 handshake to. A v1 pack never declares it and is therefore
+    /// never asked, which makes "not supported" a property of the descriptor
+    /// rather than something inferred from a generic failure code.
+    /// </remarks>
+    BridgeContract = 1 << 2,
 }
 
 /// <summary>
@@ -21,7 +35,8 @@ public readonly struct PowerShellLiveObjectContract : IEquatable<PowerShellLiveO
 {
     private const PowerShellLiveObjectDirection KnownDirections =
         PowerShellLiveObjectDirection.PayloadToConsumer |
-        PowerShellLiveObjectDirection.ConsumerToSession;
+        PowerShellLiveObjectDirection.ConsumerToSession |
+        PowerShellLiveObjectDirection.BridgeContract;
 
     public PowerShellLiveObjectContract(
         Guid interfaceId,
@@ -118,6 +133,17 @@ public readonly struct PowerShellLiveObjectContract : IEquatable<PowerShellLiveO
             (Directions & ~KnownDirections) != 0)
         {
             throw new ArgumentException("Live object contract metadata is invalid.");
+        }
+
+        // A bridge contract is a consumer-to-session surface that additionally
+        // speaks the v2 protocol. Declaring the marker alone would leave every
+        // existing direction check reading false for a contract that is in fact
+        // consumer-to-session, so the pairing is enforced rather than documented.
+        if ((Directions & PowerShellLiveObjectDirection.BridgeContract) != 0 &&
+            (Directions & PowerShellLiveObjectDirection.ConsumerToSession) == 0)
+        {
+            throw new ArgumentException(
+                "A bridge contract direction must be declared together with ConsumerToSession.");
         }
     }
 }

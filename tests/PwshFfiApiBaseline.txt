@@ -112,6 +112,7 @@ facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPack
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi::UInt32 AbiVersion
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi::UInt32 ContractCount
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi::UIntPtr Size
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection BridgeContract
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection ConsumerToSession
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection None
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection PayloadToConsumer
