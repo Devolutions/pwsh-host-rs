@@ -177,6 +177,16 @@ internal static class BridgeContractPayloadEmitter
             source.AppendLine("                return typed;");
             source.AppendLine("            }");
             source.AppendLine();
+            source.AppendLine("            // The consumer's own object table is bounded, but a bound enforced");
+            source.AppendLine("            // only by the peer is not a bound on this side. Every other number");
+            source.AppendLine("            // in this protocol is re-checked locally; this one is too.");
+            source.Append("            if (handles.Count >= global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeLeaseTable.MaximumObjectsPerLease)").AppendLine();
+            source.AppendLine("            {");
+            source.Append("                throw new ").Append(BridgeTypeNames.BridgeException).Append('(').Append(BridgeTypeNames.Status)
+                .Append(".OutOfMemory, \"Bridge contract '").Append(BridgeNames.Escape(contract.ContractId))
+                .AppendLine("' exceeded its bounded object table.\");");
+            source.AppendLine("            }");
+            source.AppendLine();
             source.Append("            var created = new ").Append(wrapper).AppendLine("(this, objectId);");
             source.AppendLine("            handles[objectId] = created;");
             source.AppendLine("            return created;");

@@ -139,6 +139,7 @@ internal static class BridgeContractTests
         VerifyLegitimateCredentialNameIsAccepted(run, assertNoErrors);
         VerifyNullBytesFailClosed(run, assertNoErrors);
         VerifyUnannotatedReferenceTypeIsRejectedForHashParity(run);
+        VerifyPayloadObjectTableIsLocallyBounded(run, assertNoErrors);
         VerifyDiagnostic(run, Valid.Replace("string ProductVersion { get; }", "string __bridgeProductVersion { get; }", StringComparison.Ordinal), "MPWLC014");
         VerifyDiagnostic(run, Valid.Replace("[BridgeBound(MaximumUtf8Bytes = 128)] string name", "[BridgeBound(MaximumUtf8Bytes = 128)] string __bridgeRequest", StringComparison.Ordinal), "MPWLC014");
         VerifyMissingMode(run);
@@ -309,6 +310,27 @@ internal static class BridgeContractTests
             throw new InvalidOperationException(
                 "The unannotated-reference-type diagnostic must state that it protects Host/Payload hash parity, " +
                 "so the reason survives a future edit to that check.");
+        }
+    }
+
+    /// <summary>
+    /// The payload's object table must carry its own bound. The consumer's table
+    /// is bounded too, so the payload's is bounded transitively — but a bound
+    /// enforced only by the peer is not a bound on this side, and every other
+    /// number in this protocol is re-checked locally.
+    /// </summary>
+    private static void VerifyPayloadObjectTableIsLocallyBounded(
+        Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run,
+        Action<IEnumerable<Diagnostic>> assertNoErrors)
+    {
+        var (result, output) = run(Valid, "Payload");
+        assertNoErrors(Diagnostics(result));
+        assertNoErrors(output.GetDiagnostics());
+        string generated = Generated(result);
+        if (!generated.Contains("handles.Count >= global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeLeaseTable.MaximumObjectsPerLease", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The payload object table must enforce its own bound rather than relying on the consumer's.");
         }
     }
 
