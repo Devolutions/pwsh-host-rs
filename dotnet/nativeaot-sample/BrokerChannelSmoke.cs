@@ -127,6 +127,53 @@ internal static class BrokerChannelSmoke
                 Console.Error.WriteLine("NativeAOT broker pump did not observe the one-way event.");
                 return false;
             }
+
+            // A caller's own $DpsBroker must survive the invocation. SetVariable
+            // mutates the existing PSVariable in place, so a saved reference
+            // would report the bridge and restore would reinstall it.
+            using PowerShellSession session = runtime.CreateSession(
+                new PowerShellSessionOptions(PowerShellRunspaceMode.NewRunspace));
+            session.SetVariable("DpsBroker", PowerShellValue.String("caller-owned"));
+
+            using PowerShell scoped = session.CreatePowerShell();
+            PowerShellInvocationResult scopedResult = scoped
+                .AddScript("$reply = $DpsBroker.Request(1, [byte[]]@(5)); [string]::Join('-', $reply)")
+                .WithBroker(channel)
+                .InvokeAsync(CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+
+            if (scopedResult.Output.Records.Count != 1 || scopedResult.Output.Records[0].DisplayText != "6")
+            {
+                Console.Error.WriteLine("NativeAOT broker did not replace a caller-owned $DpsBroker for its invocation.");
+                return false;
+            }
+
+            // A caller's own $DpsBroker must survive the invocation. SetVariable
+            // mutates the existing PSVariable in place, so a saved reference
+            // would report the bridge and restore would reinstall it.
+            bool restoredOriginal;
+            try
+            {
+                restoredOriginal =
+                    session.TryGetVariable("DpsBroker", out PowerShellValue? restored) &&
+                    restored is not null &&
+                    restored.TryGetString(out string? restoredText) &&
+                    restoredText == "caller-owned";
+            }
+            catch (PowerShellFfiException)
+            {
+                // The bridge object was reinstalled, so it no longer encodes as
+                // a copied value.
+                restoredOriginal = false;
+            }
+
+            if (!restoredOriginal)
+            {
+                Console.Error.WriteLine(
+                    "NativeAOT broker did not restore the caller's original $DpsBroker after the invocation.");
+                return false;
+            }
         }
         finally
         {

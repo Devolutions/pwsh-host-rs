@@ -381,6 +381,7 @@ type FnFfiPowerShellSetBrokerContext = unsafe extern "system" fn(
     u64,
     *const libc::c_void,
     *const libc::c_void,
+    u32,
     *mut FfiCallResult,
 ) -> i32;
 type FnFfiPowerShellSetCapabilityContext =
@@ -1582,9 +1583,18 @@ impl FfiPowerShell {
         generation: u64,
         enqueue: *const libc::c_void,
         post: *const libc::c_void,
+        maximum_body_bytes: u32,
     ) -> Result<(), FfiBindingError> {
         self.call(|handle, result| unsafe {
-            (self.bindings.power_shell_set_broker_context_fn)(handle, channel_handle, generation, enqueue, post, result)
+            (self.bindings.power_shell_set_broker_context_fn)(
+                handle,
+                channel_handle,
+                generation,
+                enqueue,
+                post,
+                maximum_body_bytes,
+                result,
+            )
         })
     }
 

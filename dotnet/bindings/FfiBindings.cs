@@ -1217,7 +1217,7 @@ namespace NativeHost
                 ObservedDiagnosticPage_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiObservedDiagnosticPage_Release,
                 PowerShellSession_PreflightConfigured = (IntPtr)(delegate* unmanaged<uint, uint, uint, uint, uint, uint, uint, uint, uint, byte*, int, byte*, int, byte*, int, byte*, int, byte*, int, byte*, int, int*, FfiCallResult*, int>)&FfiPowerShellSession_PreflightConfigured,
                 RuntimeDiagnostics_CopyPowerShellFileVersionUtf8 = (IntPtr)(delegate* unmanaged<byte*, int, int*, int*, FfiCallResult*, int>)&FfiRuntimeDiagnostics_CopyPowerShellFileVersionUtf8,
-            PowerShell_SetBrokerContext = (IntPtr)(delegate* unmanaged<IntPtr, ulong, ulong, IntPtr, IntPtr, FfiCallResult*, int>)&FfiPowerShell_SetBrokerContext,
+            PowerShell_SetBrokerContext = (IntPtr)(delegate* unmanaged<IntPtr, ulong, ulong, IntPtr, IntPtr, uint, FfiCallResult*, int>)&FfiPowerShell_SetBrokerContext,
             };
         }
 
@@ -3095,22 +3095,26 @@ namespace NativeHost
             ulong generation,
             IntPtr enqueue,
             IntPtr post,
+            uint maximumBodyBytes,
             FfiCallResult* result)
         {
             return Execute(result, () =>
             {
                 FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
-                if (channelHandle == 0 && generation == 0 && enqueue == IntPtr.Zero && post == IntPtr.Zero)
+                if (channelHandle == 0 && generation == 0 && enqueue == IntPtr.Zero && post == IntPtr.Zero &&
+                    maximumBodyBytes == 0)
                 {
                     pipeline.ClearBrokerContext();
                     return;
                 }
-                if (channelHandle == 0 || generation == 0 || enqueue == IntPtr.Zero || post == IntPtr.Zero)
+                if (channelHandle == 0 || generation == 0 || enqueue == IntPtr.Zero || post == IntPtr.Zero ||
+                    maximumBodyBytes == 0 || maximumBodyBytes > 64 * 1024)
                 {
                     throw new InvalidOperationException("Broker context is invalid.");
                 }
 
-                pipeline.SetBrokerContext(new FfiBrokerContext(channelHandle, generation, enqueue, post));
+                pipeline.SetBrokerContext(
+                    new FfiBrokerContext(channelHandle, generation, enqueue, post, (int)maximumBodyBytes));
             });
         }
 
@@ -6534,30 +6538,38 @@ namespace NativeHost
 
         private sealed unsafe class FfiBrokerContext
         {
-            private const int MaximumBodyBytes = 64 * 1024;
-
             private readonly ulong channelHandle;
             private readonly ulong generation;
             private readonly IntPtr enqueue;
             private readonly IntPtr post;
+            private readonly int maximumBodyBytes;
 
-            public FfiBrokerContext(ulong channelHandle, ulong generation, IntPtr enqueue, IntPtr post)
+            public FfiBrokerContext(
+                ulong channelHandle,
+                ulong generation,
+                IntPtr enqueue,
+                IntPtr post,
+                int maximumBodyBytes)
             {
                 this.channelHandle = channelHandle;
                 this.generation = generation;
                 this.enqueue = enqueue;
                 this.post = post;
+                // The channel's configured bound, not an assumed 64 KiB: a smaller
+                // channel must reject an oversized body here rather than at the
+                // native boundary.
+                this.maximumBodyBytes = maximumBodyBytes;
             }
 
             public byte[] Request(uint kind, byte[] body)
             {
                 body ??= Array.Empty<byte>();
-                if (body.Length > MaximumBodyBytes)
+                if (body.Length > maximumBodyBytes)
                 {
                     throw new InvalidOperationException("The broker request body exceeds its bound.");
                 }
 
-                byte[] reply = new byte[MaximumBodyBytes];
+                byte[] reply = new byte[maximumBodyBytes];
                 byte[] diagnostic = new byte[512];
                 fixed (byte* bodyPointer = body.Length == 0 ? new byte[1] : body)
                 fixed (byte* replyPointer = reply)
@@ -6603,7 +6615,7 @@ namespace NativeHost
             public void Post(uint kind, byte[] body)
             {
                 body ??= Array.Empty<byte>();
-                if (body.Length > MaximumBodyBytes)
+                if (body.Length > maximumBodyBytes)
                 {
                     throw new InvalidOperationException("The broker event body exceeds its bound.");
                 }
@@ -6689,9 +6701,11 @@ namespace NativeHost
             private EventHandler<DataAddedEventArgs> progressAdded;
             private readonly FfiBrokerContext brokerContext;
             private Runspace capabilityRunspace;
-            private PSVariable previousCapabilityVariable;
+            private bool hadPreviousCapabilityVariable;
+            private object previousCapabilityValue;
             private Runspace brokerRunspace;
-            private PSVariable previousBrokerVariable;
+            private bool hadPreviousBrokerVariable;
+            private object previousBrokerValue;
             private Exception terminatingException;
             private ErrorRecord terminatingError;
             private FfiInvocationResultSnapshot snapshot;
@@ -6765,7 +6779,12 @@ namespace NativeHost
                     {
                         capabilityRunspace = powerShell.Runspace ?? throw new InvalidOperationException(
                             "Bounded capability RPC requires a PowerShell pipeline with an explicit local runspace.");
-                        previousCapabilityVariable = capabilityRunspace.SessionStateProxy.PSVariable.Get("DpsCapabilities");
+                        // SetVariable mutates the existing PSVariable in place, so the
+                        // value must be snapshotted before it is replaced.
+                        PSVariable existingCapabilityVariable =
+                            capabilityRunspace.SessionStateProxy.PSVariable.Get("DpsCapabilities");
+                        hadPreviousCapabilityVariable = existingCapabilityVariable != null;
+                        previousCapabilityValue = existingCapabilityVariable?.Value;
                         capabilityRunspace.SessionStateProxy.SetVariable(
                             "DpsCapabilities",
                             new FfiCapabilityBridge(capabilityContext));
@@ -6774,7 +6793,10 @@ namespace NativeHost
                     {
                         brokerRunspace = powerShell.Runspace ?? throw new InvalidOperationException(
                             "The duplex broker channel requires a PowerShell pipeline with an explicit local runspace.");
-                        previousBrokerVariable = brokerRunspace.SessionStateProxy.PSVariable.Get("DpsBroker");
+                        PSVariable existingBrokerVariable =
+                            brokerRunspace.SessionStateProxy.PSVariable.Get("DpsBroker");
+                        hadPreviousBrokerVariable = existingBrokerVariable != null;
+                        previousBrokerValue = existingBrokerVariable?.Value;
                         brokerRunspace.SessionStateProxy.SetVariable(
                             "DpsBroker",
                             new FfiBrokerBridge(brokerContext));
@@ -7086,7 +7108,7 @@ namespace NativeHost
                 ClearStreamBuffers(powerShell);
                 if (capabilityRunspace != null)
                 {
-                    if (previousCapabilityVariable == null)
+                    if (!hadPreviousCapabilityVariable)
                     {
                         capabilityRunspace.SessionStateProxy.PSVariable.Remove("DpsCapabilities");
                     }
@@ -7094,12 +7116,12 @@ namespace NativeHost
                     {
                         capabilityRunspace.SessionStateProxy.SetVariable(
                             "DpsCapabilities",
-                            previousCapabilityVariable.Value);
+                            previousCapabilityValue);
                     }
                 }
                 if (brokerRunspace != null)
                 {
-                    if (previousBrokerVariable == null)
+                    if (!hadPreviousBrokerVariable)
                     {
                         brokerRunspace.SessionStateProxy.PSVariable.Remove("DpsBroker");
                     }
@@ -7107,7 +7129,7 @@ namespace NativeHost
                     {
                         brokerRunspace.SessionStateProxy.SetVariable(
                             "DpsBroker",
-                            previousBrokerVariable.Value);
+                            previousBrokerValue);
                     }
                 }
                 if (sessionInvocationStarted)
@@ -7131,7 +7153,8 @@ namespace NativeHost
             session?.BeginInvocation();
             PSInvocationSettings invocationSettings = session?.CreateInvocationSettings();
             Runspace capabilityRunspace = null;
-            PSVariable previousCapabilityVariable = null;
+            bool hadPreviousCapabilityVariable = false;
+            object previousCapabilityValue = null;
 
             EventHandler<DataAddedEventArgs> outputAdded = (_, args) =>
             {
@@ -7183,7 +7206,12 @@ namespace NativeHost
                 {
                     capabilityRunspace = ps.Runspace ?? throw new InvalidOperationException(
                         "Bounded capability RPC requires a PowerShell pipeline with an explicit local runspace.");
-                    previousCapabilityVariable = capabilityRunspace.SessionStateProxy.PSVariable.Get("DpsCapabilities");
+                    // SetVariable mutates the existing PSVariable in place, so the
+                    // value must be snapshotted before it is replaced.
+                    PSVariable existingCapabilityVariable =
+                        capabilityRunspace.SessionStateProxy.PSVariable.Get("DpsCapabilities");
+                    hadPreviousCapabilityVariable = existingCapabilityVariable != null;
+                    previousCapabilityValue = existingCapabilityVariable?.Value;
                     capabilityRunspace.SessionStateProxy.SetVariable(
                         "DpsCapabilities",
                         new FfiCapabilityBridge(capabilityContext));
@@ -7239,7 +7267,7 @@ namespace NativeHost
                 ClearStreamBuffers(ps);
                 if (capabilityRunspace != null)
                 {
-                    if (previousCapabilityVariable == null)
+                    if (!hadPreviousCapabilityVariable)
                     {
                         capabilityRunspace.SessionStateProxy.PSVariable.Remove("DpsCapabilities");
                     }
@@ -7247,7 +7275,7 @@ namespace NativeHost
                     {
                         capabilityRunspace.SessionStateProxy.SetVariable(
                             "DpsCapabilities",
-                            previousCapabilityVariable.Value);
+                            previousCapabilityValue);
                     }
                 }
                 session?.EndInvocation(terminatingException != null);

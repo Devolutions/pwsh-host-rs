@@ -349,7 +349,7 @@ $expectedRuntimeDiagnosticsTableSlots = @(
     @{ Field = 'RuntimeDiagnostics_CopyPowerShellFileVersionUtf8'; Rust = 'runtime_diagnostics_copy_power_shell_file_version_utf8_fn'; Alias = 'FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8'; Method = 'FfiRuntimeDiagnostics_CopyPowerShellFileVersionUtf8'; Signature = 'byte*,int,int*,int*,FfiCallResult*,int' }
 )
 $expectedBrokerTableSlots = @(
-    @{ Field = 'PowerShell_SetBrokerContext'; Rust = 'power_shell_set_broker_context_fn'; Alias = 'FnFfiPowerShellSetBrokerContext'; Method = 'FfiPowerShell_SetBrokerContext'; Signature = 'IntPtr,ulong,ulong,IntPtr,IntPtr,FfiCallResult*,int' }
+    @{ Field = 'PowerShell_SetBrokerContext'; Rust = 'power_shell_set_broker_context_fn'; Alias = 'FnFfiPowerShellSetBrokerContext'; Method = 'FfiPowerShell_SetBrokerContext'; Signature = 'IntPtr,ulong,ulong,IntPtr,IntPtr,uint,FfiCallResult*,int' }
 )
 $compactFfiBindingsSource = $ffiBindingsSource -replace '\s+', ''
 $allTableSlots = @($expectedTableSlots) + @($expectedLiveTableSlots) + @($expectedTypedResultTableSlots) + @($expectedObservedInvocationTableSlots) + @($expectedSessionPreflightTableSlots) + @($expectedRuntimeDiagnosticsTableSlots) + @($expectedBrokerTableSlots)

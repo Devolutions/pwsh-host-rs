@@ -2142,6 +2142,7 @@ fn configure_broker(session: &Session, attachment: Option<&Arc<BrokerAttachment>
             attachment.generation,
             broker_enqueue_and_wait as *const () as *const _,
             broker_post as *const () as *const _,
+            attachment.channel.max_body_bytes,
         )
     };
     if let Err(error) = configured {
