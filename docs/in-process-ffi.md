@@ -518,6 +518,7 @@ below defines the generic managed facade boundary.
 | Application-selected local modules | Implemented, local-only | Each requested import is resolved by name beneath a caller-supplied module root. This does not validate PowerCLI or remoting dependencies. |
 | `PSCredential` parameter | Intentionally unsupported | Arbitrary scripts can emit or transform a supplied credential. The DTO result model cannot guarantee redaction or a zeroable managed lifetime. |
 | Enumerated application capability calls and bounded host interaction | Implemented, opt-in | A registered `PowerShellCapabilitySet` makes only declared typed calls available through the temporary payload-local `$DpsCapabilities` object. `PowerShellHostInteraction` supplies schemas for text, progress, line, and choice interactions; it is not a `PSHost` proxy. |
+| Asynchronous application requests from a pipeline without a callback on the pipeline thread | Implemented, opt-in | The Duplex Broker Channel. Strictly dispatch-only: a pump copies a bounded opaque frame, releases it, and replies later by correlation ID. It carries no CLR object, delegate, secret, or self-describing wire format. |
 | PowerCLI typed return objects, PSRP/WinRM/SSH, pools, and transports | Unsupported | Retain the existing SMA/process paths. No CLR type, transport, or live session crosses the facade. |
 
 This is not a drop-in replacement for `Devolutions.PowerShell.SDK`. Existing
@@ -862,6 +863,463 @@ The caller owns activation, cancellation, and disposal; it contains no
 `System.Management.Automation` reference. A destructive path is not part of
 this repository's normal tests.
 
+## Duplex Broker Channel (DBC)
+
+The Duplex Broker Channel is an **opt-in, strictly dispatch-only** request/reply
+and one-way-event primitive. It exists so a PowerShell pipeline can ask the
+consuming application for work **without executing application code on the
+pipeline thread**.
+
+DBC does not replace, change, or deprecate `PowerShellCapabilitySet`. Capability
+RPC keeps its existing direct-callback semantics unchanged; DBC is a separate
+facility with its own handles, exports, statuses, and feature bits. A build that
+never opens a channel behaves exactly as before.
+
+### Why a pump instead of a callback
+
+Capability RPC calls the consumer's registered function pointer **on the
+PowerShell pipeline thread**, and Rust therefore rejects every FFI call made
+from that callback. DBC inverts the direction: the payload parks on Rust-owned
+state, and the consumer pulls frames from an ordinary thread of its own.
+
+```text
+capability RPC:  script -> payload bridge -> Rust -> consumer callback   (pipeline thread blocked in consumer code)
+DBC:             script -> payload bridge -> Rust queue                  (pipeline thread blocked in Rust only)
+                                              ^
+                             consumer pump ---+ receive, then reply later by correlation ID
+```
+
+A pump alone is **not** a liveness proof. DBC's liveness comes from the
+mandatory preconditions and rules in *Dispatch-only liveness* below.
+
+### Both protocol halves
+
+DBC is fully specified in both directions. Neither half may be implemented
+alone.
+
+#### Payload half — payload calls into Rust
+
+Rust hands the payload two trampolines through the single new binding-table
+slot `PowerShell_SetBrokerContext`, mirroring the proven
+`PowerShell_SetCapabilityContext` pattern. The payload never links a native
+symbol and never retains a Rust pointer beyond the invocation.
+
+```c
+/* request/reply: blocks the calling payload thread on Rust-owned state */
+int broker_enqueue_and_wait(
+        uint64_t channel, uint64_t generation,
+        uint32_t kind, uint32_t flags, uint64_t ordering_key, uint32_t deadline_ms,
+        const uint8_t* body, uint32_t body_len,
+        uint64_t* correlation_id,                      /* out, for diagnostics */
+        uint8_t* reply, uint32_t reply_capacity, uint32_t* reply_len,
+        multi_pwsh_call_result*);
+
+/* one-way event: never blocks, never applies backpressure to a pipeline */
+int broker_post(
+        uint64_t channel, uint64_t generation,
+        uint32_t kind, uint64_t ordering_key,
+        const uint8_t* body, uint32_t body_len,
+        multi_pwsh_call_result*);
+```
+
+`ordering_key`, `flags`, and `deadline_ms` are **explicit trampoline
+parameters**. Rust cannot and does not infer them from an opaque body, and
+there is no kind-registration table. `deadline_ms == 0` means "use the
+channel's `default_deadline_ms`"; any other value is clamped to it.
+
+There is deliberately **no cancel-polling trampoline**. Cancellation is a
+terminal transition that wakes the blocked `broker_enqueue_and_wait` directly
+and returns `MULTI_PWSH_OPERATION_CANCELLED`, so a separate poll would be
+redundant.
+
+`PowerShell_SetBrokerContext(pipeline, channel, generation, enqueueFn, postFn, CallResult*)`
+attaches one channel to exactly one invocation and is cleared afterwards, like
+the capability context. Passing all-zero arguments clears it; a partially zero
+argument set is invalid.
+
+For that one invocation the payload installs a fixed payload-local
+`$DpsBroker` object with exactly two members and no others:
+
+```powershell
+[byte[]] $DpsBroker.Request([uint32] $kind, [byte[]] $body)   # request/reply
+           $DpsBroker.Post([uint32] $kind, [byte[]] $body)    # one-way event
+```
+
+Any pre-existing `$DpsBroker` variable is saved and restored, matching
+`$DpsCapabilities` behaviour.
+
+**Generation is required, not redundant.** Clearing the pipeline's broker
+context does not revoke a `$DpsBroker` object that script code captured into a
+longer-lived variable. Every trampoline call therefore validates
+`(channel, generation)` against Rust's active-invocation registry, exactly as
+capability RPC validates `(registrationHandle, invocationId)`. Generations are
+process-monotonic `uint64` values, never reused, allocated when a broker
+context is attached and invalidated when that invocation reaches a terminal
+state. A call with a stale generation fails with `MULTI_PWSH_INVALID_HANDLE`
+and never reaches a queue.
+
+#### Consumer half — NativeAOT calls into Rust
+
+Ten additive `multi_pwsh_broker_*` exports. The public native ABI stays **v2**;
+availability is advertised through a new public feature bit so a consumer can
+reject an older native asset before calling an additive export.
+
+```c
+int multi_pwsh_broker_open (const multi_pwsh_broker_channel_options*, uint64_t* channel, multi_pwsh_call_result*);
+int multi_pwsh_broker_close(uint64_t channel, multi_pwsh_call_result*);
+
+/* consumer pump; returns *frame == 0 with MULTI_PWSH_SUCCESS on timeout */
+int multi_pwsh_broker_wait (uint64_t channel, uint32_t timeout_ms, uint64_t* frame, multi_pwsh_call_result*);
+
+int multi_pwsh_broker_frame_get_info(uint64_t frame, multi_pwsh_broker_frame_info*, multi_pwsh_call_result*);
+int multi_pwsh_broker_frame_read    (uint64_t frame, uint8_t* buffer, uint32_t capacity, uint32_t* required, multi_pwsh_call_result*);
+int multi_pwsh_broker_frame_release (uint64_t frame, multi_pwsh_call_result*);
+
+int multi_pwsh_broker_reply      (uint64_t channel, uint64_t correlation, const uint8_t* body, uint32_t len, multi_pwsh_call_result*);
+int multi_pwsh_broker_reply_error(uint64_t channel, uint64_t correlation, int32_t code, multi_pwsh_utf8_span message, multi_pwsh_call_result*);
+int multi_pwsh_broker_cancel     (uint64_t channel, uint64_t correlation, multi_pwsh_call_result*);
+
+/* attach one channel to one builder invocation, mirroring multi_pwsh_set_capabilities */
+int multi_pwsh_set_broker(uint64_t builder, uint64_t channel, multi_pwsh_call_result*);
+```
+
+### Delivery handle and correlation are different lifetimes
+
+This is the single most important ownership rule.
+
+`multi_pwsh_broker_frame_release` releases **only the readable delivery
+handle**. It does **not** abandon the request, does not make the frame
+terminal, and does not send an automatic reply. The correlation remains
+outstanding until `reply`, `reply_error`, `cancel`, its deadline, or channel
+close.
+
+That separation is precisely what lets a pump copy a frame, release the
+handle, return to `wait`, and have its dispatcher reply much later. Abandonment
+is never implicit: a consumer that decides not to service a request must say so
+with `multi_pwsh_broker_reply_error`, and a consumer that simply disappears is
+bounded by the deadline.
+
+| Object | Owner | Rules |
+| --- | --- | --- |
+| Channel handle | Consumer | Monotonic `uint64`, never reused by the process. Released by `multi_pwsh_broker_close`. |
+| Delivery (frame) handle | The **pump thread that received it** | Returned by `multi_pwsh_broker_wait`. Read and released on that same thread. Releasing from another thread fails with `MULTI_PWSH_BROKER_DISPATCH_VIOLATION`. Releasing is not abandonment. |
+| Frame body | Rust | Copied out by `multi_pwsh_broker_frame_read`. Rust never retains a consumer buffer and the consumer never receives a Rust pointer. |
+| Correlation ID | Channel | Channel-scoped, monotonic, never reused. Valid for reply/cancel from **any** thread until the frame is terminal. |
+
+Handle non-reuse is by monotonic allocation, matching every other handle table
+in this ABI: a released or stale handle is simply absent and deterministically
+returns `MULTI_PWSH_INVALID_HANDLE`.
+
+Ownership of a delivery handle is tracked by a **process-unique owner token**
+allocated per `wait` and stored both in the frame record and in the receiving
+thread's thread-local state. A token, not a thread identifier, is used because
+operating-system thread IDs can be reused. Consequences:
+
+- Release requires a matching token, so one thread can never release another
+  thread's delivery handle.
+- If the owning thread exits without releasing, the delivery handle is
+  reclaimed at channel close. The **request itself is unaffected** and still
+  completes through its deadline, because release is not abandonment.
+- Channel close and deadline expiry never block on a held delivery handle.
+
+### Canonical wire structures
+
+Every exported metadata field is fixed width. There is **no `usize`, no raw
+pointer, and no platform-dependent field** in exported broker metadata, so the
+layout is identical on 32-bit and 64-bit targets. All multi-byte integers are
+**little-endian**. Both structures are size- and version-checked on entry; a
+mismatched `size` or `abi_version` fails with `MULTI_PWSH_INVALID_ARGUMENT`
+before any other field is read.
+
+```c
+#define MULTI_PWSH_BROKER_ABI_V1 1u
+
+typedef struct {                 /* 24 bytes: 0,4,8,12,16,20 */
+    uint32_t size;               /* = sizeof(struct); validated first          */
+    uint32_t abi_version;        /* = MULTI_PWSH_BROKER_ABI_V1                 */
+    uint32_t max_inflight;       /* 1..32,     default 32                      */
+    uint32_t max_body_bytes;     /* 1..65536,  default 65536                   */
+    uint32_t default_deadline_ms;/* 1..30000,  default 30000                   */
+    uint32_t flags;              /* reserved, must be 0                        */
+} multi_pwsh_broker_channel_options;
+
+typedef struct {                 /* 56 bytes: 0,4,8,16,24,32,36,40,44,48,52 */
+    uint32_t size;               /* = sizeof(struct)                           */
+    uint32_t abi_version;        /* = MULTI_PWSH_BROKER_ABI_V1                 */
+    uint64_t correlation_id;     /* channel-scoped, monotonic, never reused    */
+    uint64_t ordering_key;       /* one active mutating frame per key          */
+    uint64_t deadline_epoch_ms;  /* absolute, channel-owned monotonic epoch    */
+    uint32_t remaining_ms;       /* computed at this call; 0 means expired     */
+    uint32_t kind;               /* application-defined frame kind             */
+    uint32_t flags;              /* see table below                            */
+    uint32_t body_length;        /* 0..max_body_bytes                          */
+    uint32_t state;              /* observational frame state, see table       */
+    uint32_t dropped_before;     /* one-way frames coalesced before this one   */
+} multi_pwsh_broker_frame_info;
+```
+
+| Flag | Value | Meaning |
+| --- | --- | --- |
+| `ONE_WAY` | `0x1` | Event frame. No reply is expected or accepted. |
+| `MUTATING` | `0x2` | Participates in one-active-frame-per-ordering-key. |
+
+| `state` | Value | Terminal |
+| --- | --- | --- |
+| `Queued` | `0` | no |
+| `Dispatched` | `1` | no |
+| `Completed` | `2` | yes |
+| `Failed` | `3` | yes |
+| `Cancelled` | `4` | yes |
+| `TimedOut` | `5` | yes |
+| `Aborted` | `6` | yes |
+
+Bounds are hard failures, never silent truncation. A request body above
+`max_body_bytes`, or a reply/error message above it, fails with
+`MULTI_PWSH_INVALID_ARGUMENT` before it is queued or applied; it is never
+truncated and delivered. A null body pointer is valid only with
+`body_len == 0`. `reply_error` messages are additionally capped at 512 UTF-8
+bytes and rejected, not truncated, above that.
+
+`max_inflight` counts **every non-terminal correlation on the channel**, both
+`Queued` and `Dispatched`, so releasing a delivery handle does not free a slot
+and the bound is a real concurrency and memory limit.
+
+`multi_pwsh_broker_wait` permits multiple simultaneous waiters on one channel.
+Each queued frame is delivered to exactly one waiter.
+
+### Deadline epoch
+
+Each channel owns **one** monotonic epoch captured at
+`multi_pwsh_broker_open`. Every deadline in that channel is a `uint64`
+millisecond offset from that single epoch, so the payload, Rust, and the
+consumer never disagree and no wall-clock change can move a deadline.
+
+Deadlines are **absolute**, not a relative duration copied into the frame. A
+frame that waited in the queue reports the time it actually has left in
+`remaining_ms`; a relative value computed at enqueue would let a handler start
+with a full budget moments before its raiser gives up.
+
+### Frame state machine
+
+```text
+                      +--------------------- payload calls broker_enqueue_and_wait
+                      v
+   Queued ---wait()---> Dispatched ---reply--------------> Completed
+     |                     |         ---reply_error------> Failed
+     |                     |         ---cancel-----------> Cancelled
+     |                     |         ---deadline---------> TimedOut
+     |                     |         ---close------------> Aborted
+     |---cancel----------> Cancelled
+     |---deadline--------> TimedOut
+     |---close-----------> Aborted
+     |---queue full------> (never queued; payload gets BrokerBusy)
+
+   frame_release affects only the delivery handle; it is NOT a state transition.
+```
+
+Exactly one terminal transition wins, applied atomically under the channel's
+own lock. The blocked payload raiser is released exactly once, in every path
+including consumer crash or abandonment. `Completed` is the only state that
+yields a reply body.
+
+`Completed`, `Failed`, `Cancelled`, `TimedOut` and `Aborted` are all terminal:
+a later `reply`, `reply_error`, or `cancel` for that correlation returns
+`MULTI_PWSH_BROKER_INVALID_TERMINAL_STATE` and **cannot** resurrect the frame,
+affect another frame, or be delivered to a reused correlation ID.
+
+Payload results per terminal state:
+
+| Terminal state | `broker_enqueue_and_wait` returns |
+| --- | --- |
+| `Completed` | `MULTI_PWSH_SUCCESS` with the copied reply body |
+| `Failed` | `MULTI_PWSH_MANAGED_FAILURE` with the consumer's bounded message as the call diagnostic |
+| `Cancelled` | `MULTI_PWSH_OPERATION_CANCELLED` |
+| `TimedOut` | `MULTI_PWSH_BROKER_TIMEOUT` |
+| `Aborted` | `MULTI_PWSH_BROKER_CLOSED` |
+
+A reply larger than the payload's `reply_capacity` fails that call with
+`MULTI_PWSH_BUFFER_TOO_SMALL` and reports the required length; the frame stays
+`Completed` and is not re-delivered.
+
+### Exact statuses
+
+New negative statuses continue the existing sequence
+(`MULTI_PWSH_UNSUPPORTED_CAPABILITY` is `-17`):
+
+| Status | Value | Raised when |
+| --- | --- | --- |
+| `MULTI_PWSH_BROKER_BUSY` | `-18` | The channel is at `max_inflight`, or an ordering key already has an active mutating frame. |
+| `MULTI_PWSH_BROKER_NO_CONSUMER` | `-19` | No pump has ever called `wait` on the channel, so a request would hang. Distinct from a pump that is attached but saturated, which is `BROKER_BUSY`. |
+| `MULTI_PWSH_BROKER_CLOSED` | `-20` | The channel is closing or closed. |
+| `MULTI_PWSH_BROKER_INVALID_TERMINAL_STATE` | `-21` | Duplicate reply, late reply, reply to a one-way frame, or reply to an unknown correlation. |
+| `MULTI_PWSH_BROKER_DISPATCH_VIOLATION` | `-22` | A non-broker FFI call was made while holding a delivery handle, or a delivery handle was released without its owner token. |
+| `MULTI_PWSH_BROKER_TIMEOUT` | `-23` | The request passed its absolute deadline. |
+
+"A pump has waited" is a sticky per-channel fact: once any thread has called
+`multi_pwsh_broker_wait`, the channel is considered attached for its lifetime.
+A pump that later exits does not retroactively turn requests into
+`BROKER_NO_CONSUMER`; those requests fail on their deadline instead.
+
+`multi_pwsh_broker_wait` reports "nothing arrived" as `MULTI_PWSH_SUCCESS` with
+`*frame == 0` rather than a status, matching `multi_pwsh_operation_wait`'s
+existing convention of reporting a non-terminal outcome on timeout.
+
+Broker statuses are written **directly** into `multi_pwsh_call_result`. They
+must never be routed through `FfiBindingError`/`managed_failure()`, which maps
+unrecognised values to `MULTI_PWSH_MANAGED_FAILURE` and would erase them.
+
+Every broker export writes its own bounded per-call diagnostic through the
+existing `multi_pwsh_call_result`. There is no global last-error slot.
+
+### Normative call-guard matrix
+
+The existing guards are load-bearing and each broker entry point must use the
+correct one. `v2_call` rejects whenever *any* pipeline is active anywhere;
+`v2_call_allow_active_pipeline` rejects only when the *calling thread* is
+inside a pipeline execution scope.
+
+| Entry point | Guard | Reason |
+| --- | --- | --- |
+| `multi_pwsh_broker_open`, `multi_pwsh_set_broker` | `v2_call` | Called before invocation; must not race a running pipeline. |
+| `broker_close`, `wait`, `frame_get_info`, `frame_read`, `frame_release`, `reply`, `reply_error`, `cancel` | `v2_call_allow_active_pipeline` | The pump runs **while** a pipeline is active. Plain `v2_call` would return `MULTI_PWSH_BACKPRESSURE` and make the channel useless. |
+| `broker_enqueue_and_wait`, `broker_post` | **neither** | These are payload trampolines called from a pipeline thread whose thread-local execution depth is nonzero, so even the permissive helper would reject them. They use `prepare_call_result` plus panic containment directly, exactly like `capability_dispatch`. |
+
+Using different guards for open and wait is correct, not an inconsistency.
+
+The delivery-handle check is evaluated **before** any test-only scope lock is
+acquired, so a misusing call returns `MULTI_PWSH_BROKER_DISPATCH_VIOLATION`
+deterministically instead of deadlocking a unit test.
+
+### Lock ownership
+
+Broker waiting must never hold a shared lock.
+
+1. `broker_enqueue_and_wait` clones the channel `Arc` **under** the global
+   `STATE` mutex, **drops `STATE`**, and only then waits on the channel's own
+   `Mutex`/`Condvar`.
+2. No broker data-plane operation ever acquires `SESSION_OPERATION_LOCK`. That
+   lock is held across pipeline execution, so a reply that needed it would
+   deadlock permanently.
+3. No channel lock is held while reacquiring `STATE` or while calling managed
+   code.
+
+### Dispatch-only liveness
+
+**This first DBC version has no synchronous nested invocation path at all.**
+There is no wait-for graph, no causality token, and no reentrancy budget,
+because none of those can be made safe before a complete resource model exists.
+
+**Mandatory precondition: a builder with a broker attached may only be invoked
+asynchronously.** `multi_pwsh_set_broker` marks the builder, and the
+synchronous paths — `multi_pwsh_invoke` and the legacy `multi_pwsh_invoke_utf8`
+— **reject** that builder with `MULTI_PWSH_UNSUPPORTED_CAPABILITY`. DBC is
+carried only through the four asynchronous paths: async/live invocation, typed
+result invocation, and observed invocation, in each case installed at start and
+cleared on every completion, stop, release, and failed-start path.
+
+This precondition is what makes the liveness claim true rather than
+aspirational. Without it a UI thread could synchronously invoke a pipeline,
+the pipeline could raise a request, and the pump could post its handler back to
+that same blocked UI thread — a deadlock in which **no FFI call ever occurs**,
+so no guard could fire. Forbidding synchronous invocation removes that shape
+entirely, mechanically and at attach time.
+
+The remaining rules are also mechanical, not advisory:
+
+1. A pump handler **must** copy the frame, hand it to the application's own
+   dispatcher, release the delivery handle, and return to
+   `multi_pwsh_broker_wait`.
+2. While a thread holds a delivery handle, **every non-broker FFI export called
+   from that thread fails with `MULTI_PWSH_BROKER_DISPATCH_VIOLATION`.** This is
+   enforced at the single choke point that 87 of the 88 exports already share;
+   `multi_pwsh_get_abi_info` is exempt because it reads a static struct and
+   takes no call-result. Consumers must not feature-probe while holding a
+   delivery handle.
+3. A handler therefore cannot start a pipeline, invoke a session, open a
+   channel, or wait on work caused by its own frame. Direct recursion,
+   cross-key A→B→A cycles, and pump saturation are impossible because no pump
+   worker may block on broker-caused work.
+4. Replies happen later, from any thread, by correlation ID. A handler learns
+   that nobody is waiting any more because its `reply` returns
+   `MULTI_PWSH_BROKER_INVALID_TERMINAL_STATE`; there is no separate consumer
+   cancellation notification in this version.
+5. **One active mutating frame per ordering key.** A second mutating frame for
+   the same key is not dispatched while the first is non-terminal, so side
+   effects for one key cannot be reordered or interleaved.
+6. **One-way frames never block a producer.** When the channel is full, a
+   one-way frame first evicts the oldest queued one-way frame of the same
+   `kind`; if there is none, it evicts the oldest queued one-way frame of any
+   kind; if there is still none, the post is dropped. Every eviction or drop
+   increments a counter reported in the next delivered frame's
+   `dropped_before`. `broker_post` returns `MULTI_PWSH_SUCCESS` in all three
+   cases — an event must never apply backpressure to a pipeline.
+
+Because the existing guard already rejects ordinary FFI calls while any
+pipeline is active, an application dispatcher that tries to call back into
+PowerShell during the invocation it is servicing still receives
+`MULTI_PWSH_BACKPRESSURE`. DBC does not relax that rule.
+
+### Compatibility and rejection
+
+The payload binding table stays a **required, all-or-nothing V1 contract**.
+DBC adds exactly one slot, `PowerShell_SetBrokerContext`, **appended after the
+current final slot** so no existing slot offset moves. Appending is mandatory:
+inserting the slot mid-table would let an older host load a larger table and
+call through shifted, incorrectly typed pointers.
+
+There are two distinct feature-bit contracts and both gain a DBC bit:
+
+- the **payload table** required-feature mask, validated header-first before
+  the table is read;
+- the **public native ABI** feature word reported by `multi_pwsh_get_abi_info`.
+
+Because 0.17 is unreleased, this is an intentional synchronized change to the
+matched table rather than a compatibility shim. The consequences are explicit:
+
+- A payload table that is older, undersized, missing the new required feature
+  bit, or has any null slot is rejected by the existing header-first check
+  **before any channel can open and before any invocation runs**.
+- A newer Rust host cannot load an older payload table. That is the intended
+  behaviour: the native asset and the managed payload bindings ship together.
+- There is no optional-slot negotiation and none is planned.
+
+The synchronized change set is larger than the slot itself, and every item is
+required in the same commit:
+
+| Location | Changes |
+| --- | --- |
+| `crates\pwsh-sdk-ffi\src\lib.rs` | broker statuses, public feature bit, channel/frame tables, ten exports, two trampolines, guard-matrix wiring |
+| `crates\pwsh-host\src\bindings\ffi.rs` | required feature mask, raw table field, fn alias, null-slot list, typed `FfiBindings` field, transmute initializer, wrapper method |
+| `dotnet\bindings\FfiBindings.cs` | payload feature constant, table field, feature mask, slot initializer, `UnmanagedCallersOnly` method, `$DpsBroker` bridge, all four async invocation paths |
+| `dotnet\sdk-ffi\` | `NativeMethods.cs` imports, `PowerShellFfiStatus.cs`, facade feature check, `PowerShellBrokerChannel` and its DTOs |
+| `tests\Verify-PwshFfiApiBaseline.ps1` | slot descriptor, size `688` → `696`, feature expression, Rust field order, alias fixture, status/struct expectations |
+| `tests\PwshFfiApiBaselineInspector\Program.cs` | required-feature mask/loop |
+| `tests\PwshFfiApiBaseline.txt` | new binding entry and new public facade surface |
+| `dotnet\nativeaot-sample\` | end-to-end pump smoke |
+
+### What DBC deliberately does not carry
+
+The broker moves **bounded opaque byte frames and fixed-width metadata**. It is
+not an object bridge. The following are excluded by construction, not by
+convention:
+
+- no dynamic member access, reflection, member discovery, or runtime contract
+  negotiation;
+- no JSON or any self-describing text wire format;
+- no `PSObject`, `ErrorRecord`, SMA type, live runspace, or CLR object identity;
+- no delegates, function pointers, `GCHandle`, or arbitrary callbacks from
+  script;
+- no credential, `SecureString`, or secret material — DBC frames are ordinary
+  copied data and must never be used as a secret transport;
+- no injection of a consumer bridge object into a **remote** runspace: a
+  payload proxy is a local managed object and would be serialized, stripping
+  its members;
+- no relaxed package compatibility fallback.
+
+Frame `kind` values and body encodings are application-owned static contract
+data in this tranche. The generated contract layer that gives them meaning is
+deliberately a later, separate change.
+
 ## Explicit limitations
 
 This is not binary or source compatible with the full PowerShell SDK. The
@@ -885,7 +1343,10 @@ runspace connection information, remoting transports/providers, nested live
 PowerShell, steppable pipelines, generic CLR values, or arbitrary initial
 session-state objects. Capability callbacks are registered immutable DTO
 handlers only; there is no host callback vtable, callback rooting,
-prompt/credential callback, or arbitrary delegate/object bridge. Custom
+prompt/credential callback, or arbitrary delegate/object bridge. The Duplex
+Broker Channel does not change this: it is a pull pump over bounded opaque byte
+frames, so it adds no callback into the consumer, no delegate rooting, and no
+object bridge. Custom
 remoting and actual session pools remain permanent non-goals until a separate
 bounded architecture proves their lifecycle and concurrency semantics.
 
