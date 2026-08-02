@@ -2050,6 +2050,25 @@ object. That distinction is what makes the split below work.
    `liveObjectVariables` retains it and reconciles after each one — so the two
    halves genuinely can have different lifetimes.
 
+   That split was verified independently rather than assumed, and the check
+   returned three constraints the implementation must respect:
+
+   - **Retention is by exact reference.** Reconciliation matches a retained
+     lease against live runspace variables with `ReferenceEquals`, so a script
+     that reassigns, removes, wraps, or copies the value drops the proxy. Only
+     an exact alias survives. A bridge proxy is therefore no more durable than
+     the variable holding it, and the design must not assume otherwise.
+   - **Reconciliation is not transactional.** It disposes as it walks and
+     rebuilds afterwards, and reading a lease's value can throw, so an
+     exception part-way through can dispose earlier entries and propagate. A v2
+     proxy joining that dictionary must not be able to throw from that path.
+   - **The invocation window has two escape hatches.** `Stop` alone does not
+     close it — removal waits for a later completion or disposal — and
+     `Cleanup` sets its completed flag *before* doing any work, so a failure
+     part-way through skips the rest permanently rather than retrying. Lease
+     close must therefore be idempotent and exception-safe on its own terms,
+     not merely placed in that path and assumed to run.
+
 3. **The host-side construction API.** Retiring the COM carrier removes what an
    author writes but requires the SDK to grow a replacement that associates a
    dispatcher, a channel, and a payload variable. That is new public facade
