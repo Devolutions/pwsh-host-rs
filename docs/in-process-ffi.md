@@ -1998,39 +1998,49 @@ too large rather than the review too harsh — two passes on the compiler
 converged. So the carrier move is split, and each piece is independently
 testable and survives a decision already made.
 
+**Leases are invocation-scoped, decided up front rather than during the carrier
+move.** Bind and unbind *are* `Open` and `Close`, and an unbind arriving while a
+call is in flight is the same idempotent first-caller-wins transition as close,
+never a second mechanism.
+
+The argument for it is not that a captured object should not outlive its
+invocation — that presupposes the answer. It is that **the transport is bound
+per invocation regardless**, so a session-scoped lease would persist while being
+unusable outside an invocation. "Session-scoped" would then name a lease that
+survives but cannot be called, which is strictly worse than one that honestly
+ends. Once the carrier binds per invocation, invocation scope is forced rather
+than chosen.
+
 **One correction first.** It is tempting to say the sink is what creates the
 invocation signal that lease scoping needs. It is not: the signal already exists,
 because `$DpsBroker` is installed at invocation start and removed at cleanup.
 What is missing is a **pack-reachable object** to deliver it to. The sink is that
 object. That distinction is what makes the split below work.
 
-1. **The sink handshake — payload and pack only.** The direction bit, including
+1. **The sink handshake and invocation leases.** The direction bit, including
    the validation mask on both sides and the baseline; the sink interface; the
    registry accepting and routing v2 contracts; the payload bindings driving the
    handshake; a declaration state machine; and the requested identity exposed so
    a pack holding two v2 contracts can select. COM still carries `Invoke`
    throughout, and no facade surface moves.
 
-   It is self-contained only with an explicit split inside it: **discovery
-   happens once, when the live-object variable is set, and the transport is
-   bound and unbound per invocation through the sink.** A pack proxy created at
-   variable-set time survives across invocations — `liveObjectVariables` retains
-   it and reconciles after each one — so the two halves genuinely can have
-   different lifetimes. Without that split, discovery would have to happen inside
-   the invocation window, the proxy would be created per invocation, and lease
-   scope would be decided by accident rather than on purpose.
+   Discovery and lifetime are one **increment** but not one **mechanism**, and
+   keeping them distinct is what makes the increment tractable: a pack proxy is
+   created **once**, when the live-object variable is set, and its **lease** is
+   opened at each invocation bind and closed at unbind. Discovery is a COM
+   `QueryInterface` and a declaration handshake over metadata that never
+   changes, so repeating it per invocation would buy nothing. A pack proxy
+   created at variable-set time survives across invocations —
+   `liveObjectVariables` retains it and reconciles after each one — so the two
+   halves genuinely can have different lifetimes.
 
-2. **Lease scope.** Once a sink exists and its transport binds per invocation,
-   opening lazily on first bound invocation or per bind is a free choice made on
-   its own evidence, not under pressure inside a carrier move.
-
-3. **The host-side construction API.** Retiring the COM carrier removes what an
+2. **The host-side construction API.** Retiring the COM carrier removes what an
    author writes but requires the SDK to grow a replacement that associates a
    dispatcher, a channel, and a payload variable. That is new public facade
    surface and gets its own design and its own adversarial review rather than
    riding along with a transport swap.
 
-4. **The carrier move.** By then the handshake and the lease semantics exist and
+3. **The carrier move.** By then the handshake and the lease semantics exist and
    are tested, so this is closer to the transport swap it was originally scoped
    as: reply envelope, transport-failure mapping, routing prefix, `Open`/`Close`
    over the channel, one-way events, and the pump.
