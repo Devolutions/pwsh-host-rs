@@ -1939,7 +1939,10 @@ The unambiguous "not supported" answer a v1 pack must give comes from the
 `PowerShellLiveObjectDirection` bit, and the payload only offers the sink to
 contracts carrying it. A v1 pack never declares that bit and is therefore never
 asked, so a generic `E_FAIL` from a v1 pack can never be confused with a broken
-v2 pack. Adding a direction bit changes no struct layout and no slot.
+v2 pack. The bit changes no struct layout and no slot, but it is **not free**:
+Rust independently rejects any direction outside `0x03`, so it needs a
+validation change on both sides and a baseline update. That remains far smaller
+than appending function-pointer slots to the pack ABI.
 
 Ownership follows the proven v1 pattern on both sides: the payload releases the
 transit pointer after `create_payload_proxy` returns, and the pack proxy owns its
@@ -1975,7 +1978,51 @@ principle that selected a dedicated channel in the first place. It costs
 consumers the ability to mix hand-rolled broker frames with a generated bridge in
 one invocation.
 
-##### What the move does and does not buy
+##### What this pass still does not solve
+
+The second pass was reviewed and did not fully survive either. It is closer, and
+the corrections above hold, but these remain open and several need a product
+decision rather than more design:
+
+1. **Discovery is one-directional and cannot select a contract.** The registry
+   stores one `create_payload_proxy` per pack and calls it with only an
+   `IUnknown`, so a pack holding two v2 contracts cannot know which one the
+   payload asked for. The sink must expose the *requested* identity for the pack
+   to read before it declares, or a pack must be limited to one v2 contract.
+2. **The sink needs a state machine.** The registry accepts any callback that
+   returns a non-zero proxy, so it cannot detect a missing or duplicated
+   declaration, or traffic sent before binding completes.
+3. **`Open`/`Close` as bind/unbind *is* an invocation-scoped lease**, which this
+   task explicitly defers. Either that lifecycle is adopted now, or `Open`
+   happens once lazily and bind only attaches the invocation's transport.
+4. **A timed-out `Open` can strand a lease.** The dispatcher allocates before
+   replying, and a late reply merely fails, so the allocation must be rolled
+   back on every delivery failure.
+5. **The capacity inequality is not the real budget.** Member maxima already
+   include their frame headers, requests and replies need different allowances,
+   and `Open`, `Release`, `Close`, and events are not declared members at all.
+6. **Transport failure has no payload semantics.** Only a completed frame
+   carries a body; cancelled, timed out, aborted, busy, and no-consumer
+   outcomes need a defined mapping distinct from bridge statuses.
+7. **Routing identifies a schema, not an instance**, so two bindings of the same
+   contract on one channel cannot be told apart — and the `Open` frame has no
+   lease yet to disambiguate with.
+8. **The direction bit is not free after all.** Rust independently rejects any
+   direction outside `0x03`, so the bit needs a validation change on both sides
+   and a baseline update. That is still far smaller than appending slots to the
+   pack ABI, so the conclusion stands and the framing does not.
+9. **There is no host-side non-COM construction path.** The only existing
+   abstraction requires a generated COM interface and exports an `IUnknown`, so
+   deleting the COM carrier leaves nothing that associates a dispatcher, a
+   channel, and a payload variable. That is new public facade surface.
+
+A third option for the one-channel question is better than either recorded
+above: keep the single builder slot but give it an explicit **role**, so an
+additive attach marks the channel as carrying bridge traffic and the payload
+then deterministically installs bridge sinks or `$DpsBroker`, never both, and
+rejects mixed use outright.
+
+
 
 It moves application code off the pipeline thread and bounds the producer's wait
 by its deadline. It does **not** make the dispatcher's no-wait and no-lock rules
