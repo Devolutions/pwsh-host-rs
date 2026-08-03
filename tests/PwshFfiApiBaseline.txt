@@ -904,3 +904,45 @@ facade:type:Devolutions.PowerShell.Ffi.PowerShellRuntimeDiagnosticReport
 native:multi_pwsh_copy_runtime_diagnostics_contract_pack_identity_utf8
 native:multi_pwsh_copy_runtime_diagnostics_power_shell_file_version_utf8
 native:multi_pwsh_get_runtime_diagnostics_info
+bindings:FfiPowerShell_SetBrokerContext
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellBrokerChannelOptions::Void .ctor(Int32, Int32, System.Nullable`1[System.TimeSpan])
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBrokerChannelOptions::Int32 MaximumSupportedBodyBytes
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBrokerChannelOptions::Int32 MaximumSupportedInflightFrames
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBrokerChannelOptions::System.TimeSpan MaximumSupportedDeadline
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus BrokerBusy
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus BrokerClosed
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus BrokerDispatchViolation
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus BrokerInvalidTerminalState
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus BrokerNoConsumer
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFfiStatus::Devolutions.PowerShell.Ffi.PowerShellFfiStatus BrokerTimeout
+facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShell WithBroker(Devolutions.PowerShell.Ffi.PowerShellBrokerChannel)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBrokerChannel::Boolean TryCancel(UInt64)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBrokerChannel::Boolean TryReceive(System.TimeSpan, Devolutions.PowerShell.Ffi.PowerShellBrokerRequest ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBrokerChannel::Boolean TryReply(UInt64, System.ReadOnlySpan`1[System.Byte])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBrokerChannel::Boolean TryReplyError(UInt64, Int32, System.String)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBrokerChannel::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellBrokerChannel CreateBrokerChannel(Devolutions.PowerShell.Ffi.PowerShellBrokerChannelOptions)
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerChannelOptions::Int32 MaximumBodyBytes
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerChannelOptions::Int32 MaximumInflightFrames
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerChannelOptions::System.TimeSpan DefaultDeadline
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerRequest::Boolean IsMutating
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerRequest::Boolean IsOneWay
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerRequest::Byte[] Body
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerRequest::System.TimeSpan Remaining
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerRequest::UInt32 DroppedBefore
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerRequest::UInt32 Kind
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerRequest::UInt64 CorrelationId
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerRequest::UInt64 OrderingKey
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBrokerChannel
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBrokerChannelOptions
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBrokerRequest
+native:multi_pwsh_broker_cancel
+native:multi_pwsh_broker_close
+native:multi_pwsh_broker_frame_get_info
+native:multi_pwsh_broker_frame_read
+native:multi_pwsh_broker_frame_release
+native:multi_pwsh_broker_open
+native:multi_pwsh_broker_reply
+native:multi_pwsh_broker_reply_error
+native:multi_pwsh_broker_wait
+native:multi_pwsh_set_broker

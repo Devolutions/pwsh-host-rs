@@ -33,6 +33,33 @@ internal unsafe struct NativeDataValue
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct NativeBrokerChannelOptions
+{
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint MaximumInflightFrames;
+    internal uint MaximumBodyBytes;
+    internal uint DefaultDeadlineMilliseconds;
+    internal uint Flags;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeBrokerFrameInfo
+{
+    internal uint Size;
+    internal uint AbiVersion;
+    internal ulong CorrelationId;
+    internal ulong OrderingKey;
+    internal ulong DeadlineEpochMilliseconds;
+    internal uint RemainingMilliseconds;
+    internal uint Kind;
+    internal uint Flags;
+    internal uint BodyLength;
+    internal uint State;
+    internal uint DroppedBefore;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeCapabilityRegistration
 {
     internal uint Size;
@@ -783,5 +810,76 @@ internal static unsafe partial class NativeMethods
     internal static partial int CreateSessionPool(
         NativeSessionPoolOptions* options,
         ulong* poolHandle,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_open")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerOpen(
+        NativeBrokerChannelOptions* options,
+        ulong* channelHandle,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_close")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerClose(ulong channelHandle, NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_wait")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerWait(
+        ulong channelHandle,
+        uint timeoutMilliseconds,
+        ulong* frameHandle,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_frame_get_info")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerFrameGetInfo(
+        ulong frameHandle,
+        NativeBrokerFrameInfo* info,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_frame_read")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerFrameRead(
+        ulong frameHandle,
+        byte* buffer,
+        uint capacity,
+        uint* required,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_frame_release")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerFrameRelease(ulong frameHandle, NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_reply")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerReply(
+        ulong channelHandle,
+        ulong correlationId,
+        byte* body,
+        uint bodyLength,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_reply_error")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerReplyError(
+        ulong channelHandle,
+        ulong correlationId,
+        int code,
+        NativeUtf8Span message,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_cancel")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerCancel(
+        ulong channelHandle,
+        ulong correlationId,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_set_broker")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int SetBroker(
+        ulong builderHandle,
+        ulong channelHandle,
         NativeCallResult* result);
 }

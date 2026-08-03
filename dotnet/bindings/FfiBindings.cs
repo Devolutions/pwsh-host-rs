@@ -68,6 +68,7 @@ namespace NativeHost
         private const ulong FfiFeatureObservedInvocation = 1UL << 22;
         private const ulong FfiFeatureSessionPreflight = 1UL << 23;
         private const ulong FfiFeatureRuntimeDiagnostics = 1UL << 24;
+        private const ulong FfiFeatureDuplexBrokerChannel = 1UL << 25;
         private const uint FfiTypedResultPageTerminal = 1;
         private const uint FfiTypedResultPageTruncated = 1 << 1;
         private const uint FfiTypedResultPageComplete = 1 << 2;
@@ -201,6 +202,7 @@ namespace NativeHost
             public IntPtr ObservedDiagnosticPage_Release;
             public IntPtr PowerShellSession_PreflightConfigured;
             public IntPtr RuntimeDiagnostics_CopyPowerShellFileVersionUtf8;
+            public IntPtr PowerShell_SetBrokerContext;
         }
 
         private const int FfiPreflightMaximumTextLength = 128;
@@ -1131,7 +1133,7 @@ namespace NativeHost
                     FfiFeatureSessionConfiguration | FfiFeatureSessionVariables | FfiFeatureCapabilityRpc |
                     FfiFeatureLiveObjectProbe | FfiFeatureLiveSessionObjectProbe | FfiFeatureLiveObjectContracts |
                     FfiFeatureLiveStreamPolling | FfiFeatureTypedResultPaging | FfiFeatureObservedInvocation |
-                    FfiFeatureSessionPreflight | FfiFeatureRuntimeDiagnostics,
+                    FfiFeatureSessionPreflight | FfiFeatureRuntimeDiagnostics | FfiFeatureDuplexBrokerChannel,
                 PowerShell_Create = (IntPtr)(delegate* unmanaged<IntPtr*, FfiCallResult*, int>)&FfiPowerShell_Create,
                 PowerShell_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiPowerShell_Release,
                 PowerShell_AddArgumentUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, FfiCallResult*, int>)&FfiPowerShell_AddArgumentUtf8,
@@ -1215,6 +1217,7 @@ namespace NativeHost
                 ObservedDiagnosticPage_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiObservedDiagnosticPage_Release,
                 PowerShellSession_PreflightConfigured = (IntPtr)(delegate* unmanaged<uint, uint, uint, uint, uint, uint, uint, uint, uint, byte*, int, byte*, int, byte*, int, byte*, int, byte*, int, byte*, int, int*, FfiCallResult*, int>)&FfiPowerShellSession_PreflightConfigured,
                 RuntimeDiagnostics_CopyPowerShellFileVersionUtf8 = (IntPtr)(delegate* unmanaged<byte*, int, int*, int*, FfiCallResult*, int>)&FfiRuntimeDiagnostics_CopyPowerShellFileVersionUtf8,
+            PowerShell_SetBrokerContext = (IntPtr)(delegate* unmanaged<IntPtr, ulong, ulong, IntPtr, IntPtr, uint, FfiCallResult*, int>)&FfiPowerShell_SetBrokerContext,
             };
         }
 
@@ -2378,7 +2381,8 @@ namespace NativeHost
                     pipeline.PowerShell,
                     TakeCompletedInput(ptrHandle),
                     pipeline.Session,
-                    pipeline.TakeCapabilityContext());
+                    pipeline.TakeCapabilityContext(),
+                    pipeline.TakeBrokerContext());
                 try
                 {
                     liveInvocation.Start();
@@ -2420,6 +2424,7 @@ namespace NativeHost
                     TakeCompletedInput(ptrHandle),
                     pipeline.Session,
                     pipeline.TakeCapabilityContext(),
+                    pipeline.TakeBrokerContext(),
                     typedResults);
                 try
                 {
@@ -2656,6 +2661,7 @@ namespace NativeHost
                     TakeCompletedInput(ptrHandle),
                     pipeline.Session,
                     pipeline.TakeCapabilityContext(),
+                    pipeline.TakeBrokerContext(),
                     typedResults,
                     diagnostics);
                 try
@@ -3079,6 +3085,36 @@ namespace NativeHost
                 }
 
                 pipeline.SetCapabilityContext(new FfiCapabilityContext(registrationHandle, invocationId, dispatcher));
+            });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiPowerShell_SetBrokerContext(
+            IntPtr ptrHandle,
+            ulong channelHandle,
+            ulong generation,
+            IntPtr enqueue,
+            IntPtr post,
+            uint maximumBodyBytes,
+            FfiCallResult* result)
+        {
+            return Execute(result, () =>
+            {
+                FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                if (channelHandle == 0 && generation == 0 && enqueue == IntPtr.Zero && post == IntPtr.Zero &&
+                    maximumBodyBytes == 0)
+                {
+                    pipeline.ClearBrokerContext();
+                    return;
+                }
+                if (channelHandle == 0 || generation == 0 || enqueue == IntPtr.Zero || post == IntPtr.Zero ||
+                    maximumBodyBytes == 0 || maximumBodyBytes > 64 * 1024)
+                {
+                    throw new InvalidOperationException("Broker context is invalid.");
+                }
+
+                pipeline.SetBrokerContext(
+                    new FfiBrokerContext(channelHandle, generation, enqueue, post, (int)maximumBodyBytes));
             });
         }
 
@@ -3529,6 +3565,7 @@ namespace NativeHost
         {
             private int disposed;
             private FfiCapabilityContext capabilityContext;
+            private FfiBrokerContext brokerContext;
 
             public FfiPowerShellPipeline(PowerShell powerShell, FfiPowerShellSession session)
             {
@@ -3560,6 +3597,28 @@ namespace NativeHost
             public void ClearCapabilityContext()
             {
                 capabilityContext = null;
+            }
+
+            public void SetBrokerContext(FfiBrokerContext value)
+            {
+                if (Volatile.Read(ref disposed) != 0)
+                {
+                    throw new ObjectDisposedException(nameof(FfiPowerShellPipeline));
+                }
+
+                brokerContext = value ?? throw new ArgumentNullException(nameof(value));
+            }
+
+            public FfiBrokerContext TakeBrokerContext()
+            {
+                FfiBrokerContext value = brokerContext;
+                brokerContext = null;
+                return value;
+            }
+
+            public void ClearBrokerContext()
+            {
+                brokerContext = null;
             }
 
             public void Dispose()
@@ -4326,11 +4385,20 @@ namespace NativeHost
                 }
 
                 disposed = true;
-                AddEventLocked(StateClosed);
-                ReleaseAllLiveObjectVariablesLocked();
-                if (ownsRunspace)
+                try
                 {
-                    runspace.Dispose();
+                    AddEventLocked(StateClosed);
+                    ReleaseAllLiveObjectVariablesLocked();
+                }
+                finally
+                {
+                    // The guard above is already set, so a skipped dispose here
+                    // leaks the runspace permanently. A failing lease release must
+                    // not strand it.
+                    if (ownsRunspace)
+                    {
+                        runspace.Dispose();
+                    }
                 }
             }
 
@@ -6477,6 +6545,149 @@ namespace NativeHost
             }
         }
 
+        private sealed unsafe class FfiBrokerContext
+        {
+            private readonly ulong channelHandle;
+            private readonly ulong generation;
+            private readonly IntPtr enqueue;
+            private readonly IntPtr post;
+            private readonly int maximumBodyBytes;
+
+            public FfiBrokerContext(
+                ulong channelHandle,
+                ulong generation,
+                IntPtr enqueue,
+                IntPtr post,
+                int maximumBodyBytes)
+            {
+                this.channelHandle = channelHandle;
+                this.generation = generation;
+                this.enqueue = enqueue;
+                this.post = post;
+                // The channel's configured bound, not an assumed 64 KiB: a smaller
+                // channel must reject an oversized body here rather than at the
+                // native boundary.
+                this.maximumBodyBytes = maximumBodyBytes;
+            }
+
+            public byte[] Request(uint kind, byte[] body)
+            {
+                body ??= Array.Empty<byte>();
+                if (body.Length > maximumBodyBytes)
+                {
+                    throw new InvalidOperationException("The broker request body exceeds its bound.");
+                }
+
+                byte[] reply = new byte[maximumBodyBytes];
+                byte[] diagnostic = new byte[512];
+                fixed (byte* bodyPointer = body.Length == 0 ? new byte[1] : body)
+                fixed (byte* replyPointer = reply)
+                fixed (byte* diagnosticPointer = diagnostic)
+                {
+                    FfiNativeCallResult result = new()
+                    {
+                        Size = (uint)sizeof(FfiNativeCallResult),
+                        Diagnostic = diagnosticPointer,
+                        DiagnosticCapacity = (nuint)diagnostic.Length,
+                    };
+                    ulong correlation = 0;
+                    uint replyLength = 0;
+                    var invoke = (delegate* unmanaged[Cdecl]<
+                        ulong, ulong, uint, uint, ulong, uint,
+                        byte*, uint, ulong*, byte*, uint, uint*,
+                        FfiNativeCallResult*, int>)enqueue;
+                    int status = invoke(
+                        channelHandle,
+                        generation,
+                        kind,
+                        0,
+                        0,
+                        0,
+                        body.Length == 0 ? null : bodyPointer,
+                        (uint)body.Length,
+                        &correlation,
+                        replyPointer,
+                        (uint)reply.Length,
+                        &replyLength,
+                        &result);
+                    if (status != FfiStatusSuccess || result.Status != FfiStatusSuccess || replyLength > reply.Length)
+                    {
+                        throw new InvalidOperationException(DescribeBrokerFailure(result, diagnostic));
+                    }
+
+                    byte[] copied = new byte[replyLength];
+                    Buffer.BlockCopy(reply, 0, copied, 0, (int)replyLength);
+                    return copied;
+                }
+            }
+
+            public void Post(uint kind, byte[] body)
+            {
+                body ??= Array.Empty<byte>();
+                if (body.Length > maximumBodyBytes)
+                {
+                    throw new InvalidOperationException("The broker event body exceeds its bound.");
+                }
+
+                byte[] diagnostic = new byte[512];
+                fixed (byte* bodyPointer = body.Length == 0 ? new byte[1] : body)
+                fixed (byte* diagnosticPointer = diagnostic)
+                {
+                    FfiNativeCallResult result = new()
+                    {
+                        Size = (uint)sizeof(FfiNativeCallResult),
+                        Diagnostic = diagnosticPointer,
+                        DiagnosticCapacity = (nuint)diagnostic.Length,
+                    };
+                    var invoke = (delegate* unmanaged[Cdecl]<
+                        ulong, ulong, uint, ulong, byte*, uint, FfiNativeCallResult*, int>)post;
+                    int status = invoke(
+                        channelHandle,
+                        generation,
+                        kind,
+                        0,
+                        body.Length == 0 ? null : bodyPointer,
+                        (uint)body.Length,
+                        &result);
+                    if (status != FfiStatusSuccess || result.Status != FfiStatusSuccess)
+                    {
+                        throw new InvalidOperationException(DescribeBrokerFailure(result, diagnostic));
+                    }
+                }
+            }
+
+            private static string DescribeBrokerFailure(FfiNativeCallResult result, byte[] diagnostic)
+            {
+                int written = (int)Math.Min(result.DiagnosticWritten, (nuint)diagnostic.Length);
+                string detail = written > 0
+                    ? new UTF8Encoding(false, false).GetString(diagnostic, 0, written)
+                    : string.Empty;
+                return detail.Length > 0
+                    ? "The bounded broker request failed: " + detail
+                    : "The bounded broker request failed.";
+            }
+        }
+
+        private sealed class FfiBrokerBridge
+        {
+            private readonly FfiBrokerContext context;
+
+            public FfiBrokerBridge(FfiBrokerContext context)
+            {
+                this.context = context;
+            }
+
+            public byte[] Request(uint kind, byte[] body)
+            {
+                return context.Request(kind, body);
+            }
+
+            public void Post(uint kind, byte[] body)
+            {
+                context.Post(kind, body);
+            }
+        }
+
         private sealed class FfiLiveInvocation : IDisposable
         {
             private readonly object gate = new object();
@@ -6497,8 +6708,13 @@ namespace NativeHost
             private EventHandler<DataAddedEventArgs> debugAdded;
             private EventHandler<DataAddedEventArgs> informationAdded;
             private EventHandler<DataAddedEventArgs> progressAdded;
+            private readonly FfiBrokerContext brokerContext;
             private Runspace capabilityRunspace;
-            private PSVariable previousCapabilityVariable;
+            private bool hadPreviousCapabilityVariable;
+            private object previousCapabilityValue;
+            private Runspace brokerRunspace;
+            private bool hadPreviousBrokerVariable;
+            private object previousBrokerValue;
             private Exception terminatingException;
             private ErrorRecord terminatingError;
             private FfiInvocationResultSnapshot snapshot;
@@ -6512,6 +6728,7 @@ namespace NativeHost
                 object[] input,
                 FfiPowerShellSession session,
                 FfiCapabilityContext capabilityContext,
+                FfiBrokerContext brokerContext = null,
                 FfiTypedResultQueue typedResults = null,
                 FfiObservedDiagnosticQueue observedDiagnostics = null)
             {
@@ -6519,6 +6736,7 @@ namespace NativeHost
                 this.input = input;
                 this.session = session;
                 this.capabilityContext = capabilityContext;
+                this.brokerContext = brokerContext;
                 this.typedResults = typedResults;
                 this.observedDiagnostics = observedDiagnostics;
             }
@@ -6570,10 +6788,27 @@ namespace NativeHost
                     {
                         capabilityRunspace = powerShell.Runspace ?? throw new InvalidOperationException(
                             "Bounded capability RPC requires a PowerShell pipeline with an explicit local runspace.");
-                        previousCapabilityVariable = capabilityRunspace.SessionStateProxy.PSVariable.Get("DpsCapabilities");
+                        // SetVariable mutates the existing PSVariable in place, so the
+                        // value must be snapshotted before it is replaced.
+                        PSVariable existingCapabilityVariable =
+                            capabilityRunspace.SessionStateProxy.PSVariable.Get("DpsCapabilities");
+                        hadPreviousCapabilityVariable = existingCapabilityVariable != null;
+                        previousCapabilityValue = existingCapabilityVariable?.Value;
                         capabilityRunspace.SessionStateProxy.SetVariable(
                             "DpsCapabilities",
                             new FfiCapabilityBridge(capabilityContext));
+                    }
+                    if (brokerContext != null)
+                    {
+                        brokerRunspace = powerShell.Runspace ?? throw new InvalidOperationException(
+                            "The duplex broker channel requires a PowerShell pipeline with an explicit local runspace.");
+                        PSVariable existingBrokerVariable =
+                            brokerRunspace.SessionStateProxy.PSVariable.Get("DpsBroker");
+                        hadPreviousBrokerVariable = existingBrokerVariable != null;
+                        previousBrokerValue = existingBrokerVariable?.Value;
+                        brokerRunspace.SessionStateProxy.SetVariable(
+                            "DpsBroker",
+                            new FfiBrokerBridge(brokerContext));
                     }
 
                     if (input == null)
@@ -6732,11 +6967,24 @@ namespace NativeHost
                     }
 
                     disposed = true;
-                    typedResults?.Dispose();
-                    observedDiagnostics?.Dispose();
+                    try
+                    {
+                        typedResults?.Dispose();
+                        observedDiagnostics?.Dispose();
+                    }
+                    finally
+                    {
+                        // Same reason: the guard is set, so skipping Cleanup here
+                        // would permanently strand the session variables and the
+                        // invocation accounting.
+                        if (asyncResult is null)
+                        {
+                            Cleanup();
+                        }
+                    }
+
                     if (asyncResult is null)
                     {
-                        Cleanup();
                         return;
                     }
 
@@ -6859,44 +7107,84 @@ namespace NativeHost
                 }
 
                 cleanedUp = true;
-                if (output != null)
+                try
                 {
-                    output.DataAdded -= outputAdded;
-                }
-                powerShell.Streams.Error.DataAdded -= errorAdded;
-                powerShell.Streams.Warning.DataAdded -= warningAdded;
-                powerShell.Streams.Verbose.DataAdded -= verboseAdded;
-                powerShell.Streams.Debug.DataAdded -= debugAdded;
-                powerShell.Streams.Information.DataAdded -= informationAdded;
-                powerShell.Streams.Progress.DataAdded -= progressAdded;
-
-                if (terminatingException != null && collector.ErrorCount == 0)
-                {
-                    collector.AddError(terminatingError, terminatingException);
-                    observedError = true;
-                    AddObservedDiagnostic(FfiStreamKind.Error, terminatingError ?? (object)terminatingException);
-                }
-
-                output?.Clear();
-                inputCollection?.Clear();
-                ClearStreamBuffers(powerShell);
-                if (capabilityRunspace != null)
-                {
-                    if (previousCapabilityVariable == null)
+                    if (output != null)
                     {
-                        capabilityRunspace.SessionStateProxy.PSVariable.Remove("DpsCapabilities");
+                        output.DataAdded -= outputAdded;
                     }
-                    else
+                    powerShell.Streams.Error.DataAdded -= errorAdded;
+                    powerShell.Streams.Warning.DataAdded -= warningAdded;
+                    powerShell.Streams.Verbose.DataAdded -= verboseAdded;
+                    powerShell.Streams.Debug.DataAdded -= debugAdded;
+                    powerShell.Streams.Information.DataAdded -= informationAdded;
+                    powerShell.Streams.Progress.DataAdded -= progressAdded;
+
+                    if (terminatingException != null && collector.ErrorCount == 0)
                     {
-                        capabilityRunspace.SessionStateProxy.SetVariable(
+                        collector.AddError(terminatingError, terminatingException);
+                        observedError = true;
+                        AddObservedDiagnostic(FfiStreamKind.Error, terminatingError ?? (object)terminatingException);
+                    }
+
+                    output?.Clear();
+                    inputCollection?.Clear();
+                    ClearStreamBuffers(powerShell);
+                }
+                finally
+                {
+                    // The guard above is already set, so any step skipped here is
+                    // skipped permanently. Each restore is independent: one failing
+                    // must not strand another variable or the session's invocation
+                    // accounting.
+                    try
+                    {
+                        RestoreSessionVariable(
+                            capabilityRunspace,
                             "DpsCapabilities",
-                            previousCapabilityVariable.Value);
+                            hadPreviousCapabilityVariable,
+                            previousCapabilityValue);
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            RestoreSessionVariable(
+                                brokerRunspace,
+                                "DpsBroker",
+                                hadPreviousBrokerVariable,
+                                previousBrokerValue);
+                        }
+                        finally
+                        {
+                            if (sessionInvocationStarted)
+                            {
+                                session.EndInvocation(terminatingException != null);
+                                sessionInvocationStarted = false;
+                            }
+                        }
                     }
                 }
-                if (sessionInvocationStarted)
+            }
+
+            private static void RestoreSessionVariable(
+                Runspace runspace,
+                string name,
+                bool hadPrevious,
+                object previousValue)
+            {
+                if (runspace == null)
                 {
-                    session.EndInvocation(terminatingException != null);
-                    sessionInvocationStarted = false;
+                    return;
+                }
+
+                if (!hadPrevious)
+                {
+                    runspace.SessionStateProxy.PSVariable.Remove(name);
+                }
+                else
+                {
+                    runspace.SessionStateProxy.SetVariable(name, previousValue);
                 }
             }
         }
@@ -6914,7 +7202,8 @@ namespace NativeHost
             session?.BeginInvocation();
             PSInvocationSettings invocationSettings = session?.CreateInvocationSettings();
             Runspace capabilityRunspace = null;
-            PSVariable previousCapabilityVariable = null;
+            bool hadPreviousCapabilityVariable = false;
+            object previousCapabilityValue = null;
 
             EventHandler<DataAddedEventArgs> outputAdded = (_, args) =>
             {
@@ -6966,7 +7255,12 @@ namespace NativeHost
                 {
                     capabilityRunspace = ps.Runspace ?? throw new InvalidOperationException(
                         "Bounded capability RPC requires a PowerShell pipeline with an explicit local runspace.");
-                    previousCapabilityVariable = capabilityRunspace.SessionStateProxy.PSVariable.Get("DpsCapabilities");
+                    // SetVariable mutates the existing PSVariable in place, so the
+                    // value must be snapshotted before it is replaced.
+                    PSVariable existingCapabilityVariable =
+                        capabilityRunspace.SessionStateProxy.PSVariable.Get("DpsCapabilities");
+                    hadPreviousCapabilityVariable = existingCapabilityVariable != null;
+                    previousCapabilityValue = existingCapabilityVariable?.Value;
                     capabilityRunspace.SessionStateProxy.SetVariable(
                         "DpsCapabilities",
                         new FfiCapabilityBridge(capabilityContext));
@@ -7022,7 +7316,7 @@ namespace NativeHost
                 ClearStreamBuffers(ps);
                 if (capabilityRunspace != null)
                 {
-                    if (previousCapabilityVariable == null)
+                    if (!hadPreviousCapabilityVariable)
                     {
                         capabilityRunspace.SessionStateProxy.PSVariable.Remove("DpsCapabilities");
                     }
@@ -7030,7 +7324,7 @@ namespace NativeHost
                     {
                         capabilityRunspace.SessionStateProxy.SetVariable(
                             "DpsCapabilities",
-                            previousCapabilityVariable.Value);
+                            previousCapabilityValue);
                     }
                 }
                 session?.EndInvocation(terminatingException != null);

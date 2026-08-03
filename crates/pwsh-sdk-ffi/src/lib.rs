@@ -1,6 +1,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fs;
@@ -9,7 +10,6 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-#[cfg(test)]
 use std::sync::MutexGuard;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -49,6 +49,7 @@ const FEATURE_TYPED_RESULT_PAGING: u64 = 1 << 21;
 const FEATURE_OBSERVED_INVOCATION: u64 = 1 << 22;
 const FEATURE_SESSION_PREFLIGHT: u64 = 1 << 23;
 const FEATURE_RUNTIME_DIAGNOSTICS: u64 = 1 << 24;
+const FEATURE_DUPLEX_BROKER_CHANNEL: u64 = 1 << 25;
 const CALL_RESULT_DIAGNOSTIC_TRUNCATED: u32 = 1;
 #[cfg(test)]
 const RESULT_RECORD_SCALAR_VALUE_PRESENT: u32 = 1 << 1;
@@ -67,6 +68,22 @@ const MAX_TYPED_RESULT_PAYLOAD_BYTES: usize = 64 * 1024;
 const OPERATION_STREAM_RECORD_TEXT_TRUNCATED: u32 = 1;
 const MAX_SESSION_CONFIGURATION_ENTRIES: usize = 32;
 const MAX_SESSION_PATH_BYTES: usize = 16 * 1024;
+
+const BROKER_ABI_V1: u32 = 1;
+const BROKER_MAX_INFLIGHT_LIMIT: u32 = 32;
+const BROKER_MAX_BODY_BYTES_LIMIT: u32 = 64 * 1024;
+const BROKER_MAX_DEADLINE_MS: u32 = 30_000;
+const BROKER_MAX_ERROR_MESSAGE_BYTES: usize = 512;
+const BROKER_FRAME_FLAG_ONE_WAY: u32 = 1;
+const BROKER_FRAME_FLAG_MUTATING: u32 = 1 << 1;
+const BROKER_FRAME_FLAG_MASK: u32 = BROKER_FRAME_FLAG_ONE_WAY | BROKER_FRAME_FLAG_MUTATING;
+const BROKER_FRAME_STATE_QUEUED: u32 = 0;
+const BROKER_FRAME_STATE_DISPATCHED: u32 = 1;
+const BROKER_FRAME_STATE_COMPLETED: u32 = 2;
+const BROKER_FRAME_STATE_FAILED: u32 = 3;
+const BROKER_FRAME_STATE_CANCELLED: u32 = 4;
+const BROKER_FRAME_STATE_TIMED_OUT: u32 = 5;
+const BROKER_FRAME_STATE_ABORTED: u32 = 6;
 const SESSION_OPTIONS_PREFIX_SIZE: u32 = mem::size_of::<SessionOptionsPrefix>() as u32;
 const EMPTY_VALUE_CONTAINER: [u8; 4] = [0; 4];
 const VALUE_KIND_STRING: u32 = 1;
@@ -99,6 +116,12 @@ enum Status {
     OperationCancelled = -11,
     OperationNotTerminal = -12,
     UnsupportedCapability = -17,
+    BrokerBusy = -18,
+    BrokerNoConsumer = -19,
+    BrokerClosed = -20,
+    BrokerInvalidTerminalState = -21,
+    BrokerDispatchViolation = -22,
+    BrokerTimeout = -23,
 }
 
 impl Status {
@@ -283,6 +306,97 @@ pub struct LiveObjectContractPackInput {
     payload_adapter_type_name: Utf8Span,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BrokerChannelOptions {
+    size: u32,
+    abi_version: u32,
+    max_inflight: u32,
+    max_body_bytes: u32,
+    default_deadline_ms: u32,
+    flags: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct BrokerFrameInfo {
+    size: u32,
+    abi_version: u32,
+    correlation_id: u64,
+    ordering_key: u64,
+    deadline_epoch_ms: u64,
+    remaining_ms: u32,
+    kind: u32,
+    flags: u32,
+    body_length: u32,
+    state: u32,
+    dropped_before: u32,
+}
+
+struct BrokerFrame {
+    correlation_id: u64,
+    ordering_key: u64,
+    kind: u32,
+    flags: u32,
+    deadline_epoch_ms: u64,
+    body: Vec<u8>,
+    state: u32,
+    dropped_before: u32,
+    reply: Vec<u8>,
+    error_message: String,
+    owner_token: u64,
+}
+
+impl BrokerFrame {
+    fn is_terminal(&self) -> bool {
+        self.state >= BROKER_FRAME_STATE_COMPLETED
+    }
+
+    fn is_one_way(&self) -> bool {
+        self.flags & BROKER_FRAME_FLAG_ONE_WAY != 0
+    }
+}
+
+#[derive(Default)]
+struct BrokerChannelInner {
+    closed: bool,
+    consumer_attached: bool,
+    queue: VecDeque<u64>,
+    frames: HashMap<u64, BrokerFrame>,
+    next_correlation: u64,
+    pending_drops: u32,
+}
+
+struct BrokerChannel {
+    epoch: Instant,
+    max_inflight: u32,
+    max_body_bytes: u32,
+    default_deadline_ms: u32,
+    inner: Mutex<BrokerChannelInner>,
+    payload_signal: Condvar,
+    consumer_signal: Condvar,
+}
+
+impl BrokerChannel {
+    fn now_epoch_ms(&self) -> u64 {
+        self.epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+    }
+
+    fn lock(&self) -> MutexGuard<'_, BrokerChannelInner> {
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// A payload-visible broker attachment. The generation is validated on every
+/// trampoline call so script that captures `$DpsBroker` beyond its invocation
+/// cannot reach a channel afterwards.
+struct BrokerAttachment {
+    channel_handle: u64,
+    channel: Arc<BrokerChannel>,
+    generation: u64,
+    active: AtomicBool,
+}
+
 struct State {
     runtime: Option<Arc<HostedRuntime>>,
     activation_source_root: Option<PathBuf>,
@@ -297,6 +411,7 @@ struct State {
     observed_operations: HashMap<u64, Arc<ObservedInvocationOperation>>,
     observed_diagnostic_pages: HashMap<u64, Arc<FfiObservedDiagnosticPage>>,
     capabilities: HashMap<u64, Arc<CapabilityRegistrationState>>,
+    broker_channels: HashMap<u64, Arc<BrokerChannel>>,
     next_handle: u64,
     next_result_handle: u64,
     next_operation_handle: u64,
@@ -307,6 +422,7 @@ struct State {
     next_observed_diagnostic_page_handle: u64,
     next_runspace_session_handle: u64,
     next_capability_handle: u64,
+    next_broker_channel_handle: u64,
 }
 
 struct Session {
@@ -315,6 +431,8 @@ struct Session {
     runspace_session: Option<Arc<RunspaceSession>>,
     capability_registration: Mutex<Option<Arc<CapabilityRegistrationState>>>,
     active_capability: Mutex<Option<CapabilityInvocation>>,
+    broker_channel: Mutex<Option<(u64, Arc<BrokerChannel>)>>,
+    active_broker: Mutex<Option<Arc<BrokerAttachment>>>,
 }
 
 struct RunspaceSession {
@@ -566,6 +684,19 @@ impl Session {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
         }
+        // Invalidate the broker generation so a `$DpsBroker` object captured by
+        // script beyond its invocation can no longer reach the channel.
+        self.deactivate_broker();
+    }
+
+    fn deactivate_broker(&self) {
+        let mut active = self
+            .active_broker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(attachment) = active.take() {
+            broker_deactivate_attachment(&attachment);
+        }
     }
 }
 
@@ -785,6 +916,10 @@ impl Operation {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *active = false;
         }
+        drop(active);
+        // Invalidate the broker generation so a captured \ cannot
+        // reach the channel after this invocation terminates.
+        self.session.deactivate_broker();
     }
 
     fn cancel_capability(&self) {
@@ -919,6 +1054,10 @@ impl TypedResultOperation {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *active = false;
         }
+        drop(active);
+        // Invalidate the broker generation so a captured \ cannot
+        // reach the channel after this invocation terminates.
+        self.session.deactivate_broker();
     }
 
     fn cancel_capability(&self) {
@@ -1102,6 +1241,10 @@ impl ObservedInvocationOperation {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *active = false;
         }
+        drop(active);
+        // Invalidate the broker generation so a captured \ cannot
+        // reach the channel after this invocation terminates.
+        self.session.deactivate_broker();
     }
 
     fn cancel_capability(&self) {
@@ -1127,6 +1270,7 @@ impl Default for State {
             observed_operations: HashMap::new(),
             observed_diagnostic_pages: HashMap::new(),
             capabilities: HashMap::new(),
+            broker_channels: HashMap::new(),
             next_handle: 1,
             next_result_handle: 1_u64 << 63,
             next_operation_handle: 1_u64 << 62,
@@ -1137,6 +1281,7 @@ impl Default for State {
             next_observed_diagnostic_page_handle: 1_u64 << 55,
             next_runspace_session_handle: 1_u64 << 61,
             next_capability_handle: 1_u64 << 60,
+            next_broker_channel_handle: 1_u64 << 54,
         }
     }
 }
@@ -1982,6 +2127,31 @@ fn invoke_with_capability(
     }
 }
 
+/// Installs the payload broker context for one asynchronous invocation.
+/// Called before the invocation starts; the generation is invalidated when the
+/// operation reaches a terminal state.
+fn configure_broker(session: &Session, attachment: Option<&Arc<BrokerAttachment>>) -> Result<(), FfiBindingError> {
+    let Some(attachment) = attachment else {
+        return Ok(());
+    };
+    set_active_broker(session, Some(Arc::clone(attachment)));
+    broker_register_attachment(attachment);
+    let configured = unsafe {
+        session.power_shell.set_broker_context(
+            attachment.channel_handle,
+            attachment.generation,
+            broker_enqueue_and_wait as *const () as *const _,
+            broker_post as *const () as *const _,
+            attachment.channel.max_body_bytes,
+        )
+    };
+    if let Err(error) = configured {
+        finish_broker(session, Some(attachment));
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn begin_live_invocation_with_capability(
     session: &Session,
     capability: Option<CapabilityInvocation>,
@@ -2347,9 +2517,30 @@ where
     v2_call_with_active_pipeline_policy(result, true, operation)
 }
 
+/// Broker data-plane exports. They run while a pipeline is active and are the
+/// only exports a thread holding a delivery handle may call.
+unsafe fn v2_broker_call<F>(result: *mut CallResult, operation: F) -> i32
+where
+    F: FnOnce() -> Result<Status, (Status, String)>,
+{
+    v2_call_with_policy(result, true, false, operation)
+}
+
 unsafe fn v2_call_with_active_pipeline_policy<F>(
     result: *mut CallResult,
     allow_active_pipeline: bool,
+    operation: F,
+) -> i32
+where
+    F: FnOnce() -> Result<Status, (Status, String)>,
+{
+    v2_call_with_policy(result, allow_active_pipeline, true, operation)
+}
+
+unsafe fn v2_call_with_policy<F>(
+    result: *mut CallResult,
+    allow_active_pipeline: bool,
+    enforce_broker_dispatch: bool,
     operation: F,
 ) -> i32
 where
@@ -2359,6 +2550,15 @@ where
         Ok(result) => result,
         Err(status) => return status.value(),
     };
+    // Evaluated before any test-only scope lock so a misusing call fails
+    // deterministically instead of deadlocking.
+    if enforce_broker_dispatch && broker_holds_delivery_handle() {
+        return complete_call_result(
+            result,
+            Status::BrokerDispatchViolation,
+            "PowerShell FFI calls are not permitted while a broker frame is held; copy the frame, release it, and dispatch the work.",
+        );
+    }
     #[cfg(test)]
     let _test_call_lock = if !allow_active_pipeline && pipeline_execution_depth() == 0 {
         Some(TestFfiCallScope::enter())
@@ -2512,6 +2712,7 @@ fn invoke_result(handle: u64) -> Result<u64, (Status, String)> {
             ));
         }
     }
+    reject_synchronous_broker_invocation(&session)?;
     let capability = take_session_capability(&session)?;
     let result = invoke_with_capability(&session, capability).map_err(managed_failure)?;
     let mut state = match state().lock() {
@@ -2768,6 +2969,13 @@ fn start_operation(handle: u64) -> Result<u64, (Status, String)> {
             .filter(|value| *value != 0)
             .unwrap_or(1_u64 << 62);
         let capability = take_session_capability(&session)?;
+        let broker = take_session_broker(&session);
+        if let Err(error) = configure_broker(&session, broker.as_ref()) {
+            // Match the sibling start paths: a failure here must not leave the
+            // builder and its runspace session permanently backpressured.
+            session.clear_operation_active();
+            return Err(managed_failure(error));
+        }
         let operation = Arc::new(Operation::new(handle, session, capability));
         state.operations.insert(operation_handle, Arc::clone(&operation));
         (operation_handle, operation)
@@ -2873,6 +3081,11 @@ fn start_typed_result_operation(
                 return Err(error);
             }
         };
+        let broker = take_session_broker(&session);
+        if let Err(error) = configure_broker(&session, broker.as_ref()) {
+            session.clear_operation_active();
+            return Err(managed_failure(error));
+        }
         (session, capability)
     };
 
@@ -3020,6 +3233,11 @@ fn start_observed_invocation_operation(
                 return Err(error);
             }
         };
+        let broker = take_session_broker(&session);
+        if let Err(error) = configure_broker(&session, broker.as_ref()) {
+            session.clear_operation_active();
+            return Err(managed_failure(error));
+        }
         (session, capability)
     };
 
@@ -3754,6 +3972,922 @@ fn set_capabilities(handle: u64, capability_handle: u64) -> Result<Status, (Stat
     Ok(Status::Success)
 }
 
+// ---------------------------------------------------------------------------
+// Duplex Broker Channel
+//
+// Lock discipline (never nested):
+//   STATE                   -> nothing
+//   BROKER_FRAME_REGISTRY   -> nothing
+//   BrokerChannel::inner    -> nothing
+//
+// A blocked payload raiser waits only on its channel's own condvar. It clones
+// the channel Arc under STATE, drops STATE, and never touches
+// SESSION_OPERATION_LOCK, which is held across pipeline execution.
+// ---------------------------------------------------------------------------
+
+static NEXT_BROKER_FRAME_HANDLE: AtomicU64 = AtomicU64::new(1_u64 << 53);
+static NEXT_BROKER_OWNER_TOKEN: AtomicU64 = AtomicU64::new(1);
+static NEXT_BROKER_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// One delivery of a frame to one pump thread. The owner token is recorded
+/// here, not on the frame, so releasing a delivery handle still succeeds after
+/// its request has already reached a terminal state and been removed.
+struct BrokerDelivery {
+    channel: Arc<BrokerChannel>,
+    correlation: u64,
+    owner_token: u64,
+}
+
+/// Delivery handle -> delivery record.
+type BrokerFrameRegistry = Option<HashMap<u64, BrokerDelivery>>;
+/// Generation -> the attachment that owns it.
+type BrokerAttachmentRegistry = Option<HashMap<u64, Arc<BrokerAttachment>>>;
+
+static BROKER_FRAME_REGISTRY: Mutex<BrokerFrameRegistry> = Mutex::new(None);
+static BROKER_ATTACHMENTS: Mutex<BrokerAttachmentRegistry> = Mutex::new(None);
+
+thread_local! {
+    /// Owner tokens for delivery handles currently held by this thread. While
+    /// this is non-empty, every non-broker FFI export fails with
+    /// `BrokerDispatchViolation`.
+    static BROKER_HELD_TOKENS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
+fn broker_frame_registry() -> MutexGuard<'static, BrokerFrameRegistry> {
+    BROKER_FRAME_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn broker_holds_delivery_handle() -> bool {
+    BROKER_HELD_TOKENS.with(|tokens| !tokens.borrow().is_empty())
+}
+
+fn broker_push_owner_token(token: u64) {
+    BROKER_HELD_TOKENS.with(|tokens| tokens.borrow_mut().push(token));
+}
+
+fn broker_take_owner_token(token: u64) -> bool {
+    BROKER_HELD_TOKENS.with(|tokens| {
+        let mut tokens = tokens.borrow_mut();
+        match tokens.iter().position(|candidate| *candidate == token) {
+            Some(index) => {
+                tokens.remove(index);
+                true
+            }
+            None => false,
+        }
+    })
+}
+
+fn broker_terminal_status(state: u32) -> Status {
+    match state {
+        BROKER_FRAME_STATE_COMPLETED => Status::Success,
+        BROKER_FRAME_STATE_FAILED => Status::ManagedFailure,
+        BROKER_FRAME_STATE_CANCELLED => Status::OperationCancelled,
+        BROKER_FRAME_STATE_TIMED_OUT => Status::BrokerTimeout,
+        _ => Status::BrokerClosed,
+    }
+}
+
+/// Counts every non-terminal correlation, so releasing a delivery handle does
+/// not free an inflight slot.
+fn broker_inflight_count(inner: &BrokerChannelInner) -> u32 {
+    inner
+        .frames
+        .values()
+        .filter(|frame| !frame.is_terminal())
+        .count()
+        .min(u32::MAX as usize) as u32
+}
+
+fn broker_has_active_mutating_key(inner: &BrokerChannelInner, ordering_key: u64) -> bool {
+    inner.frames.values().any(|frame| {
+        !frame.is_terminal() && frame.flags & BROKER_FRAME_FLAG_MUTATING != 0 && frame.ordering_key == ordering_key
+    })
+}
+
+/// Applies a terminal transition exactly once and wakes the blocked raiser.
+fn broker_finish_frame(inner: &mut BrokerChannelInner, correlation: u64, state: u32) -> bool {
+    let Some(frame) = inner.frames.get_mut(&correlation) else {
+        return false;
+    };
+    if frame.is_terminal() {
+        return false;
+    }
+    frame.state = state;
+    true
+}
+
+fn broker_expire_due_frames(inner: &mut BrokerChannelInner, now_ms: u64) -> bool {
+    let expired: Vec<u64> = inner
+        .frames
+        .values()
+        .filter(|frame| !frame.is_terminal() && frame.deadline_epoch_ms <= now_ms)
+        .map(|frame| frame.correlation_id)
+        .collect();
+    let changed = !expired.is_empty();
+    for correlation in expired {
+        broker_finish_frame(inner, correlation, BROKER_FRAME_STATE_TIMED_OUT);
+        inner.queue.retain(|queued| *queued != correlation);
+    }
+    // A one-way frame has no blocked raiser to collect it, so an expired event
+    // that no consumer ever received would otherwise be retained forever.
+    // Only drop the ones nobody currently holds a delivery handle for.
+    inner
+        .frames
+        .retain(|_, frame| !(frame.is_terminal() && frame.is_one_way() && frame.owner_token == 0));
+    changed
+}
+
+fn broker_channel_for(handle: u64) -> Result<Arc<BrokerChannel>, (Status, String)> {
+    let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    state
+        .broker_channels
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| (Status::InvalidHandle, "broker channel handle is invalid".to_owned()))
+}
+
+unsafe fn broker_open(
+    options: *const BrokerChannelOptions,
+    channel_handle: *mut u64,
+) -> Result<Status, (Status, String)> {
+    if channel_handle.is_null() {
+        return Err((
+            Status::InvalidArgument,
+            "broker channel output pointer is null".to_owned(),
+        ));
+    }
+    if options.is_null() {
+        return Err((Status::InvalidArgument, "broker channel options are null".to_owned()));
+    }
+    let size = std::ptr::read_unaligned(std::ptr::addr_of!((*options).size));
+    if size as usize != mem::size_of::<BrokerChannelOptions>() {
+        return Err((
+            Status::InvalidArgument,
+            "broker channel options report an unsupported size or ABI version".to_owned(),
+        ));
+    }
+    let abi_version = std::ptr::read_unaligned(std::ptr::addr_of!((*options).abi_version));
+    if abi_version != BROKER_ABI_V1 {
+        return Err((
+            Status::InvalidArgument,
+            "broker channel options report an unsupported size or ABI version".to_owned(),
+        ));
+    }
+    let header = options.read_unaligned();
+    if header.flags != 0 {
+        return Err((
+            Status::InvalidArgument,
+            "broker channel options reserved flags must be zero".to_owned(),
+        ));
+    }
+    if header.max_inflight == 0 || header.max_inflight > BROKER_MAX_INFLIGHT_LIMIT {
+        return Err((
+            Status::InvalidArgument,
+            "broker channel maximum inflight frames must be between 1 and 32".to_owned(),
+        ));
+    }
+    if header.max_body_bytes == 0 || header.max_body_bytes > BROKER_MAX_BODY_BYTES_LIMIT {
+        return Err((
+            Status::InvalidArgument,
+            "broker channel maximum body bytes must be between 1 and 65536".to_owned(),
+        ));
+    }
+    if header.default_deadline_ms == 0 || header.default_deadline_ms > BROKER_MAX_DEADLINE_MS {
+        return Err((
+            Status::InvalidArgument,
+            "broker channel default deadline must be between 1 and 30000 milliseconds".to_owned(),
+        ));
+    }
+
+    let channel = Arc::new(BrokerChannel {
+        epoch: Instant::now(),
+        max_inflight: header.max_inflight,
+        max_body_bytes: header.max_body_bytes,
+        default_deadline_ms: header.default_deadline_ms,
+        inner: Mutex::new(BrokerChannelInner {
+            next_correlation: 1,
+            ..BrokerChannelInner::default()
+        }),
+        payload_signal: Condvar::new(),
+        consumer_signal: Condvar::new(),
+    });
+
+    let mut state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let handle = state.next_broker_channel_handle;
+    state.next_broker_channel_handle = state
+        .next_broker_channel_handle
+        .checked_add(1)
+        .ok_or_else(|| (Status::HostFailure, "broker channel handles are exhausted".to_owned()))?;
+    state.broker_channels.insert(handle, channel);
+    drop(state);
+    *channel_handle = handle;
+    Ok(Status::Success)
+}
+
+fn broker_close(handle: u64) -> Result<Status, (Status, String)> {
+    let channel = {
+        let mut state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .broker_channels
+            .remove(&handle)
+            .ok_or_else(|| (Status::InvalidHandle, "broker channel handle is invalid".to_owned()))?
+    };
+
+    {
+        let mut inner = channel.lock();
+        inner.closed = true;
+        let outstanding: Vec<u64> = inner
+            .frames
+            .values()
+            .filter(|frame| !frame.is_terminal())
+            .map(|frame| frame.correlation_id)
+            .collect();
+        for correlation in outstanding {
+            broker_finish_frame(&mut inner, correlation, BROKER_FRAME_STATE_ABORTED);
+        }
+        inner.queue.clear();
+    }
+    channel.payload_signal.notify_all();
+    channel.consumer_signal.notify_all();
+
+    // Reclaim any delivery handles whose owning thread never released them.
+    let mut registry = broker_frame_registry();
+    if let Some(map) = registry.as_mut() {
+        map.retain(|_, entry| !Arc::ptr_eq(&entry.channel, &channel));
+    }
+    Ok(Status::Success)
+}
+
+fn broker_wait(handle: u64, timeout_ms: u32, frame_handle: *mut u64) -> Result<Status, (Status, String)> {
+    if frame_handle.is_null() {
+        return Err((
+            Status::InvalidArgument,
+            "broker frame output pointer is null".to_owned(),
+        ));
+    }
+    let channel = broker_channel_for(handle)?;
+    // SAFETY: validated non-null above; the caller owns the destination.
+    unsafe { *frame_handle = 0 };
+
+    let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
+    let mut inner = channel.lock();
+    inner.consumer_attached = true;
+    loop {
+        if inner.closed {
+            return Err((Status::BrokerClosed, "broker channel is closed".to_owned()));
+        }
+        let now_ms = channel.now_epoch_ms();
+        if broker_expire_due_frames(&mut inner, now_ms) {
+            channel.payload_signal.notify_all();
+        }
+
+        // Dispatch the first queued frame whose ordering key is free.
+        let mut selected = None;
+        for (index, correlation) in inner.queue.iter().enumerate() {
+            let Some(frame) = inner.frames.get(correlation) else {
+                continue;
+            };
+            if frame.is_terminal() {
+                continue;
+            }
+            let blocked = frame.flags & BROKER_FRAME_FLAG_MUTATING != 0
+                && inner.frames.values().any(|other| {
+                    other.correlation_id != frame.correlation_id
+                        && !other.is_terminal()
+                        && other.state == BROKER_FRAME_STATE_DISPATCHED
+                        && other.flags & BROKER_FRAME_FLAG_MUTATING != 0
+                        && other.ordering_key == frame.ordering_key
+                });
+            if !blocked {
+                selected = Some((index, *correlation));
+                break;
+            }
+        }
+
+        if let Some((index, correlation)) = selected {
+            inner.queue.remove(index);
+            let dropped_before = inner.pending_drops;
+            inner.pending_drops = 0;
+            let token = NEXT_BROKER_OWNER_TOKEN.fetch_add(1, Ordering::AcqRel);
+            let delivery = NEXT_BROKER_FRAME_HANDLE.fetch_add(1, Ordering::AcqRel);
+            if let Some(frame) = inner.frames.get_mut(&correlation) {
+                frame.state = BROKER_FRAME_STATE_DISPATCHED;
+                frame.owner_token = token;
+                frame.dropped_before = dropped_before;
+            }
+            drop(inner);
+            broker_push_owner_token(token);
+            let mut registry = broker_frame_registry();
+            registry.get_or_insert_with(HashMap::new).insert(
+                delivery,
+                BrokerDelivery {
+                    channel: Arc::clone(&channel),
+                    correlation,
+                    owner_token: token,
+                },
+            );
+            drop(registry);
+            // SAFETY: validated non-null above.
+            unsafe { *frame_handle = delivery };
+            return Ok(Status::Success);
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(Status::Success);
+        }
+        let (guard, _) = channel
+            .consumer_signal
+            .wait_timeout(inner, remaining)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner = guard;
+    }
+}
+
+fn broker_resolve_frame(delivery: u64) -> Result<(Arc<BrokerChannel>, u64), (Status, String)> {
+    let registry = broker_frame_registry();
+    registry
+        .as_ref()
+        .and_then(|map| map.get(&delivery))
+        .map(|entry| (Arc::clone(&entry.channel), entry.correlation))
+        .ok_or_else(|| (Status::InvalidHandle, "broker frame handle is invalid".to_owned()))
+}
+
+unsafe fn broker_frame_get_info(delivery: u64, info: *mut BrokerFrameInfo) -> Result<Status, (Status, String)> {
+    if info.is_null() {
+        return Err((Status::InvalidArgument, "broker frame info pointer is null".to_owned()));
+    }
+    let size = std::ptr::read_unaligned(std::ptr::addr_of!((*info).size));
+    if size as usize != mem::size_of::<BrokerFrameInfo>() {
+        return Err((
+            Status::InvalidArgument,
+            "broker frame info reports an unsupported size or ABI version".to_owned(),
+        ));
+    }
+    let abi_version = std::ptr::read_unaligned(std::ptr::addr_of!((*info).abi_version));
+    if abi_version != BROKER_ABI_V1 {
+        return Err((
+            Status::InvalidArgument,
+            "broker frame info reports an unsupported size or ABI version".to_owned(),
+        ));
+    }
+    let (channel, correlation) = broker_resolve_frame(delivery)?;
+    let inner = channel.lock();
+    let frame = inner
+        .frames
+        .get(&correlation)
+        .ok_or_else(|| (Status::InvalidHandle, "broker frame handle is invalid".to_owned()))?;
+    let now_ms = channel.now_epoch_ms();
+    info.write(BrokerFrameInfo {
+        size: mem::size_of::<BrokerFrameInfo>() as u32,
+        abi_version: BROKER_ABI_V1,
+        correlation_id: frame.correlation_id,
+        ordering_key: frame.ordering_key,
+        deadline_epoch_ms: frame.deadline_epoch_ms,
+        remaining_ms: frame.deadline_epoch_ms.saturating_sub(now_ms).min(u64::from(u32::MAX)) as u32,
+        kind: frame.kind,
+        flags: frame.flags,
+        body_length: frame.body.len() as u32,
+        state: frame.state,
+        dropped_before: frame.dropped_before,
+    });
+    Ok(Status::Success)
+}
+
+unsafe fn broker_frame_read(
+    delivery: u64,
+    buffer: *mut u8,
+    capacity: u32,
+    required: *mut u32,
+) -> Result<Status, (Status, String)> {
+    if required.is_null() {
+        return Err((
+            Status::InvalidArgument,
+            "broker frame required-length pointer is null".to_owned(),
+        ));
+    }
+    let (channel, correlation) = broker_resolve_frame(delivery)?;
+    let inner = channel.lock();
+    let frame = inner
+        .frames
+        .get(&correlation)
+        .ok_or_else(|| (Status::InvalidHandle, "broker frame handle is invalid".to_owned()))?;
+    let length = frame.body.len() as u32;
+    *required = length;
+    if buffer.is_null() || capacity < length {
+        return Ok(Status::BufferTooSmall);
+    }
+    if length > 0 {
+        std::ptr::copy_nonoverlapping(frame.body.as_ptr(), buffer, length as usize);
+    }
+    Ok(Status::Success)
+}
+
+/// Releases only the readable delivery handle. This is deliberately **not** a
+/// state transition: the correlation stays outstanding so the consumer can
+/// reply later from any thread. It must also succeed after the request has
+/// already terminated, otherwise the receiving thread's owner token leaks and
+/// that thread stays blocked from every non-broker call.
+fn broker_frame_release(delivery: u64) -> Result<Status, (Status, String)> {
+    let (channel, correlation) = {
+        let mut registry = broker_frame_registry();
+        let map = registry
+            .as_mut()
+            .ok_or_else(|| (Status::InvalidHandle, "broker frame handle is invalid".to_owned()))?;
+        let owner_token = map
+            .get(&delivery)
+            .map(|entry| entry.owner_token)
+            .ok_or_else(|| (Status::InvalidHandle, "broker frame handle is invalid".to_owned()))?;
+        // Ownership is proven by the receiving thread's token, never by the
+        // frame, which may already be gone.
+        if !broker_take_owner_token(owner_token) {
+            return Err((
+                Status::BrokerDispatchViolation,
+                "a broker frame must be released by the thread that received it".to_owned(),
+            ));
+        }
+        let entry = map
+            .remove(&delivery)
+            .ok_or_else(|| (Status::InvalidHandle, "broker frame handle is invalid".to_owned()))?;
+        (entry.channel, entry.correlation)
+    };
+    let mut inner = channel.lock();
+    if let Some(frame) = inner.frames.get_mut(&correlation) {
+        frame.owner_token = 0;
+        if frame.is_one_way() && !frame.is_terminal() {
+            frame.state = BROKER_FRAME_STATE_COMPLETED;
+        }
+    }
+    inner
+        .frames
+        .retain(|_, frame| !(frame.is_terminal() && frame.is_one_way()));
+    Ok(Status::Success)
+}
+
+unsafe fn broker_complete(
+    handle: u64,
+    correlation: u64,
+    state: u32,
+    reply: &[u8],
+    message: String,
+) -> Result<Status, (Status, String)> {
+    let channel = broker_channel_for(handle)?;
+    if reply.len() > channel.max_body_bytes as usize {
+        return Err((
+            Status::InvalidArgument,
+            "broker reply exceeds the channel maximum body size".to_owned(),
+        ));
+    }
+    let mut inner = channel.lock();
+    if inner.closed {
+        return Err((Status::BrokerClosed, "broker channel is closed".to_owned()));
+    }
+    let Some(frame) = inner.frames.get_mut(&correlation) else {
+        return Err((
+            Status::BrokerInvalidTerminalState,
+            "broker correlation identifier is unknown".to_owned(),
+        ));
+    };
+    if frame.is_terminal() {
+        return Err((
+            Status::BrokerInvalidTerminalState,
+            "broker frame already reached a terminal state".to_owned(),
+        ));
+    }
+    if frame.is_one_way() && state != BROKER_FRAME_STATE_CANCELLED {
+        return Err((
+            Status::BrokerInvalidTerminalState,
+            "a one-way broker frame does not accept a reply".to_owned(),
+        ));
+    }
+    frame.state = state;
+    frame.reply = reply.to_vec();
+    frame.error_message = message;
+    let correlation_id = frame.correlation_id;
+    inner.queue.retain(|queued| *queued != correlation_id);
+    drop(inner);
+    channel.payload_signal.notify_all();
+    channel.consumer_signal.notify_all();
+    Ok(Status::Success)
+}
+
+/// Attaches one channel to one builder invocation. Mirrors `set_capabilities`.
+fn set_broker(handle: u64, channel_handle: u64) -> Result<Status, (Status, String)> {
+    let (session, channel) = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let session = state
+            .sessions
+            .get(&handle)
+            .cloned()
+            .ok_or_else(|| (Status::InvalidHandle, "PowerShell handle is invalid".to_owned()))?;
+        let channel = state
+            .broker_channels
+            .get(&channel_handle)
+            .cloned()
+            .ok_or_else(|| (Status::InvalidHandle, "broker channel handle is invalid".to_owned()))?;
+        (session, channel)
+    };
+    if session_has_active_operation(&session)
+        || session
+            .runspace_session
+            .as_ref()
+            .is_some_and(|runspace| runspace_session_has_active_operation(runspace))
+    {
+        return Err((
+            Status::Backpressure,
+            "a broker channel cannot be attached while its session has an active invocation".to_owned(),
+        ));
+    }
+    let mut attached = session
+        .broker_channel
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if attached.is_some() {
+        return Err((
+            Status::Backpressure,
+            "a broker channel is already attached; invoke or clear the builder first".to_owned(),
+        ));
+    }
+    *attached = Some((channel_handle, channel));
+    Ok(Status::Success)
+}
+
+fn session_has_broker(session: &Session) -> bool {
+    session
+        .broker_channel
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some()
+}
+
+/// A builder with a broker attached may only run on an asynchronous path.
+/// Rejecting the synchronous paths removes the UI-dispatch deadlock in which no
+/// FFI call occurs and therefore no guard could fire.
+fn reject_synchronous_broker_invocation(session: &Session) -> Result<(), (Status, String)> {
+    if session_has_broker(session) {
+        return Err((
+            Status::UnsupportedCapability,
+            "a builder with a broker channel attached must be invoked asynchronously".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn take_session_broker(session: &Session) -> Option<Arc<BrokerAttachment>> {
+    let taken = session
+        .broker_channel
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    let (channel_handle, channel) = taken?;
+    Some(Arc::new(BrokerAttachment {
+        channel_handle,
+        channel,
+        generation: NEXT_BROKER_GENERATION.fetch_add(1, Ordering::AcqRel),
+        active: AtomicBool::new(true),
+    }))
+}
+
+fn set_active_broker(session: &Session, attachment: Option<Arc<BrokerAttachment>>) {
+    *session
+        .active_broker
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = attachment;
+}
+
+fn finish_broker(session: &Session, attachment: Option<&Arc<BrokerAttachment>>) {
+    if let Some(attachment) = attachment {
+        broker_deactivate_attachment(attachment);
+    }
+    set_active_broker(session, None);
+}
+
+fn broker_attachment_for(channel_handle: u64, generation: u64) -> Option<Arc<BrokerAttachment>> {
+    let registry = BROKER_ATTACHMENTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let attachment = registry.as_ref()?.get(&generation)?;
+    if attachment.channel_handle == channel_handle && attachment.active.load(Ordering::Acquire) {
+        Some(Arc::clone(attachment))
+    } else {
+        None
+    }
+}
+
+fn broker_register_attachment(attachment: &Arc<BrokerAttachment>) {
+    let mut registry = BROKER_ATTACHMENTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry
+        .get_or_insert_with(HashMap::new)
+        .insert(attachment.generation, Arc::clone(attachment));
+}
+
+/// Revokes one broker attachment: no later trampoline call with its generation
+/// can resolve, and its registry entry is dropped.
+fn broker_deactivate_attachment(attachment: &Arc<BrokerAttachment>) {
+    attachment.active.store(false, Ordering::Release);
+    broker_unregister_attachment(attachment.generation);
+}
+
+fn broker_unregister_attachment(generation: u64) {
+    let mut registry = BROKER_ATTACHMENTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(map) = registry.as_mut() {
+        map.remove(&generation);
+    }
+}
+
+unsafe fn broker_trampoline<F>(result: *mut CallResult, operation: F) -> i32
+where
+    F: FnOnce() -> Result<Status, (Status, String)>,
+{
+    // Payload trampolines run on a pipeline thread whose thread-local
+    // execution depth is nonzero, so neither v2_call helper may be used.
+    let result = match prepare_call_result(result) {
+        Ok(result) => result,
+        Err(status) => return status.value(),
+    };
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(Ok(status)) => complete_call_result(result, status, ""),
+        Ok(Err((status, diagnostic))) => complete_call_result(result, status, &diagnostic),
+        Err(_) => complete_call_result(
+            result,
+            Status::Panic,
+            "an unexpected native panic was contained by the PowerShell FFI",
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn broker_enqueue_and_wait(
+    channel_handle: u64,
+    generation: u64,
+    kind: u32,
+    flags: u32,
+    ordering_key: u64,
+    deadline_ms: u32,
+    body: *const u8,
+    body_len: u32,
+    correlation_out: *mut u64,
+    reply: *mut u8,
+    reply_capacity: u32,
+    reply_len: *mut u32,
+    result: *mut CallResult,
+) -> i32 {
+    broker_trampoline(result, || {
+        let attachment = broker_attachment_for(channel_handle, generation).ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "the broker context is not active for this invocation".to_owned(),
+            )
+        })?;
+        let channel = Arc::clone(&attachment.channel);
+        let body = read_broker_body(body, body_len, channel.max_body_bytes)?;
+        let flags = (flags & BROKER_FRAME_FLAG_MASK) | BROKER_FRAME_FLAG_MUTATING;
+        let deadline_ms = if deadline_ms == 0 {
+            channel.default_deadline_ms
+        } else {
+            deadline_ms.min(channel.default_deadline_ms)
+        };
+
+        let correlation = {
+            let mut inner = channel.lock();
+            if inner.closed {
+                return Err((Status::BrokerClosed, "broker channel is closed".to_owned()));
+            }
+            if !inner.consumer_attached {
+                return Err((
+                    Status::BrokerNoConsumer,
+                    "no consumer pump has attached to the broker channel".to_owned(),
+                ));
+            }
+            let now_ms = channel.now_epoch_ms();
+            broker_expire_due_frames(&mut inner, now_ms);
+            if broker_inflight_count(&inner) >= channel.max_inflight {
+                return Err((
+                    Status::BrokerBusy,
+                    "the broker channel has reached its maximum inflight frames".to_owned(),
+                ));
+            }
+            if broker_has_active_mutating_key(&inner, ordering_key) {
+                return Err((
+                    Status::BrokerBusy,
+                    "the broker ordering key already has an active mutating frame".to_owned(),
+                ));
+            }
+            let correlation = inner.next_correlation;
+            inner.next_correlation = inner
+                .next_correlation
+                .checked_add(1)
+                .ok_or_else(|| (Status::HostFailure, "broker correlations are exhausted".to_owned()))?;
+            inner.frames.insert(
+                correlation,
+                BrokerFrame {
+                    correlation_id: correlation,
+                    ordering_key,
+                    kind,
+                    flags,
+                    deadline_epoch_ms: now_ms.saturating_add(u64::from(deadline_ms)),
+                    body,
+                    state: BROKER_FRAME_STATE_QUEUED,
+                    dropped_before: 0,
+                    reply: Vec::new(),
+                    error_message: String::new(),
+                    owner_token: 0,
+                },
+            );
+            inner.queue.push_back(correlation);
+            correlation
+        };
+        channel.consumer_signal.notify_all();
+        if !correlation_out.is_null() {
+            *correlation_out = correlation;
+        }
+
+        // Wait on the channel's own condvar only. STATE is not held here.
+        let mut inner = channel.lock();
+        loop {
+            let now_ms = channel.now_epoch_ms();
+            let (terminal_state, deadline_epoch_ms) = match inner.frames.get(&correlation) {
+                Some(frame) => (
+                    if frame.is_terminal() { Some(frame.state) } else { None },
+                    frame.deadline_epoch_ms,
+                ),
+                None => (Some(BROKER_FRAME_STATE_ABORTED), now_ms),
+            };
+            if let Some(state) = terminal_state {
+                let frame = inner.frames.remove(&correlation);
+                // The correlation may still be queued if it terminated before a
+                // consumer dequeued it; leaving it would dangle forever.
+                inner.queue.retain(|queued| *queued != correlation);
+                drop(inner);
+                let frame = match frame {
+                    Some(frame) => frame,
+                    None => {
+                        return Err((Status::BrokerClosed, "broker channel is closed".to_owned()));
+                    }
+                };
+                channel.consumer_signal.notify_all();
+                return finish_broker_wait(frame, state, reply, reply_capacity, reply_len);
+            }
+            if deadline_epoch_ms <= now_ms {
+                broker_finish_frame(&mut inner, correlation, BROKER_FRAME_STATE_TIMED_OUT);
+                continue;
+            }
+            let remaining = Duration::from_millis(deadline_epoch_ms - now_ms);
+            let (guard, _) = channel
+                .payload_signal
+                .wait_timeout(inner, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            inner = guard;
+        }
+    })
+}
+
+unsafe fn finish_broker_wait(
+    frame: BrokerFrame,
+    state: u32,
+    reply: *mut u8,
+    reply_capacity: u32,
+    reply_len: *mut u32,
+) -> Result<Status, (Status, String)> {
+    if state != BROKER_FRAME_STATE_COMPLETED {
+        let status = broker_terminal_status(state);
+        let diagnostic = if frame.error_message.is_empty() {
+            match status {
+                Status::OperationCancelled => "the broker request was cancelled".to_owned(),
+                Status::BrokerTimeout => "the broker request passed its deadline".to_owned(),
+                Status::BrokerClosed => "the broker channel closed before the request completed".to_owned(),
+                _ => "the broker request failed".to_owned(),
+            }
+        } else {
+            frame.error_message
+        };
+        return Err((status, diagnostic));
+    }
+    let length = frame.reply.len() as u32;
+    if !reply_len.is_null() {
+        *reply_len = length;
+    }
+    if reply.is_null() || reply_capacity < length {
+        return Ok(Status::BufferTooSmall);
+    }
+    if length > 0 {
+        std::ptr::copy_nonoverlapping(frame.reply.as_ptr(), reply, length as usize);
+    }
+    Ok(Status::Success)
+}
+
+unsafe fn read_broker_body(body: *const u8, body_len: u32, maximum: u32) -> Result<Vec<u8>, (Status, String)> {
+    if body_len > maximum {
+        return Err((
+            Status::InvalidArgument,
+            "broker frame body exceeds the channel maximum body size".to_owned(),
+        ));
+    }
+    if body_len == 0 {
+        return Ok(Vec::new());
+    }
+    if body.is_null() {
+        return Err((
+            Status::InvalidArgument,
+            "broker frame body pointer is null for a non-empty body".to_owned(),
+        ));
+    }
+    Ok(slice::from_raw_parts(body, body_len as usize).to_vec())
+}
+
+unsafe extern "C" fn broker_post(
+    channel_handle: u64,
+    generation: u64,
+    kind: u32,
+    ordering_key: u64,
+    body: *const u8,
+    body_len: u32,
+    result: *mut CallResult,
+) -> i32 {
+    broker_trampoline(result, || {
+        let attachment = broker_attachment_for(channel_handle, generation).ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "the broker context is not active for this invocation".to_owned(),
+            )
+        })?;
+        let channel = Arc::clone(&attachment.channel);
+        let body = read_broker_body(body, body_len, channel.max_body_bytes)?;
+
+        let mut inner = channel.lock();
+        if inner.closed {
+            return Err((Status::BrokerClosed, "broker channel is closed".to_owned()));
+        }
+        let now_ms = channel.now_epoch_ms();
+        broker_expire_due_frames(&mut inner, now_ms);
+        if broker_inflight_count(&inner) >= channel.max_inflight {
+            // An event must never apply backpressure to a pipeline: evict the
+            // oldest queued one-way frame of the same kind, then of any kind,
+            // and otherwise drop this one. Every loss is counted.
+            let victim = inner
+                .queue
+                .iter()
+                .copied()
+                .find(|correlation| {
+                    inner
+                        .frames
+                        .get(correlation)
+                        .is_some_and(|frame| frame.is_one_way() && frame.kind == kind)
+                })
+                .or_else(|| {
+                    inner
+                        .queue
+                        .iter()
+                        .copied()
+                        .find(|correlation| inner.frames.get(correlation).is_some_and(|frame| frame.is_one_way()))
+                });
+            match victim {
+                Some(correlation) => {
+                    inner.queue.retain(|queued| *queued != correlation);
+                    inner.frames.remove(&correlation);
+                    inner.pending_drops = inner.pending_drops.saturating_add(1);
+                }
+                None => {
+                    inner.pending_drops = inner.pending_drops.saturating_add(1);
+                    return Ok(Status::Success);
+                }
+            }
+        }
+        let correlation = inner.next_correlation;
+        inner.next_correlation = inner
+            .next_correlation
+            .checked_add(1)
+            .ok_or_else(|| (Status::HostFailure, "broker correlations are exhausted".to_owned()))?;
+        inner.frames.insert(
+            correlation,
+            BrokerFrame {
+                correlation_id: correlation,
+                ordering_key,
+                kind,
+                flags: BROKER_FRAME_FLAG_ONE_WAY,
+                deadline_epoch_ms: now_ms.saturating_add(u64::from(channel.default_deadline_ms)),
+                body,
+                state: BROKER_FRAME_STATE_QUEUED,
+                dropped_before: 0,
+                reply: Vec::new(),
+                error_message: String::new(),
+                owner_token: 0,
+            },
+        );
+        inner.queue.push_back(correlation);
+        drop(inner);
+        channel.consumer_signal.notify_all();
+        Ok(Status::Success)
+    })
+}
+
 fn with_result<F>(handle: u64, operation: F) -> Result<Status, (Status, String)>
 where
     F: FnOnce(&FfiInvocationResult) -> Result<Status, (Status, String)>,
@@ -3927,6 +5061,8 @@ fn create_session_result() -> Result<u64, (Status, String)> {
             runspace_session: None,
             capability_registration: Mutex::new(None),
             active_capability: Mutex::new(None),
+            broker_channel: Mutex::new(None),
+            active_broker: Mutex::new(None),
         }),
     );
     Ok(handle)
@@ -4473,6 +5609,8 @@ fn create_session_builder(handle: u64) -> Result<u64, (Status, String)> {
             runspace_session: Some(runspace_session),
             capability_registration: Mutex::new(None),
             active_capability: Mutex::new(None),
+            broker_channel: Mutex::new(None),
+            active_broker: Mutex::new(None),
         }),
     );
     Ok(builder_handle)
@@ -4554,6 +5692,7 @@ fn feature_flags() -> u64 {
         | FEATURE_OBSERVED_INVOCATION
         | FEATURE_SESSION_PREFLIGHT
         | FEATURE_RUNTIME_DIAGNOSTICS
+        | FEATURE_DUPLEX_BROKER_CHANNEL
 }
 
 fn create_live_object_probe(initial_count: i64) -> Result<*mut std::ffi::c_void, (Status, String)> {
@@ -5233,6 +6372,139 @@ pub unsafe extern "C" fn multi_pwsh_set_capabilities(
     result: *mut CallResult,
 ) -> i32 {
     v2_call(result, || set_capabilities(handle, capability_handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_broker_open(
+    options: *const BrokerChannelOptions,
+    channel_handle: *mut u64,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || broker_open(options, channel_handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_broker_close(channel_handle: u64, result: *mut CallResult) -> i32 {
+    v2_broker_call(result, || broker_close(channel_handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_broker_wait(
+    channel_handle: u64,
+    timeout_ms: u32,
+    frame_handle: *mut u64,
+    result: *mut CallResult,
+) -> i32 {
+    v2_broker_call(result, || broker_wait(channel_handle, timeout_ms, frame_handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_broker_frame_get_info(
+    frame_handle: u64,
+    info: *mut BrokerFrameInfo,
+    result: *mut CallResult,
+) -> i32 {
+    v2_broker_call(result, || broker_frame_get_info(frame_handle, info))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_broker_frame_read(
+    frame_handle: u64,
+    buffer: *mut u8,
+    capacity: u32,
+    required: *mut u32,
+    result: *mut CallResult,
+) -> i32 {
+    v2_broker_call(result, || broker_frame_read(frame_handle, buffer, capacity, required))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_broker_frame_release(frame_handle: u64, result: *mut CallResult) -> i32 {
+    v2_broker_call(result, || broker_frame_release(frame_handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_broker_reply(
+    channel_handle: u64,
+    correlation_id: u64,
+    body: *const u8,
+    body_len: u32,
+    result: *mut CallResult,
+) -> i32 {
+    v2_broker_call(result, || {
+        if body_len > 0 && body.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "broker reply pointer is null for a non-empty reply".to_owned(),
+            ));
+        }
+        let reply = if body_len == 0 {
+            &[][..]
+        } else {
+            slice::from_raw_parts(body, body_len as usize)
+        };
+        broker_complete(
+            channel_handle,
+            correlation_id,
+            BROKER_FRAME_STATE_COMPLETED,
+            reply,
+            String::new(),
+        )
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_broker_reply_error(
+    channel_handle: u64,
+    correlation_id: u64,
+    code: i32,
+    message: Utf8Span,
+    result: *mut CallResult,
+) -> i32 {
+    v2_broker_call(result, || {
+        let text =
+            utf8_span(message).map_err(|status| (status, "broker error message is not valid UTF-8".to_owned()))?;
+        if text.len() > BROKER_MAX_ERROR_MESSAGE_BYTES {
+            return Err((
+                Status::InvalidArgument,
+                "broker error message exceeds 512 UTF-8 bytes".to_owned(),
+            ));
+        }
+        let diagnostic = if text.is_empty() {
+            format!("the broker request failed with code {code}")
+        } else {
+            format!("{text} (code {code})")
+        };
+        broker_complete(
+            channel_handle,
+            correlation_id,
+            BROKER_FRAME_STATE_FAILED,
+            &[],
+            diagnostic,
+        )
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_broker_cancel(
+    channel_handle: u64,
+    correlation_id: u64,
+    result: *mut CallResult,
+) -> i32 {
+    v2_broker_call(result, || {
+        broker_complete(
+            channel_handle,
+            correlation_id,
+            BROKER_FRAME_STATE_CANCELLED,
+            &[],
+            String::new(),
+        )
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_set_broker(handle: u64, channel_handle: u64, result: *mut CallResult) -> i32 {
+    v2_call(result, || set_broker(handle, channel_handle))
 }
 
 #[no_mangle]
@@ -6831,6 +8103,944 @@ mod tests {
         assert_eq!(handle, 0);
     }
 
+    // -----------------------------------------------------------------
+    // Duplex Broker Channel acceptance tests
+    // -----------------------------------------------------------------
+
+    fn broker_call_result(diagnostic: &mut [u8]) -> CallResult {
+        CallResult {
+            size: mem::size_of::<CallResult>() as u32,
+            status: 0,
+            flags: 0,
+            _reserved: 0,
+            diagnostic: diagnostic.as_mut_ptr(),
+            diagnostic_capacity: diagnostic.len(),
+            diagnostic_required: 0,
+            diagnostic_written: 0,
+        }
+    }
+
+    fn broker_default_options() -> BrokerChannelOptions {
+        BrokerChannelOptions {
+            size: mem::size_of::<BrokerChannelOptions>() as u32,
+            abi_version: BROKER_ABI_V1,
+            max_inflight: 4,
+            max_body_bytes: 1024,
+            default_deadline_ms: 5_000,
+            flags: 0,
+        }
+    }
+
+    fn open_broker_channel(options: &BrokerChannelOptions) -> u64 {
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        let mut channel = 0_u64;
+        assert_eq!(
+            unsafe { multi_pwsh_broker_open(options, &mut channel, &mut result) },
+            Status::Success.value()
+        );
+        assert_ne!(channel, 0);
+        channel
+    }
+
+    /// Drives the payload half directly, exactly as the trampoline does.
+    fn broker_enqueue(channel: u64, generation: u64, kind: u32, body: &[u8]) -> (i32, Vec<u8>, String) {
+        let mut diagnostic = [0_u8; 512];
+        let mut result = broker_call_result(&mut diagnostic);
+        let mut reply = [0_u8; 1024];
+        let mut reply_len = 0_u32;
+        let mut correlation = 0_u64;
+        let status = unsafe {
+            broker_enqueue_and_wait(
+                channel,
+                generation,
+                kind,
+                0,
+                0,
+                0,
+                body.as_ptr(),
+                body.len() as u32,
+                &mut correlation,
+                reply.as_mut_ptr(),
+                reply.len() as u32,
+                &mut reply_len,
+                &mut result,
+            )
+        };
+        let text = String::from_utf8_lossy(&diagnostic[..result.diagnostic_written]).to_string();
+        (status, reply[..reply_len as usize].to_vec(), text)
+    }
+
+    /// Registers an active attachment so the trampolines resolve, without
+    /// requiring a real payload runtime or session.
+    fn broker_test_attachment(channel_handle: u64) -> Arc<BrokerAttachment> {
+        let channel = broker_channel_for(channel_handle).expect("channel");
+        let attachment = Arc::new(BrokerAttachment {
+            channel_handle,
+            channel,
+            generation: NEXT_BROKER_GENERATION.fetch_add(1, Ordering::AcqRel),
+            active: AtomicBool::new(true),
+        });
+        broker_register_attachment(&attachment);
+        attachment
+    }
+
+    fn broker_release_test_attachment(attachment: &Arc<BrokerAttachment>) {
+        attachment.active.store(false, Ordering::Release);
+        broker_unregister_attachment(attachment.generation);
+    }
+
+    fn broker_wait_for_frame(channel: u64, timeout_ms: u32) -> u64 {
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        let mut frame = 0_u64;
+        let status = unsafe { multi_pwsh_broker_wait(channel, timeout_ms, &mut frame, &mut result) };
+        assert_eq!(status, Status::Success.value());
+        frame
+    }
+
+    fn broker_close_channel(channel: u64) {
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        unsafe { multi_pwsh_broker_close(channel, &mut result) };
+    }
+
+    #[test]
+    fn broker_open_rejects_invalid_options() {
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        let mut channel = 0_u64;
+
+        let mut options = broker_default_options();
+        options.abi_version = 99;
+        assert_eq!(
+            unsafe { multi_pwsh_broker_open(&options, &mut channel, &mut result) },
+            Status::InvalidArgument.value()
+        );
+
+        #[repr(C)]
+        struct ShortBrokerOptions {
+            size: u32,
+        }
+
+        let mut options = ShortBrokerOptions { size: 4 };
+        assert_eq!(
+            unsafe {
+                multi_pwsh_broker_open(
+                    (&mut options as *mut ShortBrokerOptions).cast::<BrokerChannelOptions>(),
+                    &mut channel,
+                    &mut result,
+                )
+            },
+            Status::InvalidArgument.value()
+        );
+
+        #[repr(C, align(8))]
+        struct ShortBrokerFrameInfo {
+            size: u32,
+            abi_version: u32,
+        }
+
+        let mut info = ShortBrokerFrameInfo {
+            size: 8,
+            abi_version: BROKER_ABI_V1,
+        };
+        assert_eq!(
+            unsafe {
+                multi_pwsh_broker_frame_get_info(
+                    0,
+                    (&mut info as *mut ShortBrokerFrameInfo).cast::<BrokerFrameInfo>(),
+                    &mut result,
+                )
+            },
+            Status::InvalidArgument.value()
+        );
+
+        let mut options = broker_default_options();
+        options.max_inflight = BROKER_MAX_INFLIGHT_LIMIT + 1;
+        assert_eq!(
+            unsafe { multi_pwsh_broker_open(&options, &mut channel, &mut result) },
+            Status::InvalidArgument.value()
+        );
+
+        let mut options = broker_default_options();
+        options.max_body_bytes = BROKER_MAX_BODY_BYTES_LIMIT + 1;
+        assert_eq!(
+            unsafe { multi_pwsh_broker_open(&options, &mut channel, &mut result) },
+            Status::InvalidArgument.value()
+        );
+
+        let mut options = broker_default_options();
+        options.flags = 1;
+        assert_eq!(
+            unsafe { multi_pwsh_broker_open(&options, &mut channel, &mut result) },
+            Status::InvalidArgument.value()
+        );
+        assert_eq!(channel, 0);
+    }
+
+    #[test]
+    fn broker_wire_structures_have_the_documented_fixed_layout() {
+        assert_eq!(mem::size_of::<BrokerChannelOptions>(), 24);
+        assert_eq!(mem::size_of::<BrokerFrameInfo>(), 56);
+        assert_eq!(mem::align_of::<BrokerFrameInfo>(), 8);
+    }
+
+    #[test]
+    fn broker_request_reaches_a_pump_and_the_reply_resumes_the_payload() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+
+        let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 7, b"ping"));
+
+        let frame = broker_wait_for_frame(channel, 5_000);
+        assert_ne!(frame, 0);
+
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        let mut info = BrokerFrameInfo {
+            size: mem::size_of::<BrokerFrameInfo>() as u32,
+            abi_version: BROKER_ABI_V1,
+            ..BrokerFrameInfo::default()
+        };
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_get_info(frame, &mut info, &mut result) },
+            Status::Success.value()
+        );
+        assert_eq!(info.kind, 7);
+        assert_eq!(info.body_length, 4);
+        assert_eq!(info.state, BROKER_FRAME_STATE_DISPATCHED);
+        assert!(info.flags & BROKER_FRAME_FLAG_MUTATING != 0);
+
+        let mut body = [0_u8; 16];
+        let mut required = 0_u32;
+        assert_eq!(
+            unsafe {
+                multi_pwsh_broker_frame_read(frame, body.as_mut_ptr(), body.len() as u32, &mut required, &mut result)
+            },
+            Status::Success.value()
+        );
+        assert_eq!(&body[..required as usize], b"ping");
+
+        let correlation = info.correlation_id;
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+            Status::Success.value()
+        );
+
+        // Releasing the delivery handle must NOT be abandonment: the reply
+        // still resumes the blocked payload.
+        assert_eq!(
+            unsafe { multi_pwsh_broker_reply(channel, correlation, b"pong".as_ptr(), 4, &mut result) },
+            Status::Success.value()
+        );
+
+        let (status, reply, _) = payload.join().expect("payload thread");
+        assert_eq!(status, Status::Success.value());
+        assert_eq!(reply, b"pong");
+
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_duplicate_and_late_replies_are_rejected() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 1, b"x"));
+
+        let frame = broker_wait_for_frame(channel, 5_000);
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        let mut info = BrokerFrameInfo {
+            size: mem::size_of::<BrokerFrameInfo>() as u32,
+            abi_version: BROKER_ABI_V1,
+            ..BrokerFrameInfo::default()
+        };
+        unsafe { multi_pwsh_broker_frame_get_info(frame, &mut info, &mut result) };
+        let correlation = info.correlation_id;
+        unsafe { multi_pwsh_broker_frame_release(frame, &mut result) };
+
+        assert_eq!(
+            unsafe { multi_pwsh_broker_reply(channel, correlation, std::ptr::null(), 0, &mut result) },
+            Status::Success.value()
+        );
+        // Second reply must not resurrect or leak into another frame.
+        assert_eq!(
+            unsafe { multi_pwsh_broker_reply(channel, correlation, std::ptr::null(), 0, &mut result) },
+            Status::BrokerInvalidTerminalState.value()
+        );
+        assert_eq!(
+            unsafe { multi_pwsh_broker_cancel(channel, correlation, &mut result) },
+            Status::BrokerInvalidTerminalState.value()
+        );
+        // Unknown correlation is equally deterministic.
+        assert_eq!(
+            unsafe { multi_pwsh_broker_reply(channel, correlation + 4_242, std::ptr::null(), 0, &mut result) },
+            Status::BrokerInvalidTerminalState.value()
+        );
+
+        let (status, _, _) = payload.join().expect("payload thread");
+        assert_eq!(status, Status::Success.value());
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_cancellation_after_dispatch_wakes_the_payload() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 2, b"y"));
+
+        let frame = broker_wait_for_frame(channel, 5_000);
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        let mut info = BrokerFrameInfo {
+            size: mem::size_of::<BrokerFrameInfo>() as u32,
+            abi_version: BROKER_ABI_V1,
+            ..BrokerFrameInfo::default()
+        };
+        unsafe { multi_pwsh_broker_frame_get_info(frame, &mut info, &mut result) };
+        unsafe { multi_pwsh_broker_frame_release(frame, &mut result) };
+        assert_eq!(
+            unsafe { multi_pwsh_broker_cancel(channel, info.correlation_id, &mut result) },
+            Status::Success.value()
+        );
+
+        let (status, _, _) = payload.join().expect("payload thread");
+        assert_eq!(status, Status::OperationCancelled.value());
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_reply_error_surfaces_a_bounded_diagnostic() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 3, b"z"));
+
+        let frame = broker_wait_for_frame(channel, 5_000);
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        let mut info = BrokerFrameInfo {
+            size: mem::size_of::<BrokerFrameInfo>() as u32,
+            abi_version: BROKER_ABI_V1,
+            ..BrokerFrameInfo::default()
+        };
+        unsafe { multi_pwsh_broker_frame_get_info(frame, &mut info, &mut result) };
+        unsafe { multi_pwsh_broker_frame_release(frame, &mut result) };
+        let message = b"handler refused";
+        assert_eq!(
+            unsafe {
+                multi_pwsh_broker_reply_error(
+                    channel,
+                    info.correlation_id,
+                    9,
+                    Utf8Span {
+                        data: message.as_ptr(),
+                        len: message.len(),
+                    },
+                    &mut result,
+                )
+            },
+            Status::Success.value()
+        );
+
+        let (status, _, text) = payload.join().expect("payload thread");
+        assert_eq!(status, Status::ManagedFailure.value());
+        assert!(text.contains("handler refused"), "diagnostic was {}", text);
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_request_times_out_before_its_absolute_deadline_elapses_twice() {
+        let mut options = broker_default_options();
+        options.default_deadline_ms = 150;
+        let channel = open_broker_channel(&options);
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+
+        // Attach a pump so the request is queued rather than refused.
+        let frame = broker_wait_for_frame(channel, 50);
+        assert_eq!(frame, 0);
+
+        let started = Instant::now();
+        let (status, _, _) = broker_enqueue(channel, generation, 4, b"t");
+        assert_eq!(status, Status::BrokerTimeout.value());
+        assert!(started.elapsed() < Duration::from_secs(5), "timeout was not bounded");
+
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_request_without_a_pump_fails_fast_rather_than_hanging() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        let started = Instant::now();
+        let (status, _, _) = broker_enqueue(channel, generation, 5, b"n");
+        assert_eq!(status, Status::BrokerNoConsumer.value());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "no-consumer did not fail fast"
+        );
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_close_wakes_every_blocked_payload_request() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        assert_eq!(broker_wait_for_frame(channel, 50), 0);
+
+        let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 6, b"c"));
+        // Let the request reach the queue, then close.
+        std::thread::sleep(Duration::from_millis(100));
+        broker_close_channel(channel);
+
+        let (status, _, _) = payload.join().expect("payload thread");
+        assert_eq!(status, Status::BrokerClosed.value());
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_saturated_channel_reports_busy_and_serializes_one_mutating_key() {
+        let mut options = broker_default_options();
+        options.max_inflight = 1;
+        let channel = open_broker_channel(&options);
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        assert_eq!(broker_wait_for_frame(channel, 50), 0);
+
+        let first = std::thread::spawn(move || broker_enqueue(channel, generation, 8, b"1"));
+        std::thread::sleep(Duration::from_millis(100));
+        // A second request cannot be admitted: the bound counts every
+        // non-terminal correlation, dispatched or not.
+        let (status, _, _) = broker_enqueue(channel, generation, 8, b"2");
+        assert_eq!(status, Status::BrokerBusy.value());
+
+        broker_close_channel(channel);
+        let (first_status, _, _) = first.join().expect("payload thread");
+        assert_eq!(first_status, Status::BrokerClosed.value());
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_rejects_a_stale_generation_and_an_unknown_channel() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+
+        let (status, _, _) = broker_enqueue(channel, generation + 1, 9, b"s");
+        assert_eq!(status, Status::InvalidHandle.value());
+
+        let (status, _, _) = broker_enqueue(channel + 9_999, generation, 9, b"s");
+        assert_eq!(status, Status::InvalidHandle.value());
+
+        // Deactivating the attachment revokes a captured $DpsBroker.
+        broker_release_test_attachment(&attachment);
+        let (status, _, _) = broker_enqueue(channel, generation, 9, b"s");
+        assert_eq!(status, Status::InvalidHandle.value());
+
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_frame_handles_are_channel_scoped_and_single_release() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 10, b"h"));
+
+        let frame = broker_wait_for_frame(channel, 5_000);
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+            Status::Success.value()
+        );
+        // A released handle is stale forever; it never resolves to another frame.
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+            Status::InvalidHandle.value()
+        );
+        let mut required = 0_u32;
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_read(frame, std::ptr::null_mut(), 0, &mut required, &mut result) },
+            Status::InvalidHandle.value()
+        );
+
+        broker_close_channel(channel);
+        let _ = payload.join();
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_dispatch_violation_rejects_non_broker_calls_while_a_frame_is_held() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 11, b"d"));
+
+        let frame = broker_wait_for_frame(channel, 5_000);
+        assert_ne!(frame, 0);
+
+        // While this thread holds a delivery handle, a normal FFI export must
+        // fail deterministically instead of deadlocking or being allowed.
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        let mut builder = 0_u64;
+        assert_eq!(
+            unsafe { multi_pwsh_create(&mut builder, &mut result) },
+            Status::BrokerDispatchViolation.value()
+        );
+        assert_eq!(builder, 0);
+
+        // Broker data-plane calls remain legal from the same thread.
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+            Status::Success.value()
+        );
+        // After release the restriction is lifted.
+        assert_ne!(
+            unsafe { multi_pwsh_create(&mut builder, &mut result) },
+            Status::BrokerDispatchViolation.value()
+        );
+        if builder != 0 {
+            unsafe { multi_pwsh_release(builder, &mut result) };
+        }
+
+        broker_close_channel(channel);
+        let _ = payload.join();
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_release_from_another_thread_is_a_dispatch_violation() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 12, b"o"));
+
+        let frame = broker_wait_for_frame(channel, 5_000);
+        let foreign = std::thread::spawn(move || {
+            let mut diagnostic = [0_u8; 256];
+            let mut result = broker_call_result(&mut diagnostic);
+            unsafe { multi_pwsh_broker_frame_release(frame, &mut result) }
+        })
+        .join()
+        .expect("foreign thread");
+        assert_eq!(foreign, Status::BrokerDispatchViolation.value());
+
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+            Status::Success.value()
+        );
+
+        broker_close_channel(channel);
+        let _ = payload.join();
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_one_way_events_never_block_a_producer() {
+        let mut options = broker_default_options();
+        options.max_inflight = 2;
+        let channel = open_broker_channel(&options);
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        assert_eq!(broker_wait_for_frame(channel, 50), 0);
+
+        let started = Instant::now();
+        for index in 0..12_u32 {
+            let mut diagnostic = [0_u8; 256];
+            let mut result = broker_call_result(&mut diagnostic);
+            let body = index.to_le_bytes();
+            let status =
+                unsafe { broker_post(channel, generation, 1, 0, body.as_ptr(), body.len() as u32, &mut result) };
+            assert_eq!(status, Status::Success.value(), "post {} applied backpressure", index);
+        }
+        assert!(started.elapsed() < Duration::from_secs(1), "posting blocked");
+
+        // The loss is reported rather than hidden.
+        let frame = broker_wait_for_frame(channel, 1_000);
+        assert_ne!(frame, 0);
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        let mut info = BrokerFrameInfo {
+            size: mem::size_of::<BrokerFrameInfo>() as u32,
+            abi_version: BROKER_ABI_V1,
+            ..BrokerFrameInfo::default()
+        };
+        unsafe { multi_pwsh_broker_frame_get_info(frame, &mut info, &mut result) };
+        assert!(info.flags & BROKER_FRAME_FLAG_ONE_WAY != 0);
+        assert!(info.dropped_before > 0, "coalesced events were not reported");
+        unsafe { multi_pwsh_broker_frame_release(frame, &mut result) };
+
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_generation_is_invalidated_when_its_invocation_terminates() {
+        // Regression: the generation must be revoked on the real terminal
+        // paths, not only on pre-invocation failure paths. Otherwise script
+        // that captured `$DpsBroker` reaches the channel in a later invocation
+        // and BROKER_ATTACHMENTS grows without bound.
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+
+        assert!(
+            broker_attachment_for(channel, generation).is_some(),
+            "the attachment should resolve while its invocation is active"
+        );
+
+        // This is exactly what every terminal invocation path now performs.
+        broker_deactivate_attachment(&attachment);
+
+        assert!(
+            broker_attachment_for(channel, generation).is_none(),
+            "the broker generation survived its invocation"
+        );
+        let (status, _, _) = broker_enqueue(channel, generation, 1, b"stale");
+        assert_eq!(
+            status,
+            Status::InvalidHandle.value(),
+            "a captured $DpsBroker reached the channel after its invocation ended"
+        );
+        assert!(
+            BROKER_ATTACHMENTS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map(|map| !map.contains_key(&generation))
+                .unwrap_or(true),
+            "the attachment registry retained a terminated generation"
+        );
+
+        broker_close_channel(channel);
+    }
+
+    #[test]
+    fn broker_expired_one_way_events_do_not_accumulate_without_a_pump() {
+        // Regression: a one-way frame has no blocked raiser to collect it, so
+        // an expired event nobody received must be dropped by the expiry sweep
+        // rather than retained for the life of the channel.
+        let mut options = broker_default_options();
+        options.max_inflight = 8;
+        options.default_deadline_ms = 60;
+        let channel = open_broker_channel(&options);
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+
+        // Attach a pump once so posting is accepted, then stop consuming.
+        assert_eq!(broker_wait_for_frame(channel, 10), 0);
+
+        for round in 0..4_u32 {
+            for index in 0..6_u32 {
+                let mut diagnostic = [0_u8; 256];
+                let mut result = broker_call_result(&mut diagnostic);
+                let body = [round as u8, index as u8];
+                let status = unsafe {
+                    broker_post(
+                        channel,
+                        generation,
+                        index,
+                        0,
+                        body.as_ptr(),
+                        body.len() as u32,
+                        &mut result,
+                    )
+                };
+                assert_eq!(status, Status::Success.value());
+            }
+            // Let this round expire, then drive a sweep.
+            std::thread::sleep(Duration::from_millis(90));
+            assert_eq!(broker_wait_for_frame(channel, 10), 0);
+        }
+
+        let retained = {
+            let owner = broker_channel_for(channel).expect("channel");
+            let inner = owner.lock();
+            inner.frames.len()
+        };
+        assert!(
+            retained <= options.max_inflight as usize,
+            "expired one-way frames accumulated: {} retained",
+            retained
+        );
+
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_release_after_deadline_does_not_poison_the_pump_thread() {
+        // Regression: the payload thread removes its frame when it wakes on a
+        // terminal state. A pump still holding the delivery handle must still be
+        // able to release it, or its thread-local owner token leaks and every
+        // later non-broker call from that thread fails forever.
+        let mut options = broker_default_options();
+        options.default_deadline_ms = 150;
+        let channel = open_broker_channel(&options);
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+
+        assert_eq!(broker_wait_for_frame(channel, 20), 0);
+        let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 42, b"late"));
+
+        let frame = broker_wait_for_frame(channel, 5_000);
+        assert_ne!(frame, 0);
+
+        // Let the request pass its deadline while the pump still holds the frame.
+        let (status, _, _) = payload.join().expect("payload thread");
+        assert_eq!(status, Status::BrokerTimeout.value());
+
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+            Status::Success.value(),
+            "releasing a delivery handle after its request terminated must succeed"
+        );
+
+        // The pump thread must not stay poisoned for ordinary FFI calls.
+        let mut builder = 0_u64;
+        let create_status = unsafe { multi_pwsh_create(&mut builder, &mut result) };
+        assert_ne!(
+            create_status,
+            Status::BrokerDispatchViolation.value(),
+            "the pump thread remained blocked from non-broker calls after release"
+        );
+        if builder != 0 {
+            unsafe { multi_pwsh_release(builder, &mut result) };
+        }
+
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_randomized_soak_is_bounded_and_leak_free() {
+        // Deterministic LCG: reproducible in CI, no extra dependency.
+        struct Lcg(u64);
+        impl Lcg {
+            fn next(&mut self) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                self.0 >> 33
+            }
+            fn below(&mut self, bound: u64) -> u64 {
+                self.next() % bound
+            }
+        }
+
+        let mut random = Lcg(0x5EED_1234_ABCD_0001);
+        let mut seen_delivery_handles = HashSet::new();
+        let mut seen_channel_handles = HashSet::new();
+        let soak_started = Instant::now();
+
+        for iteration in 0..24_u32 {
+            let mut options = broker_default_options();
+            options.max_inflight = 1 + random.below(4) as u32;
+            options.max_body_bytes = 64 + random.below(256) as u32;
+            // Short deadlines keep abandoned frames bounded without a long test.
+            options.default_deadline_ms = 150 + random.below(150) as u32;
+
+            let channel = open_broker_channel(&options);
+            assert!(
+                seen_channel_handles.insert(channel),
+                "channel handle {} was reused",
+                channel
+            );
+            let attachment = broker_test_attachment(channel);
+            let generation = attachment.generation;
+
+            // Attach a pump before producing so requests are queued, not refused.
+            assert_eq!(broker_wait_for_frame(channel, 20), 0);
+
+            let request_count = 1 + random.below(4) as u32;
+            let mut payloads = Vec::new();
+            for index in 0..request_count {
+                let body = vec![(index % 251) as u8; 1 + random.below(16) as usize];
+                payloads.push(std::thread::spawn(move || {
+                    broker_enqueue(channel, generation, index, &body)
+                }));
+            }
+
+            let event_count = random.below(6) as u32;
+            for index in 0..event_count {
+                let mut diagnostic = [0_u8; 256];
+                let mut result = broker_call_result(&mut diagnostic);
+                let body = [index as u8];
+                let status =
+                    unsafe { broker_post(channel, generation, 1, 0, body.as_ptr(), body.len() as u32, &mut result) };
+                assert_eq!(status, Status::Success.value(), "one-way post applied backpressure");
+            }
+
+            // Service a random subset with a random terminal decision. Anything
+            // left over must still terminate on its deadline or at close.
+            let service_budget = request_count + event_count;
+            for _ in 0..service_budget {
+                let frame = broker_wait_for_frame(channel, 200);
+                if frame == 0 {
+                    continue;
+                }
+                assert!(
+                    seen_delivery_handles.insert(frame),
+                    "delivery handle {} was reused",
+                    frame
+                );
+
+                let mut diagnostic = [0_u8; 256];
+                let mut result = broker_call_result(&mut diagnostic);
+                let mut info = BrokerFrameInfo {
+                    size: mem::size_of::<BrokerFrameInfo>() as u32,
+                    abi_version: BROKER_ABI_V1,
+                    ..BrokerFrameInfo::default()
+                };
+                assert_eq!(
+                    unsafe { multi_pwsh_broker_frame_get_info(frame, &mut info, &mut result) },
+                    Status::Success.value()
+                );
+                let mut body = vec![0_u8; info.body_length as usize + 1];
+                let mut required = 0_u32;
+                assert_eq!(
+                    unsafe {
+                        multi_pwsh_broker_frame_read(
+                            frame,
+                            body.as_mut_ptr(),
+                            body.len() as u32,
+                            &mut required,
+                            &mut result,
+                        )
+                    },
+                    Status::Success.value()
+                );
+                assert_eq!(required, info.body_length);
+
+                let correlation = info.correlation_id;
+                let one_way = info.flags & BROKER_FRAME_FLAG_ONE_WAY != 0;
+                assert_eq!(
+                    unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+                    Status::Success.value()
+                );
+                // Releasing twice is always stale, never a second frame.
+                assert_eq!(
+                    unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+                    Status::InvalidHandle.value()
+                );
+
+                if one_way {
+                    continue;
+                }
+
+                match random.below(4) {
+                    0 => {
+                        let reply = [7_u8, 8, 9];
+                        unsafe {
+                            multi_pwsh_broker_reply(channel, correlation, reply.as_ptr(), 3, &mut result);
+                        }
+                    }
+                    1 => {
+                        let message = b"soak";
+                        unsafe {
+                            multi_pwsh_broker_reply_error(
+                                channel,
+                                correlation,
+                                1,
+                                Utf8Span {
+                                    data: message.as_ptr(),
+                                    len: message.len(),
+                                },
+                                &mut result,
+                            );
+                        }
+                    }
+                    2 => unsafe {
+                        multi_pwsh_broker_cancel(channel, correlation, &mut result);
+                    },
+                    // 3: deliberately abandon. Release is not abandonment, so
+                    // this frame must still terminate on its deadline.
+                    _ => {}
+                }
+            }
+
+            broker_close_channel(channel);
+
+            for payload in payloads {
+                let (status, _, _) = payload.join().expect("payload thread");
+                // Every path must reach a defined terminal status.
+                assert!(
+                    status == Status::Success.value()
+                        || status == Status::ManagedFailure.value()
+                        || status == Status::OperationCancelled.value()
+                        || status == Status::BrokerTimeout.value()
+                        || status == Status::BrokerClosed.value()
+                        || status == Status::BrokerBusy.value(),
+                    "iteration {} produced undefined status {}",
+                    iteration,
+                    status
+                );
+            }
+
+            broker_release_test_attachment(&attachment);
+
+            // Closing must leave no delivery handles or channel state behind.
+            let registry = broker_frame_registry();
+            let leaked = registry
+                .as_ref()
+                .map(|map| {
+                    map.values()
+                        .filter(|entry| Arc::strong_count(&entry.channel) > 0)
+                        .count()
+                })
+                .unwrap_or(0);
+            drop(registry);
+            assert!(
+                leaked <= seen_delivery_handles.len(),
+                "delivery-handle registry grew without bound"
+            );
+            let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert!(
+                !state.broker_channels.contains_key(&channel),
+                "a closed channel remained registered"
+            );
+        }
+
+        assert!(
+            soak_started.elapsed() < Duration::from_secs(60),
+            "the broker soak exceeded its bounded runtime"
+        );
+
+        // No channel state and no delivery handles survive the soak.
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for channel in &seen_channel_handles {
+            assert!(!state.broker_channels.contains_key(channel));
+        }
+        drop(state);
+        let registry = broker_frame_registry();
+        if let Some(map) = registry.as_ref() {
+            for handle in &seen_delivery_handles {
+                assert!(!map.contains_key(handle), "delivery handle {} leaked", handle);
+            }
+        }
+    }
+
     #[test]
     fn invocation_execution_scope_tracks_nesting_and_unwind_cleanup() {
         assert_eq!(pipeline_execution_depth(), 0);
@@ -6962,7 +9172,8 @@ mod tests {
             | FEATURE_TYPED_RESULT_PAGING
             | FEATURE_OBSERVED_INVOCATION
             | FEATURE_SESSION_PREFLIGHT
-            | FEATURE_RUNTIME_DIAGNOSTICS;
+            | FEATURE_RUNTIME_DIAGNOSTICS
+            | FEATURE_DUPLEX_BROKER_CHANNEL;
 
         assert_eq!(ABI_VERSION, 2);
         assert_eq!(MINIMUM_COMPATIBLE_ABI_VERSION, 2);

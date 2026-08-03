@@ -164,6 +164,16 @@ public sealed class PowerShellRuntime
         return PowerShellScriptParser.Parse(this, script);
     }
 
+    /// <summary>
+    /// Creates an opt-in duplex broker channel. Attach it to one invocation with
+    /// <see cref="PowerShell.WithBroker"/>; that invocation must be asynchronous.
+    /// </summary>
+    public PowerShellBrokerChannel CreateBrokerChannel(PowerShellBrokerChannelOptions? options = null)
+    {
+        PowerShell.EnsureDuplexBrokerChannelSupported();
+        return PowerShellBrokerChannel.Create(options ?? new PowerShellBrokerChannelOptions());
+    }
+
     public PowerShellCapabilitySet RegisterCapabilities(IEnumerable<PowerShellCapabilityBinding> bindings)
     {
         if ((FeatureFlags & (1UL << 16)) == 0)

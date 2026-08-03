@@ -27,6 +27,7 @@ public sealed unsafe class PowerShell : IDisposable
     private const ulong SessionConfigurationFeature = 1UL << 14;
     private const ulong SessionVariablesFeature = 1UL << 15;
     private const ulong CapabilityRpcFeature = 1UL << 16;
+    private const ulong DuplexBrokerChannelFeature = 1UL << 25;
     private const ulong LiveObjectProbeFeature = 1UL << 17;
     private const ulong LiveSessionObjectProbeFeature = 1UL << 18;
     private const ulong LiveObjectContractsFeature = 1UL << 19;
@@ -476,6 +477,28 @@ public sealed unsafe class PowerShell : IDisposable
         return this;
     }
 
+    /// <summary>
+    /// Attaches a duplex broker channel to this builder for one invocation.
+    /// A builder with a broker attached must be invoked asynchronously; the
+    /// synchronous paths reject it with
+    /// <see cref="PowerShellFfiStatus.UnsupportedCapability"/>.
+    /// </summary>
+    public PowerShell WithBroker(PowerShellBrokerChannel broker)
+    {
+        ArgumentNullException.ThrowIfNull(broker);
+        EnsureDuplexBrokerChannelSupported();
+        using PowerShellHandle.HandleLease lease = handle.Borrow();
+        unsafe
+        {
+            byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+            NativeCallResult result = NativeCall.CreateResult(diagnostic);
+            int status = NativeMethods.SetBroker(lease.Value, broker.Handle, &result);
+            NativeCall.ThrowIfFailed(status, result, diagnostic);
+        }
+
+        return this;
+    }
+
     public PowerShell Clear()
     {
         InvokeForHandle(static (nativeHandle, result) => NativeMethods.Clear(nativeHandle, result));
@@ -663,6 +686,17 @@ public sealed unsafe class PowerShell : IDisposable
             throw new PowerShellFfiException(
                 PowerShellFfiStatus.UnsupportedCapability,
                 "The selected PowerShell payload does not support bounded capability RPC.");
+        }
+    }
+
+    internal static void EnsureDuplexBrokerChannelSupported()
+    {
+        EnsureSupportedAbi();
+        if ((FeatureFlags & DuplexBrokerChannelFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected native asset does not support the duplex broker channel.");
         }
     }
 

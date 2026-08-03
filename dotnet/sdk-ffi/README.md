@@ -339,3 +339,120 @@ Inspect `PowerShellInvocationResult`/`PowerShellInvocationException` stream
 snapshots; do not use `InvokeText()` as a success-only path. Actual shutdown or
 restart execution must be application-gated and is never exercised by package
 tests.
+
+## Duplex Broker Channel
+
+`PowerShellBrokerChannel` is an opt-in, strictly dispatch-only request/reply and
+one-way-event primitive. It lets a running pipeline ask the application for work
+**without running application code on the pipeline thread**. It is a separate
+facility from `PowerShellCapabilitySet`, whose direct-callback behaviour is
+unchanged.
+
+**A builder with a broker attached must be invoked asynchronously.** `Invoke()`
+and `InvokeText()` reject it with
+`PowerShellFfiStatus.UnsupportedCapability`. This is a liveness precondition,
+not a preference: a synchronous invocation from a UI thread whose dispatcher
+also services the pump would deadlock without any FFI call occurring, so no
+guard could catch it.
+
+```csharp
+using PowerShellBrokerChannel channel = runtime.CreateBrokerChannel(
+    new PowerShellBrokerChannelOptions(
+        maximumInflightFrames: 32,
+        maximumBodyBytes: 64 * 1024,
+        defaultDeadline: TimeSpan.FromSeconds(30)));
+
+// One dedicated pump thread. It must never do application work inline.
+using var pumpReady = new ManualResetEventSlim();
+var pump = new Thread(() =>
+{
+    // Thread.Start only schedules work. This zero-time wait registers the
+    // consumer before the payload can issue its first request.
+    if (!channel.TryReceive(TimeSpan.Zero, out _))
+    {
+        pumpReady.Set();
+        return;
+    }
+
+    pumpReady.Set();
+    while (channel.TryReceive(TimeSpan.FromMilliseconds(250), out PowerShellBrokerRequest? request))
+    {
+        if (request is not null)
+        {
+            // 'request' is fully copied; the delivery handle is already gone.
+            dispatcher.Post(() => HandleAsync(channel, request));
+        }
+    }
+});
+pump.IsBackground = true;
+pump.Start();
+if (!pumpReady.Wait(TimeSpan.FromSeconds(5)))
+{
+    throw new TimeoutException("The broker pump did not attach.");
+}
+
+using PowerShell command = session.CreatePowerShell()
+    .AddScript("$DpsBroker.Request(1, [byte[]]@(1,2,3))")
+    .WithBroker(channel);
+PowerShellInvocationResult result = await command.InvokeAsync(cancellationToken);
+```
+
+The handler replies later, from any thread, using only the correlation ID:
+
+```csharp
+static async Task HandleAsync(PowerShellBrokerChannel channel, PowerShellBrokerRequest request)
+{
+    try
+    {
+        byte[] reply = await ComputeAsync(request.Body).ConfigureAwait(false);
+        if (!channel.TryReply(request.CorrelationId, reply))
+        {
+            // The frame was cancelled, timed out, or the channel closed.
+            // Nobody is waiting any more; stop doing the work.
+        }
+    }
+    catch (Exception exception)
+    {
+        channel.TryReplyError(request.CorrelationId, code: 1, exception.Message);
+    }
+}
+```
+
+### Rules the facade enforces
+
+- **The delivery handle never escapes.** `TryReceive` performs wait, inspect,
+  copy, and release inside one call on one thread, then hands back an immutable
+  `PowerShellBrokerRequest`. No native pointer, buffer lifetime, or Rust-owned
+  memory reaches consumer code, and there is no finalizer that could release on
+  the wrong thread.
+- **Releasing is not abandoning.** The request stays outstanding after
+  `TryReceive` returns; only `TryReply`, `TryReplyError`, `Cancel`, its
+  deadline, or channel close makes it terminal.
+- **Replies are correlation-scoped.** They work from any thread until the frame
+  is terminal. A duplicate or late reply returns `false` and can never
+  resurrect a frame or reach a different one.
+- **Dispatch-only.** A pump must copy and hand off. If consumer code holds a
+  delivery handle at the ABI level and makes any other FFI call, that call
+  fails with `PowerShellFfiStatus.BrokerDispatchViolation`. The facade's
+  composed `TryReceive` makes this unreachable through normal use; it remains a
+  backstop for direct native consumers.
+- **Closing wakes everything.** `Dispose()` wakes every waiter and fails every
+  outstanding request deterministically.
+- **Events never block the pipeline.** `$DpsBroker.Post` is one-way; under
+  pressure the channel evicts older one-way frames and reports the loss in the
+  next request's `DroppedBefore`.
+- **One active mutating frame per ordering key**, so side effects for a key
+  cannot interleave.
+
+There is no consumer-side cancellation notification in this version. A handler
+discovers that its work is unwanted when `TryReply` returns `false`.
+
+### Explicit non-goals
+
+The broker carries bounded opaque byte frames and fixed-width metadata only. It
+is not an object bridge and never becomes one by configuration: no dynamic or
+reflective member access, no JSON or self-describing wire format, no `PSObject`
+or SMA type, no CLR object identity, no delegates or arbitrary script callbacks,
+no credential or `SecureString` material, and no bridge object injected into a
+remote runspace. There is no synchronous nested broker path in this version, and
+adding one is not a configuration option.

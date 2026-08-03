@@ -2417,9 +2417,152 @@ catch (PowerShellFfiException exception)
 
 await VerifyCancellationAndDisposeAsync();
 await VerifySafeHandleDisposeRacesAsync();
+await VerifyDuplexBrokerChannelAsync();
 
 Console.WriteLine("FFI package consumer: Success");
 return 0;
+
+async Task VerifyDuplexBrokerChannelAsync()
+{
+    try
+    {
+        _ = new PowerShellBrokerChannelOptions(defaultDeadline: TimeSpan.FromTicks(1));
+        throw new InvalidOperationException("A sub-millisecond broker deadline was accepted.");
+    }
+    catch (ArgumentOutOfRangeException)
+    {
+    }
+
+    using PowerShellBrokerChannel channel = runtime.CreateBrokerChannel(
+        new PowerShellBrokerChannelOptions(
+            maximumInflightFrames: 8,
+            maximumBodyBytes: 4096,
+            defaultDeadline: TimeSpan.FromSeconds(20)));
+
+    int observedRequests = 0;
+    int observedEvents = 0;
+    Exception? pumpFailure = null;
+    using var stopping = new CancellationTokenSource();
+    using var pumpReady = new ManualResetEventSlim();
+
+    var pump = new Thread(() =>
+    {
+        try
+        {
+            // Register the consumer before the payload starts. Thread.Start
+            // alone does not guarantee that broker_wait has run.
+            if (!channel.TryReceive(TimeSpan.Zero, out _))
+            {
+                throw new InvalidOperationException("The broker channel closed before the pump attached.");
+            }
+
+            pumpReady.Set();
+            while (!stopping.IsCancellationRequested &&
+                channel.TryReceive(TimeSpan.FromMilliseconds(100), out PowerShellBrokerRequest? received))
+            {
+                if (received is null)
+                {
+                    continue;
+                }
+
+                if (received.IsOneWay)
+                {
+                    Interlocked.Increment(ref observedEvents);
+                    continue;
+                }
+
+                Interlocked.Increment(ref observedRequests);
+
+                // Dispatch-only: hand the copied request to an ordinary worker
+                // and return to waiting. The reply happens on another thread.
+                PowerShellBrokerRequest captured = received;
+                _ = Task.Run(() =>
+                {
+                    byte[] reply = new byte[captured.Body.Length];
+                    for (int index = 0; index < captured.Body.Length; index++)
+                    {
+                        reply[index] = (byte)(captured.Body[index] + 1);
+                    }
+
+                    channel.TryReply(captured.CorrelationId, reply);
+                });
+            }
+        }
+        catch (Exception exception)
+        {
+            pumpFailure = exception;
+            pumpReady.Set();
+        }
+    })
+    {
+        IsBackground = true,
+        Name = "package-broker-pump",
+    };
+    pump.Start();
+
+    try
+    {
+        Require(
+            pumpReady.Wait(TimeSpan.FromSeconds(5)),
+            "The packaged broker pump did not attach.");
+        Require(pumpFailure is null, "The packaged broker pump failed: " + pumpFailure?.Message);
+
+        using (PowerShell synchronous = PowerShell.Create())
+        {
+            synchronous.AddScript("'unused'").WithBroker(channel);
+            try
+            {
+                synchronous.Invoke();
+                throw new InvalidOperationException(
+                    "A synchronous invocation with a broker attached was not rejected.");
+            }
+            catch (PowerShellFfiException exception)
+                when (exception.Status == PowerShellFfiStatus.UnsupportedCapability)
+            {
+            }
+        }
+
+        using PowerShell command = PowerShell.Create();
+        PowerShellInvocationResult brokerResult = await command
+            .AddScript(
+                "`$DpsBroker.Post(2, [byte[]]@(9));" +
+                "`$reply = `$DpsBroker.Request(1, [byte[]]@(1,2,3));" +
+                "[string]::Join('-', `$reply)")
+            .WithBroker(channel)
+            .InvokeAsync(CancellationToken.None);
+
+        Require(pumpFailure is null, "The packaged broker pump failed: " + pumpFailure?.Message);
+        Require(
+            brokerResult.Output.Records.Count == 1 &&
+                brokerResult.Output.Records[0].DisplayText == "2-3-4",
+            "The packaged duplex broker request did not receive its dispatched reply.");
+        Require(
+            Volatile.Read(ref observedRequests) == 1,
+            "The packaged broker pump did not observe exactly one request.");
+        Require(
+            Volatile.Read(ref observedEvents) == 1,
+            "The packaged broker pump did not observe the one-way event.");
+
+        // A reply for an unknown correlation must fail closed rather than
+        // resurrecting or reaching another frame.
+        Require(
+            !channel.TryReply(ulong.MaxValue, ReadOnlySpan<byte>.Empty),
+            "The packaged broker accepted a reply for an unknown correlation.");
+    }
+    finally
+    {
+        stopping.Cancel();
+        channel.Dispose();
+        pump.Join(TimeSpan.FromSeconds(5));
+    }
+
+    // A disposed channel is inert rather than throwing.
+    Require(
+        !channel.TryReply(1, ReadOnlySpan<byte>.Empty),
+        "A disposed broker channel accepted a reply.");
+
+    Console.WriteLine("FFI package consumer duplex broker channel: Success");
+}
 
 [PowerShellDtoContract(1)]
 public sealed class PackageProjectionDto
@@ -2784,6 +2927,12 @@ sealed class HostInteractionCapability : IPowerShellCapabilityHandler
         Select-Object -First 1
     if ($null -eq $reportedVersionLine) {
         throw 'The package consumer did not report the PowerShell file version from runtime diagnostics.'
+    }
+
+    # The duplex broker must be exercised through the restored package's public
+    # facade and staged native asset, not through a source project reference.
+    if (-not ($consumerOutput | Where-Object { $_ -eq 'FFI package consumer duplex broker channel: Success' })) {
+        throw 'The package consumer did not exercise the duplex broker channel through the packed SDK.'
     }
 
     $reportedVersion = $reportedVersionLine.Substring('FFI package consumer PowerShell file version: '.Length).Trim()

@@ -312,8 +312,13 @@ jobs:
           $payloadDirectory = Split-Path -Parent $env:PwshExePath
           $env:PATH = "$payloadDirectory$([System.IO.Path]::PathSeparator)$env:PATH"
           dotnet publish dotnet/nativeaot-sample/NativeAotFfiSample.csproj -c Release
-          & dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe
+          $sampleOutput = & dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe
+          $sampleOutput | ForEach-Object { Write-Host $_ }
           if ($LASTEXITCODE -ne 0) { throw "The PATH-resolved NativeAOT SDK sample failed with exit code $LASTEXITCODE." }
+          # Fail loudly if the duplex broker smoke is ever dropped from the sample.
+          if (-not ($sampleOutput | Where-Object { $_ -eq 'NativeAOT duplex broker channel: Success' })) {
+            throw 'The NativeAOT SDK sample did not execute the duplex broker channel smoke.'
+          }
           foreach ($contractPackFixture in @(
             'duplicate-across-packs',
             'duplicate-within-pack',
