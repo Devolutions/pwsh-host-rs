@@ -1339,6 +1339,13 @@ silently dropping the broker smoke fails CI rather than passing quietly.
 
 ## Bridge Contract v2
 
+> **Current carrier:** generated Bridge Contract v2 attachment uses the
+> DBC-only protocol in [Generated Bridge Contract v2 over
+> DBC](bridge-contract-v2-dbc.md). That document is normative for attachment,
+> routing, lifecycle, authorization, mutation, and error semantics. The
+> historical COM-carrier design notes below remain implementation history only;
+> they do not describe an attached bridge invocation.
+
 Bridge Contract v2 is a **closed generated IDL** for a finite local application
 object surface. It exists so a trusted payload pack can offer ordinary
 PowerShell property and method syntax over an application object graph that the
