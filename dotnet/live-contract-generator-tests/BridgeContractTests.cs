@@ -355,7 +355,7 @@ internal static class BridgeContractTests
             "internal static void Declare(",
             "IPowerShellBridgeContractSink sink, nint callback",
             "sink.GetConsumerContract(out pointer)",
-            "previousClient?.Close();",
+            "previousClient?.CloseTransport();",
             ".CloseLease(previousClient.LeaseId, previousClient.Generation)",
         })
         {

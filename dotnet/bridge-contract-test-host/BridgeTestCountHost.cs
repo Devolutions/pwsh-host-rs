@@ -1,4 +1,5 @@
 using System;
+using Devolutions.PowerShell.Ffi.LiveObjects;
 
 namespace Devolutions.MultiPwsh.BridgeTest;
 
@@ -15,6 +16,10 @@ public sealed class BridgeTestCountHost : IDisposable
     }
 
     public long Count => handler.Count;
+
+    public long LastReportedCount => handler.LastReportedCount;
+
+    public IPowerShellBridgeDispatcher Dispatcher => dispatcher;
 
     public int Invoke(
         ulong leaseId,
@@ -53,6 +58,23 @@ public sealed class BridgeTestCountHost : IDisposable
         {
             Count = checked(Count + 1);
             return Count;
+        }
+
+        public long Add(in PowerShellBridgeTestCountCallContext context, int value)
+        {
+            if (value is < -128 or > 128)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value));
+            }
+
+            return checked(Count + value);
+        }
+
+        public long LastReportedCount { get; private set; }
+
+        public void OnReport(in PowerShellBridgeTestCountCallContext context, long value)
+        {
+            LastReportedCount = value;
         }
 
         public void Release(in PowerShellBridgeTestCountCallContext context)

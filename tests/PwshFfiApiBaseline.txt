@@ -957,3 +957,10 @@ native:multi_pwsh_broker_reply
 native:multi_pwsh_broker_reply_error
 native:multi_pwsh_broker_wait
 native:multi_pwsh_set_broker
+bindings:FfiPowerShell_SetBridgeContext
+facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShell WithBridge(Devolutions.PowerShell.Ffi.PowerShellBridgeBinding, System.String)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeChannel::Boolean TryReceive(System.TimeSpan, Devolutions.PowerShell.Ffi.PowerShellBridgeDispatch ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeDispatch::Boolean Dispatch()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSession::Devolutions.PowerShell.Ffi.PowerShell CreatePowerShell(Devolutions.PowerShell.Ffi.PowerShellBridgeBinding, System.String)
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeDispatch
+native:multi_pwsh_set_bridge

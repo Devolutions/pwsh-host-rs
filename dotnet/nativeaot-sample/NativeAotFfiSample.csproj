@@ -30,11 +30,11 @@
     <RepositoryRoot>$(MSBuildThisFileDirectory)..\..</RepositoryRoot>
     <PwshFfiNativeLibrary>$(RepositoryRoot)\target\release\multi_pwsh_sdk.dll</PwshFfiNativeLibrary>
     <LiveObjectTestPackProject>$(MSBuildThisFileDirectory)..\live-object-test-pack\LiveObjectTestPack.csproj</LiveObjectTestPackProject>
-    <LiveObjectTestPackAssembly>$(MSBuildThisFileDirectory)..\live-object-test-pack\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.LiveObject.TestPack.dll</LiveObjectTestPackAssembly>
+    <LiveObjectTestPackAssembly>$(MSBuildThisFileDirectory)..\live-object-test-pack\bin\$(Configuration)\net8.0\$(RuntimeIdentifier)\Devolutions.MultiPwsh.LiveObject.TestPack.dll</LiveObjectTestPackAssembly>
     <BridgeContractTestPackProject>$(MSBuildThisFileDirectory)..\bridge-contract-test-pack\BridgeContractTestPack.csproj</BridgeContractTestPackProject>
-    <BridgeContractTestPackAssembly>$(MSBuildThisFileDirectory)..\bridge-contract-test-pack\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.BridgeContract.TestPack.dll</BridgeContractTestPackAssembly>
+    <BridgeContractTestPackAssembly>$(MSBuildThisFileDirectory)..\bridge-contract-test-pack\bin\$(Configuration)\net8.0\$(RuntimeIdentifier)\Devolutions.MultiPwsh.BridgeContract.TestPack.dll</BridgeContractTestPackAssembly>
     <IncompatibleLiveObjectTestPackProject>$(MSBuildThisFileDirectory)..\live-object-incompatible-test-pack\Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.csproj</IncompatibleLiveObjectTestPackProject>
-    <IncompatibleLiveObjectTestPackAssembly>$(MSBuildThisFileDirectory)..\live-object-incompatible-test-pack\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.dll</IncompatibleLiveObjectTestPackAssembly>
+    <IncompatibleLiveObjectTestPackAssembly>$(MSBuildThisFileDirectory)..\live-object-incompatible-test-pack\bin\$(Configuration)\net8.0\$(RuntimeIdentifier)\Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.dll</IncompatibleLiveObjectTestPackAssembly>
   </PropertyGroup>
 
   <Target Name="BuildAndStagePwshFfiNativeLibrary" BeforeTargets="Publish">

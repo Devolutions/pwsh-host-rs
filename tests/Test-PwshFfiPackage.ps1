@@ -2935,6 +2935,209 @@ sealed class HostInteractionCapability : IPowerShellCapabilityHandler
         throw 'The package consumer did not exercise the duplex broker channel through the packed SDK.'
     }
 
+    $bridgeConsumerDirectory = Join-Path $workspace 'bridge-consumer'
+    $bridgePackDirectory = Join-Path $workspace 'bridge-pack'
+    New-Item -Path $bridgeConsumerDirectory -ItemType Directory -Force | Out-Null
+    New-Item -Path $bridgePackDirectory -ItemType Directory -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'dotnet\interop\BridgeTestContract.cs') `
+        -Destination (Join-Path $bridgeConsumerDirectory 'BridgeTestContract.cs')
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'dotnet\bridge-contract-test-host\BridgeTestCountHost.cs') `
+        -Destination (Join-Path $bridgeConsumerDirectory 'BridgeTestCountHost.cs')
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'dotnet\interop\BridgeTestContract.cs') `
+        -Destination (Join-Path $bridgePackDirectory 'BridgeTestContract.cs')
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'dotnet\bridge-contract-test-pack\BridgeContractTestPack.cs') `
+        -Destination (Join-Path $bridgePackDirectory 'BridgeContractTestPack.cs')
+
+    $bridgePackProject = Join-Path $bridgePackDirectory 'FfiPackageBridgePack.csproj'
+    @"
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LiveContractMode>Payload</LiveContractMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="$packageId" Version="$PackageVersion" />
+  </ItemGroup>
+</Project>
+"@ | Set-Content -Path $bridgePackProject -Encoding utf8
+
+    $bridgeConsumerProject = Join-Path $bridgeConsumerDirectory 'FfiPackageBridgeConsumer.csproj'
+    @"
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <LiveContractMode>Host</LiveContractMode>
+    <DevolutionsMultiPwshSdkEnabled>true</DevolutionsMultiPwshSdkEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="$packageId" Version="$PackageVersion" />
+  </ItemGroup>
+</Project>
+"@ | Set-Content -Path $bridgeConsumerProject -Encoding utf8
+
+    @"
+#nullable enable
+using System;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+using Devolutions.MultiPwsh.BridgeTest;
+using Devolutions.PowerShell.Ffi;
+using Devolutions.PowerShell.Ffi.LiveObjects;
+
+static void Require(bool condition, string message)
+{
+    if (!condition)
+    {
+        throw new InvalidOperationException(message);
+    }
+}
+
+if (args.Length != 1)
+{
+    throw new ArgumentException("Expected exactly one PowerShell payload directory.");
+}
+
+string packPath = Path.Combine(AppContext.BaseDirectory, "FfiPackageBridgePack.dll");
+Require(File.Exists(packPath), "The package-only bridge payload pack was not published beside the consumer.");
+
+PowerShellRuntime runtime = PowerShellRuntime.Activate(
+    args[0],
+    [new PowerShellLiveObjectContractPack(
+        packPath,
+        "Devolutions.MultiPwsh.BridgeTest.BridgeContractTestPack, FfiPackageBridgePack")]);
+using PowerShellBridgeChannel channel = runtime.CreateBridgeChannel(
+    new PowerShellBrokerChannelOptions(
+        maximumInflightFrames: 8,
+        maximumBodyBytes: 4096,
+        defaultDeadline: TimeSpan.FromSeconds(20)));
+using var host = new BridgeTestCountHost(41);
+using PowerShellBridgeBinding binding = channel.CreateBinding(host.Dispatcher);
+using var stopping = new CancellationTokenSource();
+using var ready = new ManualResetEventSlim();
+Exception? pumpFailure = null;
+int requests = 0;
+int events = 0;
+
+var pump = new Thread(() =>
+{
+    try
+    {
+        if (!channel.TryReceive(TimeSpan.Zero, out _))
+        {
+            throw new InvalidOperationException("The package-only generated bridge channel closed before its pump attached.");
+        }
+
+        ready.Set();
+        while (!stopping.IsCancellationRequested &&
+            channel.TryReceive(TimeSpan.FromMilliseconds(100), out PowerShellBridgeDispatch? dispatch))
+        {
+            if (dispatch is null)
+            {
+                continue;
+            }
+
+            _ = Task.Run(() =>
+            {
+                bool replied = dispatch.Dispatch();
+                if (replied)
+                {
+                    Interlocked.Increment(ref requests);
+                }
+            });
+            Interlocked.Increment(ref events);
+        }
+    }
+    catch (Exception exception)
+    {
+        pumpFailure = exception;
+        ready.Set();
+    }
+})
+{
+    IsBackground = true,
+    Name = "package-generated-bridge-pump",
+};
+pump.Start();
+
+try
+{
+    Require(ready.Wait(TimeSpan.FromSeconds(5)) && pumpFailure is null,
+        "The package-only generated bridge pump did not attach.");
+
+    using (PowerShell synchronous = runtime.Create())
+    {
+        synchronous.AddScript("'unused'").WithBridge(binding, "RDM");
+        try
+        {
+            _ = synchronous.Invoke();
+            throw new InvalidOperationException("A synchronous invocation with a generated bridge attached was accepted.");
+        }
+        catch (PowerShellFfiException exception)
+            when (exception.Status == PowerShellFfiStatus.UnsupportedCapability)
+        {
+        }
+    }
+
+    using PowerShell command = runtime.Create();
+    PowerShellInvocationResult output = await command
+        .AddScript("`$RDM.Report(77); \"`$(`$RDM.Count)|`$(`$RDM.Add(5))\"")
+        .WithBridge(binding, "RDM")
+        .InvokeAsync(CancellationToken.None);
+
+    Require(
+        pumpFailure is null &&
+        output.Output.Records.Count == 1 &&
+        output.Output.Records[0].DisplayText == "41|46" &&
+        SpinWait.SpinUntil(() => host.LastReportedCount == 77, TimeSpan.FromSeconds(5)) &&
+        Volatile.Read(ref requests) >= 2 &&
+        Volatile.Read(ref events) >= 3,
+        "The package-only generated bridge did not complete its bounded deferred request and event dispatch.");
+}
+finally
+{
+    stopping.Cancel();
+    channel.Dispose();
+    pump.Join(TimeSpan.FromSeconds(5));
+}
+
+Console.WriteLine("FFI package consumer generated bridge attachment: Success");
+"@ | Set-Content -Path (Join-Path $bridgeConsumerDirectory 'Program.cs') -Encoding utf8
+
+    Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $bridgePackProject, '--configfile', $nugetConfig)
+    Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $bridgeConsumerProject, '--configfile', $nugetConfig)
+    Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('build', $bridgePackProject, '--no-restore', '-c', $Configuration)
+    Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('publish', $bridgeConsumerProject, '--no-restore', '-c', $Configuration)
+
+    $bridgePackAssembly = Join-Path $bridgePackDirectory "bin\$Configuration\net8.0\FfiPackageBridgePack.dll"
+    $bridgePublishDirectory = Join-Path $bridgeConsumerDirectory "bin\$Configuration\net10.0\win-x64\publish"
+    $bridgeConsumerExe = Join-Path $bridgePublishDirectory 'FfiPackageBridgeConsumer.exe'
+    if (-not (Test-Path $bridgePackAssembly -PathType Leaf) -or
+        -not (Test-Path $bridgeConsumerExe -PathType Leaf)) {
+        throw 'The package-only generated bridge consumer did not publish its pack or executable.'
+    }
+    Copy-Item -LiteralPath $bridgePackAssembly -Destination (Join-Path $bridgePublishDirectory 'FfiPackageBridgePack.dll')
+
+    Write-Host ">> $bridgeConsumerExe $payloadDirectory"
+    $bridgeConsumerOutput = & $bridgeConsumerExe $payloadDirectory
+    $bridgeConsumerOutput | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed with exit code $LASTEXITCODE`: $bridgeConsumerExe $payloadDirectory"
+    }
+    if (-not ($bridgeConsumerOutput | Where-Object { $_ -eq 'FFI package consumer generated bridge attachment: Success' })) {
+        throw 'The package-only consumer did not exercise the generated bridge attachment through the packed SDK.'
+    }
+
     $reportedVersion = $reportedVersionLine.Substring('FFI package consumer PowerShell file version: '.Length).Trim()
     if ($reportedVersion -ne 'unreported' -and
         $reportedVersion -ne $script:QualifiedPowerShellVersion -and

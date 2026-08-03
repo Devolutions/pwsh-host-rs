@@ -42,4 +42,10 @@ public interface IPowerShellBridgeTestCount
 
     [BridgeMember(2, Permission = BridgePermission.Execute)]
     long Increment();
+
+    [BridgeMember(3, Permission = BridgePermission.Execute)]
+    long Add(int value);
+
+    [BridgeEvent(4)]
+    void Report(long value);
 }
