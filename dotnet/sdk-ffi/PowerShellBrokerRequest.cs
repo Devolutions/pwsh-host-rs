@@ -15,7 +15,8 @@ public sealed class PowerShellBrokerRequest
         TimeSpan remaining,
         bool isOneWay,
         bool isMutating,
-        uint droppedBefore)
+        uint droppedBefore,
+        PowerShellBrokerTerminalObservation? terminalObservation)
     {
         CorrelationId = correlationId;
         OrderingKey = orderingKey;
@@ -25,6 +26,7 @@ public sealed class PowerShellBrokerRequest
         IsOneWay = isOneWay;
         IsMutating = isMutating;
         DroppedBefore = droppedBefore;
+        TerminalObservation = terminalObservation;
     }
 
     /// <summary>Channel-scoped, monotonic, never reused. Reply with this from any thread.</summary>
@@ -50,4 +52,6 @@ public sealed class PowerShellBrokerRequest
 
     /// <summary>One-way frames coalesced away before this one was delivered.</summary>
     public uint DroppedBefore { get; }
+
+    internal PowerShellBrokerTerminalObservation? TerminalObservation { get; }
 }

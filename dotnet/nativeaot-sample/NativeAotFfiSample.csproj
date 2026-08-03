@@ -41,13 +41,13 @@
     <Exec Command="cargo build --release -p pwsh-sdk-ffi" WorkingDirectory="$(RepositoryRoot)" />
     <MSBuild Projects="$(LiveObjectTestPackProject)"
              Targets="Restore;Build"
-             Properties="Configuration=$(Configuration)" />
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier)" />
     <MSBuild Projects="$(BridgeContractTestPackProject)"
              Targets="Restore;Build"
-             Properties="Configuration=$(Configuration)" />
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier)" />
     <MSBuild Projects="$(IncompatibleLiveObjectTestPackProject)"
              Targets="Restore;Build"
-             Properties="Configuration=$(Configuration)" />
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier)" />
   </Target>
 
   <Target Name="CopyPwshFfiNativeLibrary" AfterTargets="Publish">

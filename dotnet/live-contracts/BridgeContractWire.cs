@@ -42,8 +42,9 @@ public static class PowerShellBridgeFrameKind
     public const byte Event = 2;
     public const byte Open = 3;
     public const byte Close = 4;
+    public const byte ReliableEvent = 5;
 
-    public static bool IsDefined(byte kind) => kind <= Close;
+    public static bool IsDefined(byte kind) => kind <= ReliableEvent;
 }
 
 /// <summary>

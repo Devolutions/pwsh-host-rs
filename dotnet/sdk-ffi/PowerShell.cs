@@ -30,6 +30,8 @@ public sealed unsafe class PowerShell : IDisposable
     private const ulong CapabilityRpcFeature = 1UL << 16;
     private const ulong DuplexBrokerChannelFeature = 1UL << 25;
     private const ulong GeneratedBridgeAttachmentFeature = 1UL << 26;
+    private const ulong BrokerTerminalObservationFeature = 1UL << 27;
+    private const ulong ReliableBridgeEventsFeature = 1UL << 28;
     private const ulong LiveObjectProbeFeature = 1UL << 17;
     private const ulong LiveSessionObjectProbeFeature = 1UL << 18;
     private const ulong LiveObjectContractsFeature = 1UL << 19;
@@ -763,6 +765,28 @@ public sealed unsafe class PowerShell : IDisposable
             throw new PowerShellFfiException(
                 PowerShellFfiStatus.UnsupportedCapability,
                 "The loaded native runtime does not support generated bridge attachment.");
+        }
+    }
+
+    internal static void EnsureBrokerTerminalObservationSupported()
+    {
+        EnsureDuplexBrokerChannelSupported();
+        if ((FeatureFlags & BrokerTerminalObservationFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The loaded native runtime does not support broker terminal observation.");
+        }
+    }
+
+    internal static void EnsureReliableBridgeEventsSupported()
+    {
+        EnsureGeneratedBridgeAttachmentSupported();
+        if ((FeatureFlags & ReliableBridgeEventsFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell payload does not support reliable generated bridge events.");
         }
     }
 

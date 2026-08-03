@@ -961,6 +961,79 @@ bindings:FfiPowerShell_SetBridgeContext
 facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShell WithBridge(Devolutions.PowerShell.Ffi.PowerShellBridgeBinding, System.String)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeChannel::Boolean TryReceive(System.TimeSpan, Devolutions.PowerShell.Ffi.PowerShellBridgeDispatch ByRef)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeDispatch::Boolean Dispatch()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeDispatch::Boolean TryGetTerminalState(Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalInfo ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeDispatch::Boolean WaitForTerminal(System.TimeSpan, Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalInfo ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeDispatch::Devolutions.PowerShell.Ffi.PowerShellBridgeDispatchResult DispatchDetailed()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeDispatch::Void Dispose()
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeDispatch::System.ReadOnlyMemory`1[System.Byte] Frame
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState::Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState Aborted
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState::Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState Cancelled
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState::Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState Completed
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState::Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState Dispatched
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState::Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState Failed
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState::Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState Pending
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState::Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState TimedOut
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeDispatchResult::Boolean HandlerStarted
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeDispatchResult::Boolean ReplyAccepted
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeDispatchResult::System.Nullable`1[Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalInfo] TerminalState
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalInfo::Boolean IsTerminal
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalInfo::Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState State
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalInfo::Devolutions.PowerShell.Ffi.PowerShellFfiStatus TerminalStatus
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalInfo::UInt64 TerminalEpochMilliseconds
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeDispatchResult
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalInfo
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBrokerTerminalState
+native:multi_pwsh_broker_observation_get_info
+native:multi_pwsh_broker_observation_release
+native:multi_pwsh_broker_observation_wait
+native:multi_pwsh_broker_observe
 facade:method:Devolutions.PowerShell.Ffi.PowerShellSession::Devolutions.PowerShell.Ffi.PowerShell CreatePowerShell(Devolutions.PowerShell.Ffi.PowerShellBridgeBinding, System.String)
 facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeDispatch
 native:multi_pwsh_set_bridge
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity::Void .ctor(UInt64, UInt32, UInt64, UInt32)
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo::Void .ctor(UInt64, UInt64, Int64, Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState)
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState::Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState Active
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState::Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState ChannelClosed
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState::Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState Disposed
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState::Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState LeaseClosed
+facade:field:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState::Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState RetentionOverflow
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeChannel::Boolean TryGetReliableEventStream(Devolutions.PowerShell.Ffi.PowerShellBridgeBinding, UInt64, UInt32, UInt64, UInt32, Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStream ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeChannel::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStream] GetReliableEventStreams(Devolutions.PowerShell.Ffi.PowerShellBridgeBinding)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEvent::Void Dispatch()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStream::Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventBatch Read(UInt64, Int32)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStream::Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo GetInfo()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStream::Void Acknowledge(UInt64)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStream::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity::Boolean Equals(Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity::Boolean Equals(System.Object)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity::Int32 GetHashCode()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity::System.String ToString()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity::Void Deconstruct(UInt64 ByRef, UInt32 ByRef, UInt64 ByRef, UInt32 ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo::Boolean Equals(Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo::Boolean Equals(System.Object)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo::Int32 GetHashCode()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo::System.String ToString()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo::Void Deconstruct(UInt64 ByRef, UInt64 ByRef, Int64 ByRef, Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState ByRef)
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeChannel::Int64 DroppedReliableEventCount
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeChannel::Int64 DroppedReliableStreamCount
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEvent::System.ReadOnlyMemory`1[System.Byte] Frame
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEvent::UInt64 Sequence
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventBatch::Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo Info
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventBatch::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEvent] Events
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStream::Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity Identity
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStream::Int32 MaximumRetainedEvents
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity::UInt32 Generation
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity::UInt32 MemberId
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity::UInt64 LeaseId
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity::UInt64 ObjectId
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo::Boolean IsTerminal
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo::Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState TerminalState
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo::Int64 DroppedEventCount
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo::UInt64 AcknowledgedSequence
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo::UInt64 NextSequence
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEvent
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventBatch
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStream
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState

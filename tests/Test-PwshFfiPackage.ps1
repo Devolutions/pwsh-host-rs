@@ -2989,6 +2989,7 @@ sealed class HostInteractionCapability : IPowerShellCapabilityHandler
 #nullable enable
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Devolutions.MultiPwsh.BridgeTest;
@@ -3103,6 +3104,97 @@ try
         Volatile.Read(ref requests) >= 2 &&
         Volatile.Read(ref events) >= 3,
         "The package-only generated bridge did not complete its bounded deferred request and event dispatch.");
+
+    using (PowerShell finiteJob = runtime.Create())
+    {
+        PowerShellInvocationResult jobOutput = await finiteJob
+            .AddScript("`$job = `$RDM.StartJob(); `$before = `$job.Status; `$page = `$job.ReadResults(0); `$job.Cancel(); \"`$(`$before.State)|`$(`$page.Columns[2].Name)|`$(`$page.Rows[0].Label)|`$(@(`$page.Rows).Count)|`$(`$job.Status.IsTerminal)\"")
+            .WithBridge(binding, "RDM")
+            .InvokeAsync(CancellationToken.None);
+        Require(
+            jobOutput.Output.Records.Count == 1 &&
+            jobOutput.Output.Records[0].DisplayText == "Running|Label|result-10|2|True",
+            "The package-only generated bridge did not preserve its fixed-schema typed page, status, and cancellation.");
+    }
+
+    using PowerShell reliableEvent = runtime.Create();
+    Task<PowerShellInvocationResult> reliableEventInvocation = reliableEvent
+        .AddScript("`$RDM.ReportReliable(88); Start-Sleep -Milliseconds 500")
+        .WithBridge(binding, "RDM")
+        .InvokeAsync(CancellationToken.None);
+    PowerShellBridgeReliableEventStream? stream = null;
+    Require(
+        SpinWait.SpinUntil(
+            () => (stream = channel.GetReliableEventStreams(binding)
+                .SingleOrDefault(candidate => candidate.Identity.MemberId == 6U)) is not null,
+            TimeSpan.FromSeconds(5)) &&
+        stream is not null,
+        "The package-only generated bridge did not retain a reliable event stream.");
+    PowerShellBridgeReliableEventStream reliableStream = stream
+        ?? throw new InvalidOperationException("The package-only reliable event stream was lost after discovery.");
+    PowerShellBridgeReliableEventBatch reliableBatch = reliableStream.Read(0, 2);
+    Require(
+        reliableBatch.Events.Count == 1 &&
+        reliableBatch.Events[0].Sequence == 1 &&
+        !reliableBatch.Info.IsTerminal,
+        "The package-only generated bridge did not assign a reliable event cursor.");
+    await Task.Run(reliableBatch.Events[0].Dispatch);
+    reliableStream.Acknowledge(reliableBatch.Events[0].Sequence);
+    Require(
+        host.LastReliableReportedCount == 88 &&
+        host.ReliableReportCount == 1,
+        "The package-only generated bridge did not dispatch a retained reliable event.");
+    _ = await reliableEventInvocation;
+    Require(
+        reliableStream.GetInfo().TerminalState == PowerShellBridgeReliableEventTerminalState.LeaseClosed,
+        "The package-only generated bridge did not close the completed reliable-event lease.");
+
+    using var reliableCancellation = new CancellationTokenSource();
+    using PowerShell reliableCancelled = runtime.Create();
+    Task<PowerShellInvocationResult> reliableCancelledInvocation = reliableCancelled
+        .AddScript("`$RDM.ReportReliable(55); Start-Sleep -Seconds 20")
+        .WithBridge(binding, "RDM")
+        .InvokeAsync(reliableCancellation.Token);
+    PowerShellBridgeReliableEventStream? cancelledStream = null;
+    Require(
+        SpinWait.SpinUntil(
+            () =>
+            {
+                cancelledStream = channel.GetReliableEventStreams(binding)
+                    .SingleOrDefault(candidate =>
+                        candidate.Identity.MemberId == 6U &&
+                        candidate.Identity.LeaseId != reliableStream.Identity.LeaseId);
+                return cancelledStream is not null;
+            },
+            TimeSpan.FromSeconds(5)),
+        "The package-only generated bridge did not retain a cancellable reliable event.");
+    PowerShellBridgeReliableEventStream cancelledReliableStream = cancelledStream
+        ?? throw new InvalidOperationException("The package-only cancellable reliable event stream was lost after discovery.");
+    PowerShellBridgeReliableEventBatch cancelledBatch = cancelledReliableStream.Read(0, 1);
+    Require(
+        cancelledBatch.Events.Count == 1 &&
+        cancelledBatch.Events[0].Sequence == 1,
+        "The package-only generated bridge did not expose the cancellable reliable event before cleanup.");
+    reliableCancellation.Cancel();
+    try
+    {
+        _ = await reliableCancelledInvocation;
+        throw new InvalidOperationException("The package-only reliable event invocation completed after cancellation.");
+    }
+    catch (OperationCanceledException)
+    {
+    }
+
+    Require(
+        SpinWait.SpinUntil(
+            () => cancelledReliableStream.GetInfo().TerminalState == PowerShellBridgeReliableEventTerminalState.LeaseClosed,
+            TimeSpan.FromSeconds(5)) &&
+        cancelledReliableStream.GetInfo().DroppedEventCount == 1,
+        "The package-only generated bridge did not terminalize retained reliable events on cancellation.");
+    await Task.Run(cancelledBatch.Events[0].Dispatch);
+    Require(
+        host.ReliableReportCount == 1,
+        "The package-only generated bridge dispatched a reliable event after cancellation released it.");
 }
 finally
 {

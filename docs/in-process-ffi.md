@@ -190,6 +190,13 @@ A session-affine dispatcher is required before supporting that category.
 - The public native ABI remains v2. `ReadStreamBatch` is enabled only when the
   `LIVE_STREAM_POLLING` feature bit is present, so consumers can reject a native
   asset that lacks polling before calling its additive export.
+- Generated Bridge Contract v2 attachment requires feature bit 26, bounded
+  broker terminal observation requires bit 27, and retained generated bridge
+  events require bit 28. Bit 28 adds no native export and no second payload
+  table: it makes the V1 payload table fail closed unless both the payload and
+  native host recognize the `ReliableEvent` generated frame kind. A current
+  facade therefore rejects an old payload before it creates a bridge channel;
+  ABI v2 field ordering and existing exports remain unchanged.
 - The managed payload and Rust host use one jointly shipped **V1 payload binding
   table**. It includes the core, live-stream, typed-result, and bounded runtime
   diagnostics slots. This is
@@ -961,7 +968,7 @@ and never reaches a queue.
 
 #### Consumer half — NativeAOT calls into Rust
 
-Ten additive `multi_pwsh_broker_*` exports. The public native ABI stays **v2**;
+Fourteen additive `multi_pwsh_broker_*` exports. The public native ABI stays **v2**;
 availability is advertised through a new public feature bit so a consumer can
 reject an older native asset before calling an additive export.
 
@@ -975,6 +982,12 @@ int multi_pwsh_broker_wait (uint64_t channel, uint32_t timeout_ms, uint64_t* fra
 int multi_pwsh_broker_frame_get_info(uint64_t frame, multi_pwsh_broker_frame_info*, multi_pwsh_call_result*);
 int multi_pwsh_broker_frame_read    (uint64_t frame, uint8_t* buffer, uint32_t capacity, uint32_t* required, multi_pwsh_call_result*);
 int multi_pwsh_broker_frame_release (uint64_t frame, multi_pwsh_call_result*);
+
+/* worker-safe terminal observation; never holds a delivery handle */
+int multi_pwsh_broker_observe(uint64_t channel, uint64_t correlation, uint64_t* observation, multi_pwsh_call_result*);
+int multi_pwsh_broker_observation_get_info(uint64_t observation, multi_pwsh_broker_terminal_info*, multi_pwsh_call_result*);
+int multi_pwsh_broker_observation_wait(uint64_t observation, uint32_t timeout_ms, multi_pwsh_broker_terminal_info*, multi_pwsh_call_result*);
+int multi_pwsh_broker_observation_release(uint64_t observation, multi_pwsh_call_result*);
 
 int multi_pwsh_broker_reply      (uint64_t channel, uint64_t correlation, const uint8_t* body, uint32_t len, multi_pwsh_call_result*);
 int multi_pwsh_broker_reply_error(uint64_t channel, uint64_t correlation, int32_t code, multi_pwsh_utf8_span message, multi_pwsh_call_result*);
@@ -1006,6 +1019,7 @@ bounded by the deadline.
 | Delivery (frame) handle | The **pump thread that received it** | Returned by `multi_pwsh_broker_wait`. Read and released on that same thread. Releasing from another thread fails with `MULTI_PWSH_BROKER_DISPATCH_VIOLATION`. Releasing is not abandonment. |
 | Frame body | Rust | Copied out by `multi_pwsh_broker_frame_read`. Rust never retains a consumer buffer and the consumer never receives a Rust pointer. |
 | Correlation ID | Channel | Channel-scoped, monotonic, never reused. Valid for reply/cancel from **any** thread until the frame is terminal. |
+| Terminal observation | Worker that acquired it | Bounded explicit lease over copied state only. It is not a delivery handle and may be queried or waited from any thread. |
 
 Handle non-reuse is by monotonic allocation, matching every other handle table
 in this ABI: a released or stale handle is simply absent and deterministically
@@ -1057,6 +1071,14 @@ typedef struct {                 /* 56 bytes: 0,4,8,16,24,32,36,40,44,48,52 */
     uint32_t state;              /* observational frame state, see table       */
     uint32_t dropped_before;     /* one-way frames coalesced before this one   */
 } multi_pwsh_broker_frame_info;
+
+typedef struct {                 /* 24 bytes: 0,4,8,12,16 */
+    uint32_t size;               /* = sizeof(struct); validated first          */
+    uint32_t abi_version;        /* = MULTI_PWSH_BROKER_ABI_V1                 */
+    uint32_t state;              /* Queued through Aborted, see table           */
+    int32_t terminal_status;     /* OPERATION_NOT_TERMINAL until terminal       */
+    uint64_t terminal_epoch_ms;  /* channel epoch; zero while non-terminal      */
+} multi_pwsh_broker_terminal_info;
 ```
 
 | Flag | Value | Meaning |
@@ -1087,6 +1109,26 @@ and the bound is a real concurrency and memory limit.
 
 `multi_pwsh_broker_wait` permits multiple simultaneous waiters on one channel.
 Each queued frame is delivered to exactly one waiter.
+
+### Terminal observation
+
+`multi_pwsh_broker_observe` acquires a read-only, worker-safe lease for one
+non-one-way correlation before or after its delivery handle is released. It
+does not transfer a `CancellationToken`, payload callback, frame pointer, or
+right to reply. `get_info` and `wait` copy the current `state`,
+`terminal_status`, and channel-relative terminal epoch; waiting touches only
+the completion cell and never calls PowerShell or acquires session-operation
+locks.
+
+The terminal transition is first-wins. `Queued` and `Dispatched` report
+`MULTI_PWSH_OPERATION_NOT_TERMINAL` and epoch zero. `Completed`, `Failed`,
+`Cancelled`, `TimedOut`, and `Aborted` report their defined terminal status.
+Channel close publishes `Aborted` into every previously acquired observation
+and leaves it readable until `observation_release`. Unknown correlations,
+one-way frames, observations on another channel, and released handles fail
+closed. Native retention is bounded to four observation leases per correlation
+and `max_inflight * 4` leases per channel; exhaustion is
+`MULTI_PWSH_BACKPRESSURE`.
 
 ### Deadline epoch
 
@@ -1182,7 +1224,7 @@ inside a pipeline execution scope.
 | Entry point | Guard | Reason |
 | --- | --- | --- |
 | `multi_pwsh_broker_open`, `multi_pwsh_set_broker` | `v2_call` | Called before invocation; must not race a running pipeline. |
-| `broker_close`, `wait`, `frame_get_info`, `frame_read`, `frame_release`, `reply`, `reply_error`, `cancel` | `v2_call_allow_active_pipeline` | The pump runs **while** a pipeline is active. Plain `v2_call` would return `MULTI_PWSH_BACKPRESSURE` and make the channel useless. |
+| `broker_close`, `wait`, `frame_get_info`, `frame_read`, `frame_release`, `observe`, `observation_get_info`, `observation_wait`, `observation_release`, `reply`, `reply_error`, `cancel` | `v2_call_allow_active_pipeline` | The pump and worker run **while** a pipeline is active. Plain `v2_call` would return `MULTI_PWSH_BACKPRESSURE` and make the channel useless. |
 | `broker_enqueue_and_wait`, `broker_post` | **neither** | These are payload trampolines called from a pipeline thread whose thread-local execution depth is nonzero, so even the permissive helper would reject them. They use `prepare_call_result` plus panic containment directly, exactly like `capability_dispatch`. |
 
 Using different guards for open and wait is correct, not an inconsistency.

@@ -70,6 +70,7 @@ namespace NativeHost
         private const ulong FfiFeatureRuntimeDiagnostics = 1UL << 24;
         private const ulong FfiFeatureDuplexBrokerChannel = 1UL << 25;
         private const ulong FfiFeatureGeneratedBridgeAttachment = 1UL << 26;
+        private const ulong FfiFeatureReliableBridgeEvents = 1UL << 28;
         private const uint FfiTypedResultPageTerminal = 1;
         private const uint FfiTypedResultPageTruncated = 1 << 1;
         private const uint FfiTypedResultPageComplete = 1 << 2;
@@ -1136,7 +1137,7 @@ namespace NativeHost
                     FfiFeatureLiveObjectProbe | FfiFeatureLiveSessionObjectProbe | FfiFeatureLiveObjectContracts |
                     FfiFeatureLiveStreamPolling | FfiFeatureTypedResultPaging | FfiFeatureObservedInvocation |
                     FfiFeatureSessionPreflight | FfiFeatureRuntimeDiagnostics | FfiFeatureDuplexBrokerChannel |
-                    FfiFeatureGeneratedBridgeAttachment,
+                    FfiFeatureGeneratedBridgeAttachment | FfiFeatureReliableBridgeEvents,
                 PowerShell_Create = (IntPtr)(delegate* unmanaged<IntPtr*, FfiCallResult*, int>)&FfiPowerShell_Create,
                 PowerShell_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiPowerShell_Release,
                 PowerShell_AddArgumentUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, FfiCallResult*, int>)&FfiPowerShell_AddArgumentUtf8,

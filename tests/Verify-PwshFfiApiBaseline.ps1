@@ -160,6 +160,7 @@ $expectedManagedStructs = [ordered]@{
     'NativeLiveObjectContractPackApi' = @{ Size = 40; Fields = @('Size|0|System.UIntPtr', 'AbiVersion|8|System.UInt32', 'ContractCount|12|System.UInt32', 'Contracts|16|Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractDescriptor*', 'CreatePayloadProxy|24|System.IntPtr', 'ReleasePayloadProxy|32|System.IntPtr') }
     'NativeBrokerChannelOptions' = @{ Size = 24; Fields = @('Size|0|System.UInt32', 'AbiVersion|4|System.UInt32', 'MaximumInflightFrames|8|System.UInt32', 'MaximumBodyBytes|12|System.UInt32', 'DefaultDeadlineMilliseconds|16|System.UInt32', 'Flags|20|System.UInt32') }
     'NativeBrokerFrameInfo' = @{ Size = 56; Fields = @('Size|0|System.UInt32', 'AbiVersion|4|System.UInt32', 'CorrelationId|8|System.UInt64', 'OrderingKey|16|System.UInt64', 'DeadlineEpochMilliseconds|24|System.UInt64', 'RemainingMilliseconds|32|System.UInt32', 'Kind|36|System.UInt32', 'Flags|40|System.UInt32', 'BodyLength|44|System.UInt32', 'State|48|System.UInt32', 'DroppedBefore|52|System.UInt32') }
+    'NativeBrokerTerminalInfo' = @{ Size = 24; Fields = @('Size|0|System.UInt32', 'AbiVersion|4|System.UInt32', 'State|8|System.UInt32', 'TerminalStatus|12|System.Int32', 'TerminalEpochMilliseconds|16|System.UInt64') }
 }
 
 Assert-Sequence -Actual @(
@@ -445,6 +446,9 @@ if (-not $rustFfiSource.Contains('const FEATURE_RUNTIME_DIAGNOSTICS: u64 = 1 << 
 }
 if (-not $rustFfiSource.Contains('const FEATURE_GENERATED_BRIDGE_ATTACHMENT: u64 = 1 << 26;')) {
     throw 'Rust native ABI must advertise generated bridge attachment feature bit 26.'
+}
+if (-not $rustFfiSource.Contains('const FEATURE_BROKER_TERMINAL_OBSERVATION: u64 = 1 << 27;')) {
+    throw 'Rust native ABI must advertise broker terminal observation feature bit 27.'
 }
 
 $expectedRustFunctionAliases = @'

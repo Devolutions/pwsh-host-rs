@@ -84,6 +84,19 @@ public sealed unsafe class PowerShellBrokerChannel : IDisposable
     /// </returns>
     public bool TryReceive(TimeSpan timeout, out PowerShellBrokerRequest? request)
     {
+        return TryReceiveCore(timeout, createTerminalObservation: false, out request);
+    }
+
+    internal bool TryReceiveWithTerminalObservation(TimeSpan timeout, out PowerShellBrokerRequest? request)
+    {
+        return TryReceiveCore(timeout, createTerminalObservation: true, out request);
+    }
+
+    private bool TryReceiveCore(
+        TimeSpan timeout,
+        bool createTerminalObservation,
+        out PowerShellBrokerRequest? request)
+    {
         request = null;
         if (timeout < TimeSpan.Zero || timeout.TotalMilliseconds > uint.MaxValue)
         {
@@ -114,7 +127,7 @@ public sealed unsafe class PowerShellBrokerChannel : IDisposable
 
         try
         {
-            request = ReadFrame(frame, diagnostic);
+            request = ReadFrame(frame, diagnostic, createTerminalObservation);
         }
         catch (PowerShellFfiException exception)
             when (exception.Status is PowerShellFfiStatus.BrokerClosed or PowerShellFfiStatus.InvalidHandle)
@@ -239,7 +252,10 @@ public sealed unsafe class PowerShellBrokerChannel : IDisposable
         NativeMethods.BrokerClose(channel, &result);
     }
 
-    private PowerShellBrokerRequest ReadFrame(ulong frame, byte* diagnostic)
+    private PowerShellBrokerRequest ReadFrame(
+        ulong frame,
+        byte* diagnostic,
+        bool createTerminalObservation)
     {
         NativeCallResult infoResult = NativeCall.CreateResult(diagnostic);
         NativeBrokerFrameInfo info = new()
@@ -268,15 +284,52 @@ public sealed unsafe class PowerShellBrokerChannel : IDisposable
             NativeCall.ThrowIfFailed(status, readResult, diagnostic);
         }
 
-        return new PowerShellBrokerRequest(
-            info.CorrelationId,
-            info.OrderingKey,
-            info.Kind,
-            body,
-            TimeSpan.FromMilliseconds(info.RemainingMilliseconds),
-            (info.Flags & FrameFlagOneWay) != 0,
-            (info.Flags & FrameFlagMutating) != 0,
-            info.DroppedBefore);
+        PowerShellBrokerTerminalObservation? terminalObservation = null;
+        try
+        {
+            if (createTerminalObservation && (info.Flags & FrameFlagOneWay) == 0)
+            {
+                terminalObservation = CreateTerminalObservation(info.CorrelationId, diagnostic);
+            }
+
+            return new PowerShellBrokerRequest(
+                info.CorrelationId,
+                info.OrderingKey,
+                info.Kind,
+                body,
+                TimeSpan.FromMilliseconds(info.RemainingMilliseconds),
+                (info.Flags & FrameFlagOneWay) != 0,
+                (info.Flags & FrameFlagMutating) != 0,
+                info.DroppedBefore,
+                terminalObservation);
+        }
+        catch
+        {
+            terminalObservation?.Dispose();
+            throw;
+        }
+    }
+
+    private PowerShellBrokerTerminalObservation CreateTerminalObservation(ulong correlationId, byte* diagnostic)
+    {
+        ulong channel = Handle;
+        if (channel == 0)
+        {
+            throw new ObjectDisposedException(nameof(PowerShellBrokerChannel));
+        }
+
+        NativeCallResult result = NativeCall.CreateResult(diagnostic);
+        ulong observation = 0;
+        int status = NativeMethods.BrokerObserve(channel, correlationId, &observation, &result);
+        NativeCall.ThrowIfFailed(status, result, diagnostic);
+        if (observation == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "The native broker created a null terminal observation.");
+        }
+
+        return new PowerShellBrokerTerminalObservation(observation);
     }
 
     private static bool CompletedOrTerminal(int status, in NativeCallResult result, byte* diagnostic)

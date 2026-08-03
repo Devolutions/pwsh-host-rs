@@ -145,6 +145,23 @@ internal static class BridgeContractPayloadEmitter
             .Append(BridgeTypeNames.Wire).AppendLine(".RequestHeaderSize + bodyLength));");
         source.AppendLine("    }");
         source.AppendLine();
+        source.AppendLine("    internal void PostReliableEvent(ulong objectId, uint memberId, ulong orderingKey, byte[] request, int argumentCount, int bodyLength)");
+        source.AppendLine("    {");
+        source.AppendLine("        if (global::System.Threading.Volatile.Read(ref closed) != 0)");
+        source.AppendLine("        {");
+        source.Append("            throw new ").Append(BridgeTypeNames.BridgeException).Append('(').Append(BridgeTypeNames.Status)
+            .Append(".AccessDenied, \"Bridge contract '").Append(BridgeNames.Escape(contract.ContractId)).AppendLine("' lease has been released.\");");
+        source.AppendLine("        }");
+        source.AppendLine();
+        source.Append("        var header = new ").Append(BridgeTypeNames.RequestHeader).Append('(').Append(BridgeTypeNames.FrameKind)
+            .AppendLine(".ReliableEvent, checked((ushort)argumentCount), memberId, objectId, leaseId, generation, bodyLength);");
+        source.Append("        if (!header.TryWrite(request)) { throw new ").Append(BridgeTypeNames.BridgeException).Append('(')
+            .Append(BridgeTypeNames.Status).Append(".InvalidArgument, \"Bridge contract '")
+            .Append(BridgeNames.Escape(contract.ContractId)).AppendLine("' could not encode a reliable event frame.\"); }");
+        source.Append("        transport.PostEvent(0x42520000U | memberId, orderingKey, request.AsSpan(0, ")
+            .Append(BridgeTypeNames.Wire).AppendLine(".RequestHeaderSize + bodyLength));");
+        source.AppendLine("    }");
+        source.AppendLine();
         source.AppendLine("    /// <summary>Sends an explicit release frame for one object handle.</summary>");
         source.AppendLine("    internal void Release(ulong objectId, uint releaseId)");
         source.AppendLine("    {");
@@ -559,6 +576,7 @@ internal static class BridgeContractPayloadEmitter
                     EmitMethod(source, contract, member);
                     break;
                 case BridgeRecordKind.Event:
+                case BridgeRecordKind.ReliableEvent:
                     EmitEvent(source, contract, member);
                     break;
                 default:
@@ -669,7 +687,8 @@ internal static class BridgeContractPayloadEmitter
         }
 
         BridgeCodecEmitter.Guard(source, "        ", "__bridgeWriter.IsComplete", onFail);
-        source.Append("        client.PostEvent(ObjectId, ").Append(constants).Append(".Member").Append(BridgeTypeNames.Number(member.Ordinal))
+        source.Append("        client.").Append(member.Kind == BridgeRecordKind.ReliableEvent ? "PostReliableEvent" : "PostEvent")
+            .Append("(ObjectId, ").Append(constants).Append(".Member").Append(BridgeTypeNames.Number(member.Ordinal))
             .Append(", ").Append(BridgeTypeNames.Number(member.OrderingKey)).Append("UL, __bridgeRequest, ")
             .Append(BridgeTypeNames.Number(member.Parameters.Count)).AppendLine(", __bridgeWriter.Length);");
         source.AppendLine("    }");

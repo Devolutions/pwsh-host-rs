@@ -44,6 +44,7 @@ public enum BridgeMemberKind
     Setter = 2,
     Method = 3,
     Event = 4,
+    ReliableEvent = 5,
 }
 
 /// <summary>
@@ -151,6 +152,41 @@ public sealed class BridgeEventAttribute : Attribute
 
     /// <summary>Gets or sets the static ordering key passed out of band to the broker.</summary>
     public ulong OrderingKey { get; set; }
+
+    /// <summary>Gets or sets the bound for a UTF-8 string parameter position, in bytes.</summary>
+    public int MaximumUtf8Bytes { get; set; }
+
+    /// <summary>Gets or sets the bound for an opaque byte parameter position, in bytes.</summary>
+    public int MaximumByteCount { get; set; }
+
+    /// <summary>Gets or sets the element bound for a collection parameter position.</summary>
+    public int MaximumCollectionCount { get; set; }
+}
+
+/// <summary>
+/// Declares a retained, pull-pumped event ordinal. The generated payload emits
+/// a bounded copied frame; the host assigns its sequence and retains it until
+/// acknowledgment or an explicit overflow terminal state.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class BridgeReliableEventAttribute : Attribute
+{
+    public BridgeReliableEventAttribute(uint id) => Id = id;
+
+    /// <summary>Gets the event ordinal, unique across the closed contract.</summary>
+    public uint Id { get; }
+
+    /// <summary>Gets or sets the static ordering key passed out of band to the broker.</summary>
+    public ulong OrderingKey { get; set; }
+
+    /// <summary>
+    /// Gets or sets the declared permission supplied to the generated per-member
+    /// authorizer when a host worker dispatches a retained event.
+    /// </summary>
+    public BridgePermission Permission { get; set; }
+
+    /// <summary>Gets or sets the maximum retained unacknowledged events for one invocation.</summary>
+    public int MaximumRetainedEvents { get; set; }
 
     /// <summary>Gets or sets the bound for a UTF-8 string parameter position, in bytes.</summary>
     public int MaximumUtf8Bytes { get; set; }

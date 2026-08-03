@@ -22,7 +22,7 @@ namespace Devolutions.MultiPwsh.LiveContract.Generator;
 internal static class BridgeContractDescriptor
 {
     private const uint Magic = 0x32574D42;
-    private const uint DescriptorVersion = 2;
+    private const uint DescriptorVersion = 3;
 
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
@@ -81,6 +81,7 @@ internal static class BridgeContractDescriptor
                 stream.WriteByte(member.Result.IsNullable ? (byte)1 : (byte)0);
                 WriteUInt64(stream, member.ErrorDataId);
                 WriteUInt64(stream, member.OrderingKey);
+                WriteUInt32(stream, (uint)member.MaximumRetainedEvents);
                 WriteTypeRef(stream, member.Result);
                 WriteUInt32(stream, (uint)member.Parameters.Count);
                 foreach (BridgeParameterModel parameter in member.Parameters)

@@ -57,14 +57,15 @@ The DBC `kind` is fixed by the SDK:
 | Kind | DBC mode | Inner frame kinds |
 | --- | --- | --- |
 | `BridgeRequest` | request/reply | `Open`, `Invoke`, `Release`, `Close` |
-| `BridgeEvent` | one-way | `Event` |
+| `BridgeEvent` | one-way | `Event`, `ReliableEvent` |
 
 The existing v2 32-byte request frame and 8-byte reply frame remain unchanged,
 except `Close` is an explicit request/reply frame kind. `Open` carries the
 payload descriptor hash; the generated dispatcher compares it before it
 allocates a lease. `Close` carries the active lease tuple and performs the
-first-wins lease transition. `Event` is admitted, authorized, and dispatched
-using its generated static member entry, but never receives a reply.
+first-wins lease transition. `Event` and `ReliableEvent` are admitted,
+authorized, and dispatched using their generated static member entries, but
+never receive a reply.
 
 A request/reply DBC response carries a fixed bridge envelope:
 
@@ -79,6 +80,30 @@ DBC `reply_error` only for infrastructure failures that have no bridge
 status, such as malformed routing or an unavailable dispatcher. This preserves
 the distinction between malformed input, denied access, contract mismatch,
 bounds, and table exhaustion.
+
+### Terminal observation before worker dispatch
+
+`PowerShellBridgeChannel.TryReceive` creates one bounded terminal-observation
+lease for every copied request before releasing its pump-thread-only delivery
+handle. The resulting `PowerShellBridgeDispatch` exposes only copied terminal
+metadata: current state, mapped terminal status, and the channel-relative
+terminal epoch. It deliberately does **not** expose a `CancellationToken`, a
+payload object, or a native delivery handle.
+
+A worker can query or wait on that lease without calling the payload,
+PowerShell, or an application dispatcher. `DispatchDetailed()` performs one
+last pre-handler check. If cancellation, timeout, close, or another terminal
+transition won before application work starts, it returns
+`HandlerStarted = false`, `ReplyAccepted = false`, and the terminal state; the
+generated authorizer and handler are not called. If termination wins after a
+handler starts, it is reported in the dispatch result and the attempted reply
+is rejected first-wins. No observation can revive a correlation.
+
+Observation leases are explicitly released when a dispatch completes, is
+discarded, or is rejected. Native allocation is bounded to four leases per
+correlation and `max_inflight * 4` per channel. A channel close marks existing
+leases `Aborted` and leaves them readable until release, while unknown,
+one-way, cross-channel, duplicate, and released leases fail closed.
 
 ## Bounds and dispatch
 
@@ -109,6 +134,91 @@ Events are one-way, at-most-once, and subject to the DBC's documented
 coalescing/drop accounting. Events do not bypass the generated contract:
 their route, descriptor member, lease, object handle, and authorization are
 validated before their generated handler runs.
+
+### Retained reliable event streams
+
+`[BridgeReliableEvent]` is distinct from the existing lossy
+`[BridgeEvent]`. It declares a `void` shape, explicit `Permission`, static
+`OrderingKey`, and `MaximumRetainedEvents` in `1..64`. The bound is part of
+the canonical Host/Payload descriptor bytes, so a retention mismatch fails the
+normal descriptor-hash handshake before the lease opens.
+
+The payload posts a `ReliableEvent` one-way frame exactly as it posts an
+ordinary generated event. `PowerShellBridgeChannel.TryReceive` copies it off
+the pump, assigns a stream-local monotonic sequence, and retains the copied
+frame under the closed key:
+
+```text
+bindingId + leaseId + generation + objectId + memberId
+```
+
+No generated authorizer or handler runs on the pump. The host discovers only
+already-observed streams for its known binding, calls `Read(afterSequence,
+maximumEvents)`, queues each copied `PowerShellBridgeReliableEvent.Dispatch()`
+to an application worker, then calls `Acknowledge(sequence)` after handoff.
+Acknowledgement releases every retained frame through that cursor; a read can
+be retried before acknowledgement. The stream identity exposes only copied
+numeric identifiers and its records expose only copied bounded frames.
+
+The channel retains at most 32 streams and 256 frames total, in addition to
+each generated member's `MaximumRetainedEvents` bound. A stream that reaches
+either retention bound changes once to `RetentionOverflow`; it preserves
+already retained frames, counts all later drops, and admits no later frame.
+The channel also exposes aggregate rejected-frame and rejected-stream counts.
+There is no unbounded queue, replacement of unacknowledged records, callback,
+delegate, or producer-side retry protocol. This is reliable **until its
+explicit terminal state**, not a promise of lossless delivery under a host that
+does not acknowledge bounded records.
+
+An observed `Close` for the matching binding/lease/generation terminates its
+streams as `LeaseClosed` and releases unacknowledged copied frames. Channel
+disposal similarly terminates every remaining stream as `ChannelClosed`.
+Lease-close and binding disposal atomically detach those terminal streams from
+the channel's active 32-slot table, so a completed invocation cannot exhaust
+future stream capacity. A host that needs terminal cursor/drop state retains
+the stream reference it observed while that lease was active; that detached
+reference remains readable as a terminal snapshot until it is disposed.
+Binding, generation, object, and member mismatches cannot access an active
+stream.
+Cancellation and attachment teardown stop queued frames in the native broker;
+the attachment closes admission before it terminalizes queued frames, so a
+payload callback that resolved its bridge context before cancellation cannot
+enqueue behind cleanup. The sole post-cancellation exception is the
+payload-sink-validated, fixed generated `Close` request needed to expose the
+lease tombstone; no application request or event can use that path. Retained
+streams terminalize under the same lease-close rule. A host must treat a
+terminal stream as final and must never dispatch a released or dropped frame.
+A record released before its worker begins is gated from the generated
+authorizer and handler; an already-started handler may finish, but it cannot
+admit another record or revive the closed lease.
+
+### Finite jobs and report pages
+
+The generator represents a finite job as an ordinary closed `[BridgeObject]`,
+not as `Task`, `ValueTask`, a delegate, or a CLR object transfer. A contract
+declares static `Start`, `Status`, `Cancel`, and paged-result member ordinals;
+`Start` returns a lease-scoped job handle with a generated object type ID and
+explicit release ordinal. Each later operation carries the same lease and
+generation checks as every other bridge object. A stale, cross-lease, released,
+or closed job handle is rejected without reaching its handler.
+
+Status and page values are copied `[BridgeData]`. A report page declares its
+fixed schema as a bounded list of flat column declarations (bounded names and a
+closed generated enum for each column type) and its values as a bounded list of
+flat typed row declarations. A row field corresponds to the contract-declared
+column ordinal and type; there is no dynamically typed cell union or
+runtime-discovered property. The same page carries fixed cursor, completion,
+truncation, and total-count fields. The generator rejects direct nested data
+fields, nested collections, recursive row/page graphs, data graphs deeper than
+the bridge graph bound, dynamic columns, `DataTable`, `PSObject`, and arbitrary
+object bags. Collection and field bounds are encoded in the descriptor and
+rechecked by both generated codecs; over-bound pages fail rather than truncate.
+
+`Cancel` is only a generated request to the application handler. It is not a
+promise that external work has stopped, and a terminal job result may race a
+cancel request. Applications must expose the resulting terminal status through
+their static status/page values; the SDK does not imply task, process, or
+external-side-effect atomicity.
 
 ## Authorization, mutation, and errors
 
@@ -141,12 +251,27 @@ after close, but no later frame is admitted.
 ## Compatibility and exclusions
 
 The payload binding table remains one required V1 table. The bridge attachment
-slot is appended, its feature bit is required on both payload and native sides,
-and the Rust loader performs the existing header-first size, feature, and
-non-null slot checks before reading it. An older, undersized, or mismatched
-payload is rejected before any bridge channel opens. There is no optional slot,
-fallback carrier, ABI version negotiation, descriptor subsetting, or
-best-effort compatibility path.
+slot remains appended and feature bit 26 remains required. Reliable generated
+events add payload feature bit 28 without a new callback slot: the existing
+payload-owned bridge sink carries the distinct bounded inner frame kind. Rust
+still performs header-first table-size, feature, and non-null slot validation;
+it now requires bit 28 as well. An older, undersized, or mismatched payload is
+rejected before any bridge channel opens. There is no optional slot, fallback
+carrier, ABI version negotiation, descriptor subsetting, or best-effort
+compatibility path.
+
+Terminal observation is a native public-ABI capability (feature bit 27), not a
+payload-table capability: it observes an existing DBC correlation and never
+calls into payload code. Its four appended native exports use the fixed
+24-byte `BrokerTerminalInfo` structure. Hosts must require the feature bit
+before creating a bridge channel, so a native asset missing the exports fails
+closed rather than producing an unobservable bridge dispatch.
+
+Reliable generated events are also a native public-ABI capability (feature bit
+28). The public ABI remains v2: no field is shifted and no public native
+function is added. A host requires bit 28 before it can create a bridge
+channel, preventing a new facade from accepting a payload whose V1 table
+cannot recognize the reliable-event descriptor and wire kind.
 
 The attachment does not add credential or secret transfer, `PSHost`/RawUI,
 remoting/PSRP, named-pipe console attachment, pools or concurrent sessions,

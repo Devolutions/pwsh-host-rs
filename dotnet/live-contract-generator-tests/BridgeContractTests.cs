@@ -57,6 +57,9 @@ internal static class BridgeContractTests
 
             [BridgeEvent(500, OrderingKey = 7)]
             void ReportProgress(int percent);
+
+            [BridgeReliableEvent(501, Permission = BridgePermission.Execute, MaximumRetainedEvents = 2)]
+            void ReportReliableProgress(int percent);
         }
 
         [BridgeObject(2, ReleaseId = 901)]
@@ -98,6 +101,7 @@ internal static class BridgeContractTests
         VerifySurface(run, assertNoErrors, "Payload", "class SampleRootBridge");
         VerifySurface(run, assertNoErrors, "Payload", "public string ProductVersion");
         VerifySurface(run, assertNoErrors, "Payload", "public void ReportProgress(int percent)");
+        VerifySurface(run, assertNoErrors, "Payload", "public void ReportReliableProgress(int percent)");
         VerifySurface(run, assertNoErrors, "Host", "interface ISampleRootBridgeHandler");
         VerifySurface(run, assertNoErrors, "Host", "interface ISampleRootAuthorizer");
         VerifySurface(run, assertNoErrors, "Host", "IPowerShellBridgeDispatcher");
@@ -124,6 +128,8 @@ internal static class BridgeContractTests
         VerifyDiagnostic(run, Valid.Replace("public enum SampleState", "[Flags] public enum SampleState", StringComparison.Ordinal), "MPWLC020");
         VerifyDiagnostic(run, Valid.Replace("public enum SampleState", "public enum SampleState : long", StringComparison.Ordinal), "MPWLC020");
         VerifyDiagnostic(run, Valid.Replace("void ReportProgress(int percent);", "int ReportProgress(int percent);", StringComparison.Ordinal), "MPWLC021");
+        VerifyDiagnostic(run, Valid.Replace("MaximumRetainedEvents = 2", "MaximumRetainedEvents = 0", StringComparison.Ordinal), "MPWLC016");
+        VerifyDiagnostic(run, Valid.Replace("Permission = BridgePermission.Execute, ", string.Empty, StringComparison.Ordinal), "MPWLC023");
         VerifyDiagnostic(run, Valid.Replace("MaximumCollectionCount = 64, MaximumUtf8Bytes = 128", "MaximumCollectionCount = 4096, MaximumUtf8Bytes = 8192", StringComparison.Ordinal), "MPWLC022");
         VerifyDiagnostic(run, Valid.Replace("[Guid(\"2C7E8A11-6B44-4E27-9F0A-0C6C0F53D8E1\")]", "[Guid(\"11111111-2222-3333-4444-555555555555\")]", StringComparison.Ordinal), "MPWLC012");
         VerifyDiagnostic(run, Valid.Replace("public interface ISampleChild", "public interface ISampleChild : System.IDisposable", StringComparison.Ordinal), "MPWLC013");
@@ -142,10 +148,83 @@ internal static class BridgeContractTests
         VerifyNullBytesFailClosed(run, assertNoErrors);
         VerifyUnannotatedReferenceTypeIsRejectedForHashParity(run);
         VerifyPayloadObjectTableIsLocallyBounded(run, assertNoErrors);
+        VerifyBoundedDataRowPages(run, assertNoErrors);
         VerifyDiagnostic(run, Valid.Replace("string ProductVersion { get; }", "string __bridgeProductVersion { get; }", StringComparison.Ordinal), "MPWLC014");
         VerifyDiagnostic(run, Valid.Replace("[BridgeBound(MaximumUtf8Bytes = 128)] string name", "[BridgeBound(MaximumUtf8Bytes = 128)] string __bridgeRequest", StringComparison.Ordinal), "MPWLC014");
         VerifyMissingMode(run);
         VerifyMixedFamilies(run);
+    }
+
+    private static void VerifyBoundedDataRowPages(
+        Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run,
+        Action<IEnumerable<Diagnostic>> assertNoErrors)
+    {
+        string pageContracts = """
+
+            [BridgeEnum(70)]
+            public enum SampleReportColumnType
+            {
+                Int64 = 0,
+                Utf8String = 1,
+            }
+
+            [BridgeData(71)]
+            public interface ISampleReportRow
+            {
+                [BridgeField(1, MaximumUtf8Bytes = 64)]
+                string Name { get; }
+
+                [BridgeField(2)]
+                long Count { get; }
+            }
+
+            [BridgeData(73)]
+            public interface ISampleReportColumn
+            {
+                [BridgeField(1, MaximumUtf8Bytes = 64)]
+                string Name { get; }
+
+                [BridgeField(2)]
+                SampleReportColumnType Type { get; }
+            }
+
+            [BridgeData(72)]
+            public interface ISampleReportPage
+            {
+                [BridgeField(1, MaximumCollectionCount = 4)]
+                IReadOnlyList<ISampleReportColumn> Columns { get; }
+
+                [BridgeField(2, MaximumCollectionCount = 8)]
+                IReadOnlyList<ISampleReportRow> Rows { get; }
+
+                [BridgeField(3)]
+                long TotalCount { get; }
+
+                [BridgeField(4)]
+                bool IsTruncated { get; }
+            }
+            """;
+        string source = Valid
+            .Replace(
+                "[BridgeEvent(500, OrderingKey = 7)]",
+                "[BridgeMember(7, Permission = BridgePermission.Read)] ISampleReportPage ReportPage { get; }\n\n    [BridgeEvent(500, OrderingKey = 7)]",
+                StringComparison.Ordinal) + pageContracts;
+        var (result, output) = run(source, "Payload");
+        assertNoErrors(Diagnostics(result));
+        assertNoErrors(output.GetDiagnostics());
+        string generated = Generated(result);
+        if (!generated.Contains("IReadOnlyList<SampleReportColumnValue>", StringComparison.Ordinal) ||
+            !generated.Contains("IReadOnlyList<SampleReportRowValue>", StringComparison.Ordinal) ||
+            !generated.Contains("TryBeginList", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("A bounded report page must emit fixed-schema column and row list codecs.");
+        }
+
+        string recursive = source.Replace(
+            "long Count { get; }",
+            "long Count { get; } [BridgeField(3, MaximumCollectionCount = 2)] IReadOnlyList<ISampleReportRow> Children { get; }",
+            StringComparison.Ordinal);
+        VerifyDiagnostic(run, recursive, "MPWLC019");
     }
 
     /// <summary>

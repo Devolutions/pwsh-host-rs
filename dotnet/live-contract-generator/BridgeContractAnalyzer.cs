@@ -19,6 +19,7 @@ internal static class BridgeContractAnalyzer
     internal const string ObjectAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeObjectAttribute";
     internal const string MemberAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeMemberAttribute";
     internal const string EventAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeEventAttribute";
+    internal const string ReliableEventAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeReliableEventAttribute";
     internal const string DataAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeDataAttribute";
     internal const string FieldAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeFieldAttribute";
     internal const string BoundAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeBoundAttribute";
@@ -179,7 +180,9 @@ internal static class BridgeContractAnalyzer
             data,
             enums);
 
-        if (!ValidateGraph(contract, diagnostics) || !ValidateBudget(contract, diagnostics))
+        if (!ValidateDataGraph(contract, diagnostics) ||
+            !ValidateGraph(contract, diagnostics) ||
+            !ValidateBudget(contract, diagnostics))
         {
             return null;
         }
@@ -714,21 +717,23 @@ internal static class BridgeContractAnalyzer
         ref bool valid)
     {
         AttributeData? eventAttribute = GetAttribute(method, EventAttribute);
+        AttributeData? reliableEventAttribute = GetAttribute(method, ReliableEventAttribute);
         AttributeData? memberAttribute = GetAttribute(method, MemberAttribute);
-        if (eventAttribute is not null && memberAttribute is not null)
+        if ((eventAttribute is not null && reliableEventAttribute is not null) ||
+            ((eventAttribute is not null || reliableEventAttribute is not null) && memberAttribute is not null))
         {
-            Report(diagnostics, ref valid, BridgeContractDiagnostics.InvalidEvent, method, "a method declares either [BridgeMember] or [BridgeEvent], never both");
+            Report(diagnostics, ref valid, BridgeContractDiagnostics.InvalidEvent, method, "a method declares exactly one of [BridgeMember], [BridgeEvent], or [BridgeReliableEvent]");
             return;
         }
 
-        AttributeData? attribute = eventAttribute ?? memberAttribute;
+        AttributeData? attribute = reliableEventAttribute ?? eventAttribute ?? memberAttribute;
         if (attribute is null ||
             attribute.ConstructorArguments.Length != 1 ||
             attribute.ConstructorArguments[0].Value is not uint ordinal ||
             ordinal == 0 ||
             ordinals.ContainsKey(ordinal))
         {
-            Report(diagnostics, ref valid, BridgeContractDiagnostics.InvalidMember, method, "every method requires [BridgeMember] or [BridgeEvent] with a non-zero ordinal unique across the whole contract");
+            Report(diagnostics, ref valid, BridgeContractDiagnostics.InvalidMember, method, "every method requires [BridgeMember], [BridgeEvent], or [BridgeReliableEvent] with a non-zero ordinal unique across the whole contract");
             return;
         }
 
@@ -793,11 +798,64 @@ internal static class BridgeContractAnalyzer
             parameters.Add(new BridgeParameterModel(parameter.Name, resolved));
         }
 
-        if (eventAttribute is not null)
+        if (eventAttribute is not null || reliableEventAttribute is not null)
         {
             if (!method.ReturnsVoid)
             {
                 Report(diagnostics, ref valid, BridgeContractDiagnostics.InvalidEvent, method, "an event method returns void; events are one-way and accept no reply");
+                return;
+            }
+
+            if (reliableEventAttribute is not null)
+            {
+                if (!method.ReturnsVoid)
+                {
+                    Report(diagnostics, ref valid, BridgeContractDiagnostics.InvalidEvent, method, "a reliable event method returns void; it never replies into the pipeline");
+                    return;
+                }
+
+                int maximumRetainedEvents = GetNamedInt(reliableEventAttribute, "MaximumRetainedEvents");
+                if (maximumRetainedEvents is < 1 or > BridgeLimits.MaximumReliableEvents)
+                {
+                    Report(
+                        diagnostics,
+                        ref valid,
+                        BridgeContractDiagnostics.MissingBound,
+                        method,
+                        $"a reliable event declares MaximumRetainedEvents between 1 and {BridgeLimits.MaximumReliableEvents}");
+                    return;
+                }
+
+                byte reliablePermission = GetNamedByte(reliableEventAttribute, "Permission");
+                if (reliablePermission == 0)
+                {
+                    Report(diagnostics, ref valid, BridgeContractDiagnostics.InvalidAuthorization, method, "declare an explicit Permission; it is an input to the authorizer and never a substitute for it");
+                    return;
+                }
+
+                if (ordinal > ushort.MaxValue)
+                {
+                    Report(diagnostics, ref valid, BridgeContractDiagnostics.InvalidEvent, method, "a reliable event ordinal must fit in 16 bits so it can form the broker frame kind");
+                    return;
+                }
+
+                ordinals.Add(ordinal, owner.Name + "." + method.Name);
+                var reliable = new BridgeMemberModel(
+                    owner,
+                    method,
+                    method.Name,
+                    ordinal,
+                    BridgeRecordKind.ReliableEvent,
+                    0,
+                    reliablePermission,
+                    0,
+                    GetNamedULong(reliableEventAttribute, "OrderingKey"),
+                    new BridgeTypeRef(BridgeTag.Null, null),
+                    parameters)
+                {
+                    MaximumRetainedEvents = maximumRetainedEvents,
+                };
+                owner.Members.Add(reliable);
                 return;
             }
 
@@ -817,7 +875,7 @@ internal static class BridgeContractAnalyzer
                 0,
                 (byte)3,
                 0,
-                GetNamedULong(eventAttribute, "OrderingKey"),
+                GetNamedULong(eventAttribute!, "OrderingKey"),
                 new BridgeTypeRef(BridgeTag.Null, null),
                 parameters));
             return;
@@ -1024,9 +1082,9 @@ internal static class BridgeContractAnalyzer
         {
             if (named.TypeKind == TypeKind.Interface && HasAttribute(named, DataAttribute))
             {
-                if (position is Position.DataField or Position.DataFieldListElement)
+                if (position == Position.DataField)
                 {
-                    Report(diagnostics, ref valid, BridgeContractDiagnostics.InvalidData, owner, "a data field cannot contain another data contract; flatten the declaration");
+                    Report(diagnostics, ref valid, BridgeContractDiagnostics.InvalidData, owner, "a data field cannot directly contain another data contract; only one bounded list of flat data rows is supported");
                     return null;
                 }
 
@@ -1114,6 +1172,88 @@ internal static class BridgeContractAnalyzer
         }
 
         return valid;
+    }
+
+    /// <summary>
+    /// Permits a page's bounded list of flat rows while retaining a finite,
+    /// acyclic copied-data graph. Direct data nesting and nested lists are
+    /// rejected earlier; this pass prevents a list edge from creating recursive
+    /// codecs or an unbounded encoded-size calculation.
+    /// </summary>
+    private static bool ValidateDataGraph(BridgeContractModel contract, List<Diagnostic> diagnostics)
+    {
+        var visiting = new HashSet<ulong>();
+        var visited = new HashSet<ulong>();
+        bool valid = true;
+
+        foreach (BridgeDataModel model in contract.Data)
+        {
+            Visit(model, depth: 1);
+        }
+
+        return valid;
+
+        void Visit(BridgeDataModel model, int depth)
+        {
+            if (visited.Contains(model.Id))
+            {
+                return;
+            }
+
+            if (!visiting.Add(model.Id))
+            {
+                diagnostics.Add(Diagnostic.Create(
+                    BridgeContractDiagnostics.InvalidData,
+                    Location(model.Symbol),
+                    model.Name,
+                    "a bounded data-row list cannot form a recursive data graph"));
+                valid = false;
+                return;
+            }
+
+            foreach (BridgeFieldModel field in model.Fields)
+            {
+                foreach (ulong referenced in EnumerateDataReferences(field.Type))
+                {
+                    if (!contract.DataById.TryGetValue(referenced, out BridgeDataModel? next))
+                    {
+                        valid = false;
+                        continue;
+                    }
+
+                    if (depth + 1 > BridgeLimits.MaximumGraphDepth)
+                    {
+                        diagnostics.Add(Diagnostic.Create(
+                            BridgeContractDiagnostics.ExceededLimit,
+                            Location(field.Symbol),
+                            model.Name,
+                            $"the copied data graph is deeper than {BridgeLimits.MaximumGraphDepth} levels"));
+                        valid = false;
+                        continue;
+                    }
+
+                    Visit(next, depth + 1);
+                }
+            }
+
+            visiting.Remove(model.Id);
+            visited.Add(model.Id);
+        }
+    }
+
+    private static IEnumerable<ulong> EnumerateDataReferences(BridgeTypeRef type)
+    {
+        if (type.Tag == BridgeTag.Data)
+        {
+            yield return type.TypeId;
+        }
+        else if (type.Tag == BridgeTag.List && type.Element is not null)
+        {
+            foreach (ulong referenced in EnumerateDataReferences(type.Element))
+            {
+                yield return referenced;
+            }
+        }
     }
 
     private static IEnumerable<ulong> EnumerateHandles(BridgeObjectModel owner, BridgeContractModel contract)
@@ -1314,9 +1454,4 @@ internal static class BridgeContractAnalyzer
             ? (byte)value
             : (byte)0;
 }
-
-
-
-
-
 

@@ -219,6 +219,12 @@ public interface IPowerShellBridgeDispatcher : IDisposable
     int MaximumRequestBytes { get; }
 
     /// <summary>
+    /// Gets the generated retention bound for a reliable event ordinal, or zero
+    /// when the ordinal is not a reliable event in this closed contract.
+    /// </summary>
+    int GetReliableEventMaximumRetained(uint memberId);
+
+    /// <summary>
     /// Dispatches one already-bounded bridge request. The caller supplies the
     /// lease identity from the request header and a reply buffer bounded by
     /// <see cref="MaximumReplyBytes"/>.

@@ -35,6 +35,7 @@ internal static class BridgeLimits
     internal const int MaximumUtf8Bytes = 8192;
     internal const int MaximumCollectionCount = 4096;
     internal const int MaximumFrameBytes = 65536;
+    internal const int MaximumReliableEvents = 64;
 
     internal const int ValueHeaderSize = 8;
     internal const int RequestHeaderSize = 32;
@@ -67,6 +68,7 @@ internal enum BridgeRecordKind : byte
     Setter = 2,
     Method = 3,
     Event = 4,
+    ReliableEvent = 5,
 }
 
 /// <summary>
@@ -202,6 +204,9 @@ internal sealed class BridgeMemberModel
     internal BridgeTypeRef Result { get; }
 
     internal IReadOnlyList<BridgeParameterModel> Parameters { get; }
+
+    /// <summary>Maximum unacknowledged records retained by a reliable event stream.</summary>
+    internal int MaximumRetainedEvents { get; set; }
 
     internal int MaximumRequestBytes(IReadOnlyDictionary<ulong, BridgeDataModel> data)
     {

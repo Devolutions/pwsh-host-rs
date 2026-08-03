@@ -45,6 +45,7 @@ internal static class BridgeRoundTripTests
             public SampleState GetState(in SampleRootCallContext context) => SampleState.Open;
             public SampleFailureValue? GetLastFailure(in SampleRootCallContext context) => new SampleFailureValue("denied", 7);
             public void OnReportProgress(in SampleRootCallContext context, int percent) => Progress = percent;
+            public void OnReportReliableProgress(in SampleRootCallContext context, int percent) => Progress = percent;
             public void Release(in SampleRootCallContext context) { }
         }
 
@@ -652,5 +653,4 @@ internal static class BridgeRoundTripTests
         }
     }
 }
-
 

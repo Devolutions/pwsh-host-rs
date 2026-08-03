@@ -60,6 +60,16 @@ internal struct NativeBrokerFrameInfo
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct NativeBrokerTerminalInfo
+{
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint State;
+    internal int TerminalStatus;
+    internal ulong TerminalEpochMilliseconds;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeCapabilityRegistration
 {
     internal uint Size;
@@ -850,6 +860,35 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_frame_release")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int BrokerFrameRelease(ulong frameHandle, NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_observe")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerObserve(
+        ulong channelHandle,
+        ulong correlationId,
+        ulong* observationHandle,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_observation_get_info")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerObservationGetInfo(
+        ulong observationHandle,
+        NativeBrokerTerminalInfo* info,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_observation_wait")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerObservationWait(
+        ulong observationHandle,
+        uint timeoutMilliseconds,
+        NativeBrokerTerminalInfo* info,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_observation_release")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerObservationRelease(
+        ulong observationHandle,
+        NativeCallResult* result);
 
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_reply")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
