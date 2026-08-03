@@ -24,6 +24,18 @@
       <Compile Include="$(MSBuildThisFileDirectory)Devolutions.MultiPwsh.LiveContracts\LiveContractBroker.cs"
                Link="Devolutions.MultiPwsh.LiveContracts\LiveContractBroker.cs"
                Visible="false" />
+      <Compile Include="$(MSBuildThisFileDirectory)Devolutions.MultiPwsh.LiveContracts\BridgeContractAttributes.cs"
+               Link="Devolutions.MultiPwsh.LiveContracts\BridgeContractAttributes.cs"
+               Visible="false" />
+      <Compile Include="$(MSBuildThisFileDirectory)Devolutions.MultiPwsh.LiveContracts\BridgeContractWire.cs"
+               Link="Devolutions.MultiPwsh.LiveContracts\BridgeContractWire.cs"
+               Visible="false" />
+      <Compile Include="$(MSBuildThisFileDirectory)Devolutions.MultiPwsh.LiveContracts\BridgeContractRuntime.cs"
+               Link="Devolutions.MultiPwsh.LiveContracts\BridgeContractRuntime.cs"
+               Visible="false" />
+      <Compile Include="$(MSBuildThisFileDirectory)Devolutions.MultiPwsh.LiveContracts\BridgeContractLease.cs"
+               Link="Devolutions.MultiPwsh.LiveContracts\BridgeContractLease.cs"
+               Visible="false" />
       <ReferencePath Remove="@(ReferencePath)"
                      Condition="'%(ReferencePath.Filename)%(ReferencePath.Extension)' == 'Devolutions.MultiPwsh.LiveContracts.dll'" />
       <ReferencePathWithRefAssemblies Remove="@(ReferencePathWithRefAssemblies)"

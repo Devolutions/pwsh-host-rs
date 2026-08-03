@@ -112,6 +112,7 @@ facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPack
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi::UInt32 AbiVersion
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi::UInt32 ContractCount
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.NativeLiveObjectContractPackApi::UIntPtr Size
+facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection BridgeContract
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection ConsumerToSession
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection None
 facade:field:Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellLiveObjectDirection PayloadToConsumer
@@ -936,6 +937,16 @@ facade:property:Devolutions.PowerShell.Ffi.PowerShellBrokerRequest::UInt64 Order
 facade:type:Devolutions.PowerShell.Ffi.PowerShellBrokerChannel
 facade:type:Devolutions.PowerShell.Ffi.PowerShellBrokerChannelOptions
 facade:type:Devolutions.PowerShell.Ffi.PowerShellBrokerRequest
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeBinding::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeChannel::Devolutions.PowerShell.Ffi.PowerShellBridgeBinding CreateBinding(Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeDispatcher)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellBridgeChannel::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellBridgeChannel CreateBridgeChannel(Devolutions.PowerShell.Ffi.PowerShellBrokerChannelOptions)
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeBinding::System.Guid ContractInterfaceId
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeBinding::UInt16 ContractMajorVersion
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeBinding::UInt16 ContractMinorVersion
+facade:property:Devolutions.PowerShell.Ffi.PowerShellBridgeBinding::UInt64 BindingId
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeBinding
+facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeChannel
 native:multi_pwsh_broker_cancel
 native:multi_pwsh_broker_close
 native:multi_pwsh_broker_frame_get_info

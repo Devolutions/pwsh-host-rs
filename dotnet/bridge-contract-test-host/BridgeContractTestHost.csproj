@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LiveContractMode>Host</LiveContractMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\live-contracts\Devolutions.MultiPwsh.LiveContracts.csproj" />
+    <ProjectReference Include="..\live-contract-generator\Devolutions.MultiPwsh.LiveContract.Generator.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+    <Compile Include="..\interop\BridgeTestContract.cs"
+             Link="BridgeTestContract.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <CompilerVisibleProperty Include="LiveContractMode" />
+  </ItemGroup>
+</Project>

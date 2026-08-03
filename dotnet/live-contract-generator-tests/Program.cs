@@ -49,6 +49,51 @@ VerifyNoDiagnostics("""
     namespace Unrelated { public sealed class LiveContractAttribute : System.Attribute { } }
     """);
 
+// The v2 compiler is a second generator in the same analyzer assembly. Running
+// both here also proves an ordinary v1 compilation gets no v2 diagnostics.
+BridgeContractTests.Run(RunBridgeGenerators, AssertNoErrors);
+BridgeWireTests.Run();
+BridgeRoundTripTests.Run(CompileBridgeAssembly);
+
+Console.WriteLine("live-contract and bridge-contract generator fixtures passed");
+
+static (Compilation Output, IEnumerable<Diagnostic> Diagnostics) CompileBridgeAssembly(string source, string mode, string assemblyName)
+{
+    CSharpParseOptions parseOptions = new(LanguageVersion.Preview);
+    SyntaxTree syntaxTree = CSharpSyntaxTree.ParseText(source, parseOptions);
+    CSharpCompilation compilation = CSharpCompilation.Create(
+        assemblyName,
+        [syntaxTree],
+        GetFrameworkReferences(),
+        new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+
+    GeneratorDriver driver = CSharpGeneratorDriver.Create(
+        [new BridgeContractGenerator().AsSourceGenerator()],
+        parseOptions: parseOptions,
+        optionsProvider: new LiveContractModeOptions(mode));
+    driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out Compilation output, out _);
+    return (output, driver.GetRunResult().Results.SelectMany(static generator => generator.Diagnostics));
+}
+
+
+static (GeneratorDriverRunResult Result, Compilation Output) RunBridgeGenerators(string source, string mode)
+{
+    CSharpParseOptions parseOptions = new(LanguageVersion.Preview);
+    SyntaxTree syntaxTree = CSharpSyntaxTree.ParseText(source, parseOptions);
+    CSharpCompilation compilation = CSharpCompilation.Create(
+        "BridgeContractGeneratorFixture",
+        [syntaxTree],
+        GetFrameworkReferences(),
+        new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable));
+
+    GeneratorDriver driver = CSharpGeneratorDriver.Create(
+        [new LiveContractGenerator().AsSourceGenerator(), new BridgeContractGenerator().AsSourceGenerator()],
+        parseOptions: parseOptions,
+        optionsProvider: new LiveContractModeOptions(mode));
+    driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out Compilation output, out _);
+    return (driver.GetRunResult(), output);
+}
+
 static void VerifyGeneratedSurface(string mode, string requiredText, string? source = null)
 {
     GeneratorDriverRunResult result = RunGenerator(source ?? ValidContract, mode, out Compilation output);

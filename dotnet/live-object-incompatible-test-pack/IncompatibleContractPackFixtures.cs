@@ -1,5 +1,6 @@
 #nullable enable
 
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Devolutions.PowerShell.Ffi.LiveObjects;
 
@@ -29,13 +30,47 @@ internal static unsafe class ContractPackFixture
             descriptors[index] = contracts[index].ToNative();
         }
 
+        return CreateApi(abiVersion, descriptors, (uint)contracts.Length, create, release);
+    }
+
+    /// <summary>
+    /// Publishes descriptors that were written directly rather than projected from
+    /// <see cref="PowerShellLiveObjectContract"/>. A pack is native memory the consumer
+    /// does not control, so a fixture has to be able to declare a descriptor the managed
+    /// constructor would refuse to build.
+    /// </summary>
+    internal static IntPtr CreateRawApi(
+        uint abiVersion,
+        ReadOnlySpan<NativeLiveObjectContractDescriptor> contracts,
+        delegate* unmanaged<IntPtr, IntPtr*, int> create,
+        delegate* unmanaged<IntPtr, void> release)
+    {
+        NativeLiveObjectContractDescriptor* descriptors =
+            (NativeLiveObjectContractDescriptor*)NativeMemory.Alloc(
+                (nuint)contracts.Length,
+                (nuint)sizeof(NativeLiveObjectContractDescriptor));
+        for (int index = 0; index < contracts.Length; index++)
+        {
+            descriptors[index] = contracts[index];
+        }
+
+        return CreateApi(abiVersion, descriptors, (uint)contracts.Length, create, release);
+    }
+
+    private static IntPtr CreateApi(
+        uint abiVersion,
+        NativeLiveObjectContractDescriptor* descriptors,
+        uint contractCount,
+        delegate* unmanaged<IntPtr, IntPtr*, int> create,
+        delegate* unmanaged<IntPtr, void> release)
+    {
         NativeLiveObjectContractPackApi* api =
             (NativeLiveObjectContractPackApi*)NativeMemory.Alloc((nuint)sizeof(NativeLiveObjectContractPackApi));
         *api = new NativeLiveObjectContractPackApi
         {
             Size = (nuint)sizeof(NativeLiveObjectContractPackApi),
             AbiVersion = abiVersion,
-            ContractCount = (uint)contracts.Length,
+            ContractCount = contractCount,
             Contracts = descriptors,
             CreatePayloadProxy = (IntPtr)create,
             ReleasePayloadProxy = (IntPtr)release,
@@ -214,6 +249,64 @@ public static unsafe class UnsupportedAbiLiveObjectTestPack
         return ContractPackFixture.CreateApi(
             abiVersion: 2,
             new ReadOnlySpan<PowerShellLiveObjectContract>(in contract),
+            &CreatePayloadProxy,
+            &ReleasePayloadProxy);
+    }
+}
+
+/// <summary>
+/// Declares the Bridge Contract v2 marker on its own, without the
+/// <see cref="PowerShellLiveObjectDirection.ConsumerToSession"/> direction the marker
+/// only ever augments. The managed contract type refuses to build such a descriptor,
+/// so this fixture writes the raw bits directly — which is exactly what an untrusted
+/// native pack can do. A contract that claims to speak v2 but reads as "not a
+/// consumer-to-session surface" would slip past every existing direction check, so it
+/// must be rejected at registration rather than registered and later misrouted.
+/// </summary>
+public static unsafe class BridgeMarkerWithoutDirectionLiveObjectTestPack
+{
+    private static readonly IntPtr Api = CreateApi();
+
+    [UnmanagedCallersOnly]
+    public static IntPtr GetLiveObjectContractPackV1()
+    {
+        return Api;
+    }
+
+    [UnmanagedCallersOnly]
+    private static int CreatePayloadProxy(IntPtr _, IntPtr* __)
+    {
+        return ContractPackFixture.EFail;
+    }
+
+    [UnmanagedCallersOnly]
+    private static void ReleasePayloadProxy(IntPtr _)
+    {
+    }
+
+    private static IntPtr CreateApi()
+    {
+        Guid interfaceId = Guid.Parse("6E1D4C08-52A7-4B36-9F0D-8B7A1E5C2D64");
+        Span<byte> interfaceIdBytes = stackalloc byte[16];
+        if (!interfaceId.TryWriteBytes(interfaceIdBytes))
+        {
+            throw new InvalidOperationException("The fixture interface identifier is invalid.");
+        }
+
+        NativeLiveObjectContractDescriptor descriptor = new()
+        {
+            Size = checked((uint)sizeof(NativeLiveObjectContractDescriptor)),
+            Directions = (uint)PowerShellLiveObjectDirection.BridgeContract,
+            InterfaceIdLow = BinaryPrimitives.ReadUInt64LittleEndian(interfaceIdBytes),
+            InterfaceIdHigh = BinaryPrimitives.ReadUInt64LittleEndian(interfaceIdBytes[8..]),
+            MajorVersion = 1,
+            MinorVersion = 0,
+            Reserved = 0,
+        };
+
+        return ContractPackFixture.CreateRawApi(
+            abiVersion: 1,
+            new ReadOnlySpan<NativeLiveObjectContractDescriptor>(in descriptor),
             &CreatePayloadProxy,
             &ReleasePayloadProxy);
     }

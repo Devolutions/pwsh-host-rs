@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>Devolutions.MultiPwsh.BridgeContract.TestPack</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LiveContractMode>Payload</LiveContractMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\live-contracts\BridgeContractAttributes.cs"
+             Link="BridgeContractAttributes.cs" />
+    <Compile Include="..\live-contracts\BridgeContractWire.cs"
+             Link="BridgeContractWire.cs" />
+    <Compile Include="..\live-contracts\BridgeContractRuntime.cs"
+             Link="BridgeContractRuntime.cs" />
+    <Compile Include="..\live-contracts\BridgeContractLease.cs"
+             Link="BridgeContractLease.cs" />
+    <Compile Include="..\interop\PowerShellLiveObjectContract.cs"
+             Link="PowerShellLiveObjectContract.cs" />
+    <Compile Include="..\interop\BridgeTestContract.cs"
+             Link="BridgeTestContract.cs" />
+    <ProjectReference Include="..\live-contract-generator\Devolutions.MultiPwsh.LiveContract.Generator.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <CompilerVisibleProperty Include="LiveContractMode" />
+  </ItemGroup>
+</Project>

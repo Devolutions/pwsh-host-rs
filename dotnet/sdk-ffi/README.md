@@ -138,6 +138,114 @@ This is neither a live console, `PSHost`, callback/event API, nor a stream of
 SMA objects, credentials, or other CLR references. Cancellation can expose
 already-captured records, but still never produces a successful final result.
 
+## Bridge Contract v2 preview
+
+`BridgeContractAttribute`, `BridgeObjectAttribute`, `BridgeMemberAttribute`,
+`BridgeEventAttribute`, `BridgeDataAttribute`, `BridgeFieldAttribute`, and
+`BridgeEnumAttribute` opt an application object graph into the closed Bridge
+Contract v2 compiler. It is a second, separate attribute family: the v1
+`[LiveContract]` preview above is unchanged, and a compilation declares one root
+or the other, never both.
+
+v2 models a finite DAG of at most 64 object interfaces and depth 8, with
+property getters and setters, bounded methods, explicitly bounded collections,
+nullable and enumeration values, data-transfer interfaces, typed error data, and
+one-way events. Events are generated one-way ordinals, not CLR `event`
+accessors, so no delegate ever crosses the boundary.
+
+Each contract declares the IID of a COM transport interface that the contract
+author writes by hand, because a source generator cannot see another generator's
+output and the payload pack registry keys on a unique interface identifier. The
+generator verifies that interface exists with the required shape.
+
+Both sides compile the same declaration — the consumer with
+`LiveContractMode=Host` and the trusted payload pack with
+`LiveContractMode=Payload`. The generator emits, identically in both modes, a
+canonical descriptor byte sequence, its SHA-256 hash, static member tables, the
+copied data classes, and their typed binary codecs. Host mode additionally emits
+typed handler interfaces, a call context, an authorizer interface, and the
+dispatcher; payload mode emits the CLR wrapper classes that script uses with
+ordinary property and method syntax.
+
+The dispatcher admits every frame against bounded lease and object tables,
+resolving the lease and the object handle in one atomic step, then authorizes
+the getter, the setter, or the method independently before the handler runs. The
+application never invents an object identifier: a handler returns a child
+handler interface and the dispatcher allocates the identifier, so a forged,
+stale, or cross-lease handle can never reach application code. At lease closure
+every handle is tombstoned in the same locked transition, so a payload wrapper
+that escaped into a longer-lived script variable fails with a deterministic
+revoked error.
+
+A source generator cannot see another generator's output, so the application
+supplies a small `[GeneratedComClass]` that implements its contract's transport
+interface and forwards to the dispatcher. It holds no lease state, decodes
+nothing, and authorizes nothing; `docs/in-process-ffi.md` shows it in full.
+
+Everything the compiler accepts is enumerated in source. `object`, `dynamic`,
+`Type`, `PSObject`, delegates, `Task`, generics other than `IReadOnlyList<T>`
+and `Nullable<T>`, `ref`/`out`, arrays other than `byte[]`, pointers,
+credentials, `[Flags]` enumerations, unannotated reference types, cyclic data
+graphs, cross-boundary interface inheritance, unbounded strings and collections,
+and members without an explicit attribute are compile errors with actionable
+`MPWLC011`-`MPWLC024` diagnostics. Generated code contains no reflection,
+`IDispatch`, dynamic binder, or JSON serializer path.
+
+Bounds are per position and never inherited: a member-level cap applies to the
+result, and every bounded parameter declares its own `[BridgeBound]`. Declaring
+a member whose bounds could produce a frame above 64 KiB fails the build rather
+than failing at run time.
+
+`BridgeMutation.Staged` is rejected at compile time until the staged-intent
+coordinator exposes a programmatic stage/validate/commit entry point.
+
+Host and payload contract builds are **lock-step**. The lease handshake carries
+the payload's descriptor hash, the consumer compares it before allocating a
+lease, and the payload verifies the echoed hash in the reply, so neither side
+accepts a mismatched artifact. There is no contract-layer minor compatibility
+lane, no member negotiation, and no additive-member tolerance.
+
+Request, release, and lease-open frames travel over the contract's COM transport
+through the existing consumer-to-session pack registry. A v2 descriptor declares
+`ConsumerToSession | BridgeContract`; only for that marker the payload supplies
+its fixed `IPowerShellBridgeContractSink` to `CreatePayloadProxy`, leaving v1
+packs bit-for-bit unchanged. The generated pack binding reads the requested
+IID/version, declares its fixed `IPowerShellBridgePayloadCallback`, and receives
+an invocation-scoped generated root through an owned GC handle. The payload
+unbinds that root at completion before releasing the handle, so escaped wrappers
+are deterministically revoked.
+
+The host construction surface is already explicit:
+`PowerShellRuntime.CreateBridgeChannel` creates a channel and
+`PowerShellBridgeChannel.CreateBinding` associates one generated
+`IPowerShellBridgeDispatcher` with it. A binding owns its dispatcher and the
+channel owns its bindings. Session assignment and builder attachment deliberately
+remain unavailable until generated frames use this channel; publishing either
+against the current COM carrier would create a variable that fails at its first
+member call.
+
+**Duplex broker delivery of declared events is not wired yet**: a consumer event
+sink is obtained by `QueryInterface` on the contract transport and a consumer
+that supplies one must return without blocking. A lease with no sink fails an
+event call deterministically instead of degrading silently.
+
+### One channel, one purpose
+
+When the bridge moves onto the duplex broker channel, an invocation will use its
+channel for a generated bridge **or** for raw `$DpsBroker`, never both. Attaching
+a second channel to one builder already fails today, so this is the behaviour the
+runtime enforces rather than a new restriction. To use both, run two invocations.
+
+This is a product statement, not an implementation detail. Under it, for a bridge
+invocation, *every* application request the script can make goes through the
+generated, authorized, leased contract surface. Allowing a raw frame channel
+beside it would put a surface with no authorization, no lease validation, and no
+staging next to one that has all three, in the same invocation — and a closed
+surface loses most of its value when an open one sits beside it.
+
+`docs/in-process-ffi.md` carries the normative wire, descriptor, dispatcher,
+failure, lease, authorization, and staged-mutation rules.
+
 ## DTO projections and bounded paging
 
 `PowerShellDtoContractAttribute` and `PowerShellDtoMemberAttribute` opt an
