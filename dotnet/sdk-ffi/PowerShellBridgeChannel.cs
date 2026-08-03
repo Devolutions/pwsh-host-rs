@@ -62,6 +62,78 @@ public sealed class PowerShellBridgeChannel : IDisposable
     }
 
     /// <summary>
+    /// Pulls and structurally validates one generated bridge frame. The returned
+    /// work item must be dispatched asynchronously; this method never invokes an
+    /// application dispatcher on the broker pump thread.
+    /// </summary>
+    /// <returns>
+    /// <see langword="false"/> after the channel closes. A <see langword="true"/>
+    /// result with no work means either timeout or a rejected frame.
+    /// </returns>
+    public bool TryReceive(TimeSpan timeout, out PowerShellBridgeDispatch? dispatch)
+    {
+        dispatch = null;
+        if (!broker.TryReceive(timeout, out PowerShellBrokerRequest? request))
+        {
+            return false;
+        }
+        if (request is null)
+        {
+            return true;
+        }
+
+        if (!PowerShellBridgeBrokerWire.TryReadRoute(request.Body, out ulong bindingId))
+        {
+            Reject(request, "The generated bridge route is malformed.");
+            return true;
+        }
+
+        PowerShellBridgeBinding? binding;
+        lock (gate)
+        {
+            bindings.TryGetValue(bindingId, out binding);
+        }
+        if (binding is null)
+        {
+            Reject(request, "The generated bridge binding is not registered on this channel.");
+            return true;
+        }
+
+        IPowerShellBridgeDispatcher dispatcher;
+        try
+        {
+            dispatcher = binding.GetDispatcher();
+        }
+        catch (ObjectDisposedException)
+        {
+            Reject(request, "The generated bridge binding has been released.");
+            return true;
+        }
+
+        ReadOnlySpan<byte> frame = request.Body.AsSpan(PowerShellBridgeBrokerWire.RouteHeaderSize);
+        bool isEvent = request.Kind == PowerShellBridgeBrokerWire.EventKind;
+        if ((isEvent && !request.IsOneWay) ||
+            (!isEvent && (request.Kind != PowerShellBridgeBrokerWire.RequestKind || request.IsOneWay)) ||
+            frame.Length < PowerShellBridgeWire.RequestHeaderSize ||
+            frame.Length > dispatcher.MaximumRequestBytes ||
+            !PowerShellBridgeRequestHeader.TryRead(frame, out PowerShellBridgeRequestHeader header) ||
+            (isEvent != (header.FrameKind == PowerShellBridgeFrameKind.Event)))
+        {
+            Reject(request, "The generated bridge frame is invalid for its route.");
+            return true;
+        }
+
+        dispatch = new PowerShellBridgeDispatch(
+            broker,
+            request,
+            dispatcher,
+            header,
+            frame.ToArray(),
+            isEvent);
+        return true;
+    }
+
+    /// <summary>
     /// Disposes every registered binding before closing the native broker
     /// channel. Each binding is attempted even when an earlier dispatcher fails.
     /// </summary>
@@ -121,6 +193,14 @@ public sealed class PowerShellBridgeChannel : IDisposable
         if (Volatile.Read(ref disposed) != 0)
         {
             throw new ObjectDisposedException(nameof(PowerShellBridgeChannel));
+        }
+    }
+
+    private void Reject(PowerShellBrokerRequest request, string message)
+    {
+        if (!request.IsOneWay)
+        {
+            broker.TryReplyError(request.CorrelationId, PowerShellBridgeStatus.InvalidArgument, message);
         }
     }
 }
@@ -198,5 +278,77 @@ public sealed class PowerShellBridgeBinding : IDisposable
                 channel.Remove(this);
             }
         }
+    }
+}
+
+/// <summary>
+/// A copied, prevalidated bridge frame. Call <see cref="Dispatch"/> from the
+/// host's worker queue, never inline from <see cref="PowerShellBridgeChannel.TryReceive"/>.
+/// </summary>
+public sealed class PowerShellBridgeDispatch
+{
+    private readonly PowerShellBrokerChannel broker;
+    private readonly PowerShellBrokerRequest request;
+    private readonly IPowerShellBridgeDispatcher dispatcher;
+    private readonly PowerShellBridgeRequestHeader header;
+    private readonly byte[] frame;
+    private readonly bool isEvent;
+    private int dispatched;
+
+    internal PowerShellBridgeDispatch(
+        PowerShellBrokerChannel broker,
+        PowerShellBrokerRequest request,
+        IPowerShellBridgeDispatcher dispatcher,
+        PowerShellBridgeRequestHeader header,
+        byte[] frame,
+        bool isEvent)
+    {
+        this.broker = broker;
+        this.request = request;
+        this.dispatcher = dispatcher;
+        this.header = header;
+        this.frame = frame;
+        this.isEvent = isEvent;
+    }
+
+    /// <summary>Runs generated dispatch once and attempts its deferred DBC reply.</summary>
+    /// <returns>
+    /// <see langword="false"/> when a request reply became terminal before this
+    /// worker finished, such as after cancellation, timeout, or channel close.
+    /// Events always return <see langword="true"/> after dispatch.
+    /// </returns>
+    public bool Dispatch()
+    {
+        if (Interlocked.Exchange(ref dispatched, 1) != 0)
+        {
+            throw new InvalidOperationException("A generated bridge dispatch may only run once.");
+        }
+
+        if (isEvent)
+        {
+            dispatcher.DispatchEvent(frame);
+            return true;
+        }
+
+        byte[] reply = new byte[checked(dispatcher.MaximumReplyBytes + PowerShellBridgeBrokerWire.ReplyEnvelopeSize)];
+        Span<byte> bridgeReply = reply.AsSpan(PowerShellBridgeBrokerWire.ReplyEnvelopeSize);
+        int status = dispatcher.Dispatch(
+            header.LeaseId,
+            header.Generation,
+            header.ObjectId,
+            header.MemberId,
+            bridgeReply.Length,
+            frame,
+            bridgeReply,
+            out int replyLength);
+        if (replyLength < 0 || replyLength > bridgeReply.Length)
+        {
+            status = PowerShellBridgeStatus.InvalidArgument;
+            replyLength = 0;
+        }
+
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(reply, status);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(reply.AsSpan(sizeof(int)), 0);
+        return broker.TryReply(request.CorrelationId, reply.AsSpan(0, PowerShellBridgeBrokerWire.ReplyEnvelopeSize + replyLength));
     }
 }

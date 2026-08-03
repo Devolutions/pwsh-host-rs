@@ -17,10 +17,10 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use pwsh_host::FfiLiveStreamRecord;
 use pwsh_host::{
-    find_pwsh_dir, FfiBindingError, FfiInvocationResult, FfiLiveInvocation, FfiLiveObjectContractDescriptor,
-    FfiLiveStreamBatch, FfiObservedDiagnosticPage, FfiObservedInvocation, FfiPowerShell, FfiPowerShellSession,
-    FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue, FfiTypedResultInvocation, FfiTypedResultPage,
-    FfiTypedResultRecord, HostedRuntime, LiveObjectContractPack,
+    find_pwsh_dir, FfiBindingError, FfiBridgeContext, FfiInvocationResult, FfiLiveInvocation,
+    FfiLiveObjectContractDescriptor, FfiLiveStreamBatch, FfiObservedDiagnosticPage, FfiObservedInvocation,
+    FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue,
+    FfiTypedResultInvocation, FfiTypedResultPage, FfiTypedResultRecord, HostedRuntime, LiveObjectContractPack,
 };
 
 const ABI_VERSION: u32 = 2;
@@ -50,6 +50,7 @@ const FEATURE_OBSERVED_INVOCATION: u64 = 1 << 22;
 const FEATURE_SESSION_PREFLIGHT: u64 = 1 << 23;
 const FEATURE_RUNTIME_DIAGNOSTICS: u64 = 1 << 24;
 const FEATURE_DUPLEX_BROKER_CHANNEL: u64 = 1 << 25;
+const FEATURE_GENERATED_BRIDGE_ATTACHMENT: u64 = 1 << 26;
 const CALL_RESULT_DIAGNOSTIC_TRUNCATED: u32 = 1;
 #[cfg(test)]
 const RESULT_RECORD_SCALAR_VALUE_PRESENT: u32 = 1 << 1;
@@ -395,6 +396,25 @@ struct BrokerAttachment {
     channel: Arc<BrokerChannel>,
     generation: u64,
     active: AtomicBool,
+    bridge: Option<BridgeAttachment>,
+}
+
+#[derive(Clone)]
+struct BridgeAttachment {
+    binding_id: u64,
+    contract_id_low: u64,
+    contract_id_high: u64,
+    contract_major_version: u16,
+    contract_minor_version: u16,
+    maximum_request_bytes: u32,
+    maximum_reply_bytes: u32,
+    variable_name: String,
+}
+
+struct BrokerConfiguration {
+    channel_handle: u64,
+    channel: Arc<BrokerChannel>,
+    bridge: Option<BridgeAttachment>,
 }
 
 struct State {
@@ -431,7 +451,7 @@ struct Session {
     runspace_session: Option<Arc<RunspaceSession>>,
     capability_registration: Mutex<Option<Arc<CapabilityRegistrationState>>>,
     active_capability: Mutex<Option<CapabilityInvocation>>,
-    broker_channel: Mutex<Option<(u64, Arc<BrokerChannel>)>>,
+    broker_channel: Mutex<Option<BrokerConfiguration>>,
     active_broker: Mutex<Option<Arc<BrokerAttachment>>>,
 }
 
@@ -2153,6 +2173,22 @@ fn configure_broker(session: &Session, attachment: Option<&Arc<BrokerAttachment>
     if let Err(error) = configured {
         finish_broker(session, Some(attachment));
         return Err(error);
+    }
+    if let Some(bridge) = &attachment.bridge {
+        let configured = session.power_shell.set_bridge_context(&FfiBridgeContext {
+            binding_id: bridge.binding_id,
+            contract_id_low: bridge.contract_id_low,
+            contract_id_high: bridge.contract_id_high,
+            contract_major_version: bridge.contract_major_version,
+            contract_minor_version: bridge.contract_minor_version,
+            maximum_request_bytes: bridge.maximum_request_bytes,
+            maximum_reply_bytes: bridge.maximum_reply_bytes,
+            variable_name: &bridge.variable_name,
+        });
+        if let Err(error) = configured {
+            finish_broker(session, Some(attachment));
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -4516,8 +4552,94 @@ fn set_broker(handle: u64, channel_handle: u64) -> Result<Status, (Status, Strin
             "a broker channel is already attached; invoke or clear the builder first".to_owned(),
         ));
     }
-    *attached = Some((channel_handle, channel));
+    *attached = Some(BrokerConfiguration {
+        channel_handle,
+        channel,
+        bridge: None,
+    });
     Ok(Status::Success)
+}
+
+fn set_bridge(handle: u64, channel_handle: u64, bridge: BridgeAttachment) -> Result<Status, (Status, String)> {
+    if bridge.binding_id == 0
+        || (bridge.contract_id_low == 0 && bridge.contract_id_high == 0)
+        || bridge.contract_major_version == 0
+        || bridge.maximum_request_bytes == 0
+        || bridge.maximum_reply_bytes == 0
+        || !is_valid_bridge_variable_name(&bridge.variable_name)
+    {
+        return Err((
+            Status::InvalidArgument,
+            "bridge attachment metadata is invalid".to_owned(),
+        ));
+    }
+
+    let required_request_bytes = bridge
+        .maximum_request_bytes
+        .checked_add(8)
+        .ok_or_else(|| (Status::InvalidArgument, "bridge request bound overflows".to_owned()))?;
+    let required_reply_bytes = bridge
+        .maximum_reply_bytes
+        .checked_add(8)
+        .ok_or_else(|| (Status::InvalidArgument, "bridge reply bound overflows".to_owned()))?;
+    let (session, channel) = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let session = state
+            .sessions
+            .get(&handle)
+            .cloned()
+            .ok_or_else(|| (Status::InvalidHandle, "PowerShell handle is invalid".to_owned()))?;
+        let channel = state
+            .broker_channels
+            .get(&channel_handle)
+            .cloned()
+            .ok_or_else(|| (Status::InvalidHandle, "broker channel handle is invalid".to_owned()))?;
+        (session, channel)
+    };
+    if channel.max_body_bytes < required_request_bytes || channel.max_body_bytes < required_reply_bytes {
+        return Err((
+            Status::InvalidArgument,
+            "broker channel body bound cannot carry the generated bridge frames".to_owned(),
+        ));
+    }
+    if session_has_active_operation(&session)
+        || session
+            .runspace_session
+            .as_ref()
+            .is_some_and(|runspace| runspace_session_has_active_operation(runspace))
+    {
+        return Err((
+            Status::Backpressure,
+            "a bridge channel cannot be attached while its session has an active invocation".to_owned(),
+        ));
+    }
+    let mut attached = session
+        .broker_channel
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if attached.is_some() {
+        return Err((
+            Status::Backpressure,
+            "a broker or bridge channel is already attached; invoke or clear the builder first".to_owned(),
+        ));
+    }
+    *attached = Some(BrokerConfiguration {
+        channel_handle,
+        channel,
+        bridge: Some(bridge),
+    });
+    Ok(Status::Success)
+}
+
+fn is_valid_bridge_variable_name(value: &str) -> bool {
+    let mut characters = value.bytes();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    if !matches!(first, b'A'..=b'Z' | b'a'..=b'z' | b'_') {
+        return false;
+    }
+    characters.all(|character| matches!(character, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'))
 }
 
 fn session_has_broker(session: &Session) -> bool {
@@ -4547,12 +4669,13 @@ fn take_session_broker(session: &Session) -> Option<Arc<BrokerAttachment>> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .take();
-    let (channel_handle, channel) = taken?;
+    let configuration = taken?;
     Some(Arc::new(BrokerAttachment {
-        channel_handle,
-        channel,
+        channel_handle: configuration.channel_handle,
+        channel: configuration.channel,
         generation: NEXT_BROKER_GENERATION.fetch_add(1, Ordering::AcqRel),
         active: AtomicBool::new(true),
+        bridge: configuration.bridge,
     }))
 }
 
@@ -5698,6 +5821,7 @@ fn feature_flags() -> u64 {
         | FEATURE_SESSION_PREFLIGHT
         | FEATURE_RUNTIME_DIAGNOSTICS
         | FEATURE_DUPLEX_BROKER_CHANNEL
+        | FEATURE_GENERATED_BRIDGE_ATTACHMENT
 }
 
 fn create_live_object_probe(initial_count: i64) -> Result<*mut std::ffi::c_void, (Status, String)> {
@@ -6510,6 +6634,40 @@ pub unsafe extern "C" fn multi_pwsh_broker_cancel(
 #[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_set_broker(handle: u64, channel_handle: u64, result: *mut CallResult) -> i32 {
     v2_call(result, || set_broker(handle, channel_handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_set_bridge(
+    handle: u64,
+    channel_handle: u64,
+    binding_id: u64,
+    contract_id_low: u64,
+    contract_id_high: u64,
+    contract_major_version: u16,
+    contract_minor_version: u16,
+    maximum_request_bytes: u32,
+    maximum_reply_bytes: u32,
+    variable_name: Utf8Span,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        let variable_name = utf8_span(variable_name)
+            .map_err(|status| (status, "bridge variable name is not valid UTF-8".to_owned()))?;
+        set_bridge(
+            handle,
+            channel_handle,
+            BridgeAttachment {
+                binding_id,
+                contract_id_low,
+                contract_id_high,
+                contract_major_version,
+                contract_minor_version,
+                maximum_request_bytes,
+                maximum_reply_bytes,
+                variable_name: variable_name.to_owned(),
+            },
+        )
+    })
 }
 
 #[no_mangle]
@@ -8185,6 +8343,7 @@ mod tests {
             channel,
             generation: NEXT_BROKER_GENERATION.fetch_add(1, Ordering::AcqRel),
             active: AtomicBool::new(true),
+            bridge: None,
         });
         broker_register_attachment(&attachment);
         attachment
@@ -9216,7 +9375,8 @@ mod tests {
             | FEATURE_OBSERVED_INVOCATION
             | FEATURE_SESSION_PREFLIGHT
             | FEATURE_RUNTIME_DIAGNOSTICS
-            | FEATURE_DUPLEX_BROKER_CHANNEL;
+            | FEATURE_DUPLEX_BROKER_CHANNEL
+            | FEATURE_GENERATED_BRIDGE_ATTACHMENT;
 
         assert_eq!(ABI_VERSION, 2);
         assert_eq!(MINIMUM_COMPATIBLE_ABI_VERSION, 2);

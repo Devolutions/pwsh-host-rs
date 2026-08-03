@@ -1,6 +1,7 @@
 #nullable enable
 
 using System;
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.Marshalling;
 
@@ -214,6 +215,9 @@ public interface IPowerShellBridgeDispatcher : IDisposable
     /// <summary>The largest reply any declared operation can produce.</summary>
     int MaximumReplyBytes { get; }
 
+    /// <summary>The largest request frame any declared operation can accept.</summary>
+    int MaximumRequestBytes { get; }
+
     /// <summary>
     /// Dispatches one already-bounded bridge request. The caller supplies the
     /// lease identity from the request header and a reply buffer bounded by
@@ -228,6 +232,12 @@ public interface IPowerShellBridgeDispatcher : IDisposable
         ReadOnlySpan<byte> request,
         Span<byte> reply,
         out int replyLength);
+
+    /// <summary>
+    /// Dispatches one bounded one-way event. The event has already been copied
+    /// from DBC and must not be processed on the broker pump thread.
+    /// </summary>
+    int DispatchEvent(ReadOnlySpan<byte> request);
 }
 
 /// <summary>
@@ -268,6 +278,93 @@ public sealed unsafe class PowerShellBridgeComTransport : IPowerShellBridgeTrans
     {
         this.invoke = invoke ?? throw new ArgumentNullException(nameof(invoke));
         this.events = events;
+    }
+
+    /// <summary>
+    /// Carries generated bridge frames through the payload-owned DBC sink. It
+    /// never holds an application delegate and every temporary reply buffer is
+    /// sized from the generated member reply bound plus the fixed envelope.
+    /// </summary>
+    public sealed unsafe class PowerShellBridgeBrokerTransport : IPowerShellBridgeTransport
+    {
+        private readonly IPowerShellBridgeBrokerSink sink;
+
+        public PowerShellBridgeBrokerTransport(IPowerShellBridgeBrokerSink sink)
+        {
+            this.sink = sink ?? throw new ArgumentNullException(nameof(sink));
+        }
+
+        public int Invoke(
+            ulong leaseId,
+            uint generation,
+            ulong objectId,
+            uint memberId,
+            ReadOnlySpan<byte> request,
+            Span<byte> reply,
+            out int replyLength)
+        {
+            replyLength = 0;
+            if (request.Length is < PowerShellBridgeWire.RequestHeaderSize or > PowerShellBridgeWire.MaximumFrameBytes ||
+                reply.Length > PowerShellBridgeWire.MaximumFrameBytes - PowerShellBridgeBrokerWire.ReplyEnvelopeSize)
+            {
+                return PowerShellBridgeStatus.InvalidArgument;
+            }
+
+            byte[] envelope = new byte[checked(reply.Length + PowerShellBridgeBrokerWire.ReplyEnvelopeSize)];
+            fixed (byte* requestPointer = request)
+            fixed (byte* envelopePointer = envelope)
+            {
+                int status = sink.Request(
+                    request.Length == 0 ? 0 : (nint)requestPointer,
+                    request.Length,
+                    (nint)envelopePointer,
+                    envelope.Length,
+                    out int written);
+                if (status != PowerShellBridgeStatus.Success)
+                {
+                    return status;
+                }
+
+                if (written < PowerShellBridgeBrokerWire.ReplyEnvelopeSize || written > envelope.Length ||
+                    BinaryPrimitives.ReadUInt32LittleEndian(envelope.AsSpan(sizeof(int))) != 0)
+                {
+                    return PowerShellBridgeStatus.InvalidArgument;
+                }
+
+                int bridgeStatus = BinaryPrimitives.ReadInt32LittleEndian(envelope);
+                if (bridgeStatus != PowerShellBridgeStatus.Success)
+                {
+                    return bridgeStatus;
+                }
+
+                int frameLength = written - PowerShellBridgeBrokerWire.ReplyEnvelopeSize;
+                if (frameLength > reply.Length)
+                {
+                    return PowerShellBridgeStatus.BufferTooSmall;
+                }
+
+                envelope.AsSpan(PowerShellBridgeBrokerWire.ReplyEnvelopeSize, frameLength).CopyTo(reply);
+                replyLength = frameLength;
+                return PowerShellBridgeStatus.Success;
+            }
+        }
+
+        public void PostEvent(uint kind, ulong orderingKey, ReadOnlySpan<byte> body)
+        {
+            if (body.Length is < PowerShellBridgeWire.RequestHeaderSize or > PowerShellBridgeWire.MaximumFrameBytes)
+            {
+                throw new InvalidOperationException("The bridge event frame is out of range.");
+            }
+
+            fixed (byte* bodyPointer = body)
+            {
+                int status = sink.Post((nint)bodyPointer, body.Length);
+                if (status != PowerShellBridgeStatus.Success)
+                {
+                    throw PowerShellBridgeException.FromStatus(status, "broker");
+                }
+            }
+        }
     }
 
     /// <summary>Gets whether the consumer exposed a one-way event sink.</summary>
@@ -379,6 +476,34 @@ public sealed unsafe class PowerShellBridgeComTransport : IPowerShellBridgeTrans
             Marshal.FreeHGlobal(buffer);
         }
     }
+}
+
+/// <summary>
+/// Carries generated bridge frames through the payload-owned DBC sink without
+/// exposing an application callback to the PowerShell pipeline.
+/// </summary>
+public sealed class PowerShellBridgeBrokerTransport : IPowerShellBridgeTransport
+{
+    private readonly PowerShellBridgeComTransport.PowerShellBridgeBrokerTransport implementation;
+
+    public PowerShellBridgeBrokerTransport(IPowerShellBridgeBrokerSink sink)
+    {
+        implementation = new PowerShellBridgeComTransport.PowerShellBridgeBrokerTransport(
+            sink ?? throw new ArgumentNullException(nameof(sink)));
+    }
+
+    public int Invoke(
+        ulong leaseId,
+        uint generation,
+        ulong objectId,
+        uint memberId,
+        ReadOnlySpan<byte> request,
+        Span<byte> reply,
+        out int replyLength) =>
+        implementation.Invoke(leaseId, generation, objectId, memberId, request, reply, out replyLength);
+
+    public void PostEvent(uint kind, ulong orderingKey, ReadOnlySpan<byte> body) =>
+        implementation.PostEvent(kind, orderingKey, body);
 }
 
 /// <summary>

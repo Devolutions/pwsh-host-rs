@@ -85,6 +85,24 @@ public sealed unsafe class PowerShellSession : IDisposable
         return PowerShell.CreateFromNative(nativeBuilderHandle);
     }
 
+    /// <summary>
+    /// Creates a builder with one generated bridge proxy attached for its next
+    /// asynchronous invocation.
+    /// </summary>
+    public PowerShell CreatePowerShell(PowerShellBridgeBinding binding, string variableName)
+    {
+        PowerShell powerShell = CreatePowerShell();
+        try
+        {
+            return powerShell.WithBridge(binding, variableName);
+        }
+        catch
+        {
+            powerShell.Dispose();
+            throw;
+        }
+    }
+
     public PowerShellSessionSnapshot GetSnapshot()
     {
         using PowerShellSessionHandle.HandleLease lease = handle.Borrow();

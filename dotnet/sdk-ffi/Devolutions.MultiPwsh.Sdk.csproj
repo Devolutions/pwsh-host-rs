@@ -75,6 +75,11 @@
           Pack="true"
           PackagePath="buildTransitive\Devolutions.MultiPwsh.LiveContracts\"
           Visible="false" />
+    <None Include="..\interop\PowerShellLiveObjectContract.cs"
+          BuildAction="None"
+          Pack="true"
+          PackagePath="buildTransitive\Devolutions.MultiPwsh.LiveContracts\"
+          Visible="false" />
     <None Include="..\live-contract-generator\bin\$(Configuration)\netstandard2.0\Devolutions.MultiPwsh.LiveContract.Generator.dll"
           Pack="true"
           PackagePath="analyzers\dotnet\cs\"

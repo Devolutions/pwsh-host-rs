@@ -69,6 +69,7 @@ namespace NativeHost
         private const ulong FfiFeatureSessionPreflight = 1UL << 23;
         private const ulong FfiFeatureRuntimeDiagnostics = 1UL << 24;
         private const ulong FfiFeatureDuplexBrokerChannel = 1UL << 25;
+        private const ulong FfiFeatureGeneratedBridgeAttachment = 1UL << 26;
         private const uint FfiTypedResultPageTerminal = 1;
         private const uint FfiTypedResultPageTruncated = 1 << 1;
         private const uint FfiTypedResultPageComplete = 1 << 2;
@@ -203,6 +204,7 @@ namespace NativeHost
             public IntPtr PowerShellSession_PreflightConfigured;
             public IntPtr RuntimeDiagnostics_CopyPowerShellFileVersionUtf8;
             public IntPtr PowerShell_SetBrokerContext;
+            public IntPtr PowerShell_SetBridgeContext;
         }
 
         private const int FfiPreflightMaximumTextLength = 128;
@@ -1133,7 +1135,8 @@ namespace NativeHost
                     FfiFeatureSessionConfiguration | FfiFeatureSessionVariables | FfiFeatureCapabilityRpc |
                     FfiFeatureLiveObjectProbe | FfiFeatureLiveSessionObjectProbe | FfiFeatureLiveObjectContracts |
                     FfiFeatureLiveStreamPolling | FfiFeatureTypedResultPaging | FfiFeatureObservedInvocation |
-                    FfiFeatureSessionPreflight | FfiFeatureRuntimeDiagnostics | FfiFeatureDuplexBrokerChannel,
+                    FfiFeatureSessionPreflight | FfiFeatureRuntimeDiagnostics | FfiFeatureDuplexBrokerChannel |
+                    FfiFeatureGeneratedBridgeAttachment,
                 PowerShell_Create = (IntPtr)(delegate* unmanaged<IntPtr*, FfiCallResult*, int>)&FfiPowerShell_Create,
                 PowerShell_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiPowerShell_Release,
                 PowerShell_AddArgumentUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, FfiCallResult*, int>)&FfiPowerShell_AddArgumentUtf8,
@@ -1217,7 +1220,8 @@ namespace NativeHost
                 ObservedDiagnosticPage_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiObservedDiagnosticPage_Release,
                 PowerShellSession_PreflightConfigured = (IntPtr)(delegate* unmanaged<uint, uint, uint, uint, uint, uint, uint, uint, uint, byte*, int, byte*, int, byte*, int, byte*, int, byte*, int, byte*, int, int*, FfiCallResult*, int>)&FfiPowerShellSession_PreflightConfigured,
                 RuntimeDiagnostics_CopyPowerShellFileVersionUtf8 = (IntPtr)(delegate* unmanaged<byte*, int, int*, int*, FfiCallResult*, int>)&FfiRuntimeDiagnostics_CopyPowerShellFileVersionUtf8,
-            PowerShell_SetBrokerContext = (IntPtr)(delegate* unmanaged<IntPtr, ulong, ulong, IntPtr, IntPtr, uint, FfiCallResult*, int>)&FfiPowerShell_SetBrokerContext,
+                PowerShell_SetBrokerContext = (IntPtr)(delegate* unmanaged<IntPtr, ulong, ulong, IntPtr, IntPtr, uint, FfiCallResult*, int>)&FfiPowerShell_SetBrokerContext,
+                PowerShell_SetBridgeContext = (IntPtr)(delegate* unmanaged<IntPtr, ulong, ulong, ulong, ushort, ushort, uint, uint, byte*, int, FfiCallResult*, int>)&FfiPowerShell_SetBridgeContext,
             };
         }
 
@@ -2382,7 +2386,8 @@ namespace NativeHost
                     TakeCompletedInput(ptrHandle),
                     pipeline.Session,
                     pipeline.TakeCapabilityContext(),
-                    pipeline.TakeBrokerContext());
+                    pipeline.TakeBrokerContext(),
+                    pipeline.TakeBridgeContext());
                 try
                 {
                     liveInvocation.Start();
@@ -2425,6 +2430,7 @@ namespace NativeHost
                     pipeline.Session,
                     pipeline.TakeCapabilityContext(),
                     pipeline.TakeBrokerContext(),
+                    pipeline.TakeBridgeContext(),
                     typedResults);
                 try
                 {
@@ -2662,6 +2668,7 @@ namespace NativeHost
                     pipeline.Session,
                     pipeline.TakeCapabilityContext(),
                     pipeline.TakeBrokerContext(),
+                    pipeline.TakeBridgeContext(),
                     typedResults,
                     diagnostics);
                 try
@@ -3119,6 +3126,95 @@ namespace NativeHost
         }
 
         [UnmanagedCallersOnly]
+        public static unsafe int FfiPowerShell_SetBridgeContext(
+            IntPtr ptrHandle,
+            ulong bindingId,
+            ulong interfaceIdLow,
+            ulong interfaceIdHigh,
+            ushort majorVersion,
+            ushort minorVersion,
+            uint maximumRequestBytes,
+            uint maximumReplyBytes,
+            byte* variableName,
+            int variableNameLength,
+            FfiCallResult* result)
+        {
+            return Execute(result, () =>
+            {
+                FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                if (bindingId == 0 && interfaceIdLow == 0 && interfaceIdHigh == 0 &&
+                    majorVersion == 0 && minorVersion == 0 && maximumRequestBytes == 0 &&
+                    maximumReplyBytes == 0 && variableName == null && variableNameLength == 0)
+                {
+                    pipeline.ClearBridgeContext();
+                    return;
+                }
+
+                if (bindingId == 0 || (interfaceIdLow == 0 && interfaceIdHigh == 0) ||
+                    majorVersion == 0 || maximumRequestBytes == 0 || maximumReplyBytes == 0 ||
+                    variableName == null || variableNameLength is < 1 or > 64)
+                {
+                    throw new InvalidOperationException("Bridge context is invalid.");
+                }
+
+                string name = DecodeBridgeUtf8(variableName, variableNameLength);
+                if (!IsBridgeVariableName(name))
+                {
+                    throw new InvalidOperationException("Bridge variable name is invalid.");
+                }
+
+                FfiBrokerContext broker = pipeline.GetBrokerContext()
+                    ?? throw new InvalidOperationException("Bridge context requires an attached broker context.");
+                Span<byte> identity = stackalloc byte[16];
+                BinaryPrimitives.WriteUInt64LittleEndian(identity, interfaceIdLow);
+                BinaryPrimitives.WriteUInt64LittleEndian(identity[8..], interfaceIdHigh);
+                var contract = new PowerShellLiveObjectContract(
+                    new Guid(identity),
+                    majorVersion,
+                    minorVersion,
+                    PowerShellLiveObjectDirection.ConsumerToSession |
+                    PowerShellLiveObjectDirection.BridgeContract);
+                pipeline.SetBridgeContext(new FfiBridgeContext(
+                    name,
+                    contract,
+                    bindingId,
+                    maximumRequestBytes,
+                    maximumReplyBytes,
+                    broker));
+            });
+        }
+
+        private static bool IsBridgeVariableName(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length > 64 ||
+                !((value[0] >= 'A' && value[0] <= 'Z') ||
+                  (value[0] >= 'a' && value[0] <= 'z') ||
+                  value[0] == '_'))
+            {
+                return false;
+            }
+
+            for (int index = 1; index < value.Length; index++)
+            {
+                char current = value[index];
+                if (!((current >= 'A' && current <= 'Z') ||
+                      (current >= 'a' && current <= 'z') ||
+                      (current >= '0' && current <= '9') ||
+                      current == '_'))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static unsafe string DecodeBridgeUtf8(byte* value, int length)
+        {
+            return new UTF8Encoding(false, true).GetString(new ReadOnlySpan<byte>(value, length));
+        }
+
+        [UnmanagedCallersOnly]
         public static unsafe int FfiInvocationResult_Release(IntPtr ptrResultHandle, FfiCallResult* result)
         {
             if (!TryInitializeResult(result))
@@ -3566,6 +3662,7 @@ namespace NativeHost
             private int disposed;
             private FfiCapabilityContext capabilityContext;
             private FfiBrokerContext brokerContext;
+            private FfiBridgeContext bridgeContext;
 
             public FfiPowerShellPipeline(PowerShell powerShell, FfiPowerShellSession session)
             {
@@ -3616,9 +3713,36 @@ namespace NativeHost
                 return value;
             }
 
+            public FfiBrokerContext GetBrokerContext() => brokerContext;
+
             public void ClearBrokerContext()
             {
                 brokerContext = null;
+            }
+
+            public void SetBridgeContext(FfiBridgeContext value)
+            {
+                if (Volatile.Read(ref disposed) != 0)
+                {
+                    throw new ObjectDisposedException(nameof(FfiPowerShellPipeline));
+                }
+
+                bridgeContext?.Dispose();
+                bridgeContext = value ?? throw new ArgumentNullException(nameof(value));
+            }
+
+            public FfiBridgeContext TakeBridgeContext()
+            {
+                FfiBridgeContext value = bridgeContext;
+                bridgeContext = null;
+                return value;
+            }
+
+            public void ClearBridgeContext()
+            {
+                FfiBridgeContext value = bridgeContext;
+                bridgeContext = null;
+                value?.Dispose();
             }
 
             public void Dispose()
@@ -3630,6 +3754,7 @@ namespace NativeHost
 
                 try
                 {
+                    ClearBridgeContext();
                     PowerShell.Dispose();
                 }
                 finally
@@ -6816,13 +6941,18 @@ namespace NativeHost
 
             public byte[] Request(uint kind, byte[] body)
             {
+                return Request(kind, body, maximumBodyBytes);
+            }
+
+            public byte[] Request(uint kind, byte[] body, int replyCapacity)
+            {
                 body ??= Array.Empty<byte>();
-                if (body.Length > maximumBodyBytes)
+                if (body.Length > maximumBodyBytes || replyCapacity is < 1 or > 64 * 1024)
                 {
-                    throw new InvalidOperationException("The broker request body exceeds its bound.");
+                    throw new InvalidOperationException("The broker request bounds are invalid.");
                 }
 
-                byte[] reply = new byte[maximumBodyBytes];
+                byte[] reply = new byte[replyCapacity];
                 byte[] diagnostic = new byte[512];
                 fixed (byte* bodyPointer = body.Length == 0 ? new byte[1] : body)
                 fixed (byte* replyPointer = reply)
@@ -6932,6 +7062,156 @@ namespace NativeHost
             }
         }
 
+        private sealed class FfiBridgeContext : IDisposable
+        {
+            private readonly string variableName;
+            private readonly FfiLiveObjectLease lease;
+            private Runspace runspace;
+            private bool hadPreviousVariable;
+            private object previousValue;
+            private bool bound;
+            private bool disposed;
+
+            public FfiBridgeContext(
+                string variableName,
+                PowerShellLiveObjectContract contract,
+                ulong bindingId,
+                uint maximumRequestBytes,
+                uint maximumReplyBytes,
+                FfiBrokerContext broker)
+            {
+                this.variableName = variableName ?? throw new ArgumentNullException(nameof(variableName));
+                ArgumentNullException.ThrowIfNull(broker);
+                var sink = new FfiBridgeBrokerSink(
+                    contract,
+                    bindingId,
+                    maximumRequestBytes,
+                    maximumReplyBytes,
+                    (body, capacity) => broker.Request(
+                        PowerShellBridgeBrokerWire.RequestKind,
+                        body,
+                        capacity),
+                    body => broker.Post(PowerShellBridgeBrokerWire.EventKind, body));
+                try
+                {
+                    lease = FfiLiveObjectContracts.CreateBridgeBrokerLease(contract, sink);
+                    sink = null!;
+                }
+                finally
+                {
+                    sink?.Dispose();
+                }
+            }
+
+            public void Begin(Runspace target)
+            {
+                if (disposed)
+                {
+                    throw new ObjectDisposedException(nameof(FfiBridgeContext));
+                }
+
+                if (bound)
+                {
+                    throw new InvalidOperationException("The bridge context is already bound.");
+                }
+
+                runspace = target ?? throw new ArgumentNullException(nameof(target));
+                object value = lease.BeginInvocationBinding();
+                try
+                {
+                    PSVariable existing = runspace.SessionStateProxy.PSVariable.Get(variableName);
+                    hadPreviousVariable = existing is not null;
+                    previousValue = existing?.Value;
+                    runspace.SessionStateProxy.SetVariable(variableName, value);
+                    bound = true;
+                }
+                catch
+                {
+                    lease.EndInvocationBinding();
+                    throw;
+                }
+            }
+
+            public void End()
+            {
+                if (!bound)
+                {
+                    return;
+                }
+
+                bound = false;
+                Exception failure = null;
+                try
+                {
+                    lease.EndInvocationBinding();
+                }
+                catch (Exception exception)
+                {
+                    failure = exception;
+                }
+                finally
+                {
+                    RestoreVariable(runspace, variableName, hadPreviousVariable, previousValue);
+                    runspace = null!;
+                    previousValue = null;
+                }
+
+                if (failure is not null)
+                {
+                    throw failure;
+                }
+            }
+
+            public void Dispose()
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                disposed = true;
+                Exception failure = null;
+                try
+                {
+                    End();
+                }
+                catch (Exception exception)
+                {
+                    failure = exception;
+                }
+                finally
+                {
+                    lease.Dispose();
+                }
+
+                if (failure is not null)
+                {
+                    throw failure;
+                }
+            }
+
+            private static void RestoreVariable(
+                Runspace target,
+                string name,
+                bool hadPrevious,
+                object previous)
+            {
+                if (target is null)
+                {
+                    return;
+                }
+
+                if (hadPrevious)
+                {
+                    target.SessionStateProxy.SetVariable(name, previous);
+                }
+                else
+                {
+                    target.SessionStateProxy.PSVariable.Remove(name);
+                }
+            }
+        }
+
         private sealed class FfiLiveInvocation : IDisposable
         {
             private readonly object gate = new object();
@@ -6953,6 +7233,7 @@ namespace NativeHost
             private EventHandler<DataAddedEventArgs> informationAdded;
             private EventHandler<DataAddedEventArgs> progressAdded;
             private readonly FfiBrokerContext brokerContext;
+            private readonly FfiBridgeContext bridgeContext;
             private Runspace capabilityRunspace;
             private bool hadPreviousCapabilityVariable;
             private object previousCapabilityValue;
@@ -6973,6 +7254,7 @@ namespace NativeHost
                 FfiPowerShellSession session,
                 FfiCapabilityContext capabilityContext,
                 FfiBrokerContext brokerContext = null,
+                FfiBridgeContext bridgeContext = null,
                 FfiTypedResultQueue typedResults = null,
                 FfiObservedDiagnosticQueue observedDiagnostics = null)
             {
@@ -6981,6 +7263,7 @@ namespace NativeHost
                 this.session = session;
                 this.capabilityContext = capabilityContext;
                 this.brokerContext = brokerContext;
+                this.bridgeContext = bridgeContext;
                 this.typedResults = typedResults;
                 this.observedDiagnostics = observedDiagnostics;
             }
@@ -7042,7 +7325,7 @@ namespace NativeHost
                             "DpsCapabilities",
                             new FfiCapabilityBridge(capabilityContext));
                     }
-                    if (brokerContext != null)
+                    if (brokerContext != null && bridgeContext is null)
                     {
                         brokerRunspace = powerShell.Runspace ?? throw new InvalidOperationException(
                             "The duplex broker channel requires a PowerShell pipeline with an explicit local runspace.");
@@ -7053,6 +7336,12 @@ namespace NativeHost
                         brokerRunspace.SessionStateProxy.SetVariable(
                             "DpsBroker",
                             new FfiBrokerBridge(brokerContext));
+                    }
+                    if (bridgeContext != null)
+                    {
+                        Runspace bridgeRunspace = powerShell.Runspace ?? throw new InvalidOperationException(
+                            "The generated bridge requires a PowerShell pipeline with an explicit local runspace.");
+                        bridgeContext.Begin(bridgeRunspace);
                     }
 
                     if (input == null)
@@ -7401,10 +7690,17 @@ namespace NativeHost
                         }
                         finally
                         {
-                            if (sessionInvocationStarted)
+                            try
                             {
-                                session.EndInvocation(terminatingException != null);
-                                sessionInvocationStarted = false;
+                                bridgeContext?.Dispose();
+                            }
+                            finally
+                            {
+                                if (sessionInvocationStarted)
+                                {
+                                    session.EndInvocation(terminatingException != null);
+                                    sessionInvocationStarted = false;
+                                }
                             }
                         }
                     }

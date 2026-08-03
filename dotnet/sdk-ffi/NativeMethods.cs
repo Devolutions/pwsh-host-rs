@@ -882,4 +882,19 @@ internal static unsafe partial class NativeMethods
         ulong builderHandle,
         ulong channelHandle,
         NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_set_bridge")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int SetBridge(
+        ulong builderHandle,
+        ulong channelHandle,
+        ulong bindingId,
+        ulong contractIdLow,
+        ulong contractIdHigh,
+        ushort contractMajorVersion,
+        ushort contractMinorVersion,
+        uint maximumRequestBytes,
+        uint maximumReplyBytes,
+        NativeUtf8Span variableName,
+        NativeCallResult* result);
 }
