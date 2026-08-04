@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Devolutions.MultiPwsh.BridgeTest;
+using Devolutions.MultiPwsh.FiniteOperationTest;
 using Devolutions.PowerShell.Ffi;
 using Devolutions.PowerShell.Ffi.LiveObjects;
 using NativeAotFfiSample;
@@ -18,6 +19,9 @@ string incompatibleContractPackPath = System.IO.Path.Combine(
 string bridgeContractPackPath = System.IO.Path.Combine(
     AppContext.BaseDirectory,
     "Devolutions.MultiPwsh.BridgeContract.TestPack.dll");
+string finiteOperationContractPackPath = System.IO.Path.Combine(
+    AppContext.BaseDirectory,
+    "Devolutions.MultiPwsh.FiniteOperation.TestPack.dll");
 if (!System.IO.File.Exists(contractPackPath))
 {
     Console.Error.WriteLine("NativeAOT facade did not publish the external live-object contract pack.");
@@ -31,6 +35,11 @@ if (!System.IO.File.Exists(incompatibleContractPackPath))
 if (!System.IO.File.Exists(bridgeContractPackPath))
 {
     Console.Error.WriteLine("NativeAOT facade did not publish the bridge contract test pack.");
+    return 1;
+}
+if (!System.IO.File.Exists(finiteOperationContractPackPath))
+{
+    Console.Error.WriteLine("NativeAOT facade did not publish the finite-operation test pack.");
     return 1;
 }
 
@@ -49,6 +58,9 @@ PowerShellLiveObjectContractPack[] contractPacks =
     new PowerShellLiveObjectContractPack(
         bridgeContractPackPath,
         "Devolutions.MultiPwsh.BridgeTest.BridgeContractTestPack, Devolutions.MultiPwsh.BridgeContract.TestPack"),
+    new PowerShellLiveObjectContractPack(
+        finiteOperationContractPackPath,
+        "Devolutions.MultiPwsh.FiniteOperationTest.FiniteOperationTestPack, Devolutions.MultiPwsh.FiniteOperation.TestPack"),
 ];
 
 if (args.Length == 2 && args[1].StartsWith("--expect-rejected-contract-pack:", StringComparison.Ordinal))
@@ -998,6 +1010,10 @@ if (!BrokerChannelSmoke.Run(runtime))
 }
 
 if (!BridgeAttachmentSmoke.Run(runtime))
+{
+    return 1;
+}
+if (!FiniteOperationAttachmentSmoke.Run(runtime))
 {
     return 1;
 }

@@ -55,6 +55,7 @@ BridgeContractTests.Run(RunBridgeGenerators, AssertNoErrors);
 BridgeWireTests.Run();
 BridgeRoundTripTests.Run(CompileBridgeAssembly);
 BridgeFiniteOperationLeaseTests.Run();
+FiniteOperationTests.Run();
 
 Console.WriteLine("live-contract and bridge-contract generator fixtures passed");
 
