@@ -337,6 +337,10 @@ jobs:
               "--expect-rejected-contract-pack:$contractPackFixture"
             if ($LASTEXITCODE -ne 0) { throw "The '$contractPackFixture' contract-pack rejection sample failed with exit code $LASTEXITCODE." }
           }
+          & dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe `
+            $payloadDirectory `
+            '--expect-bridge-setup-failure-cleans-broker'
+          if ($LASTEXITCODE -ne 0) { throw 'The bridge setup failure cleanup sample failed.' }
 
       - name: Dry-run pack NativeAOT SDK
         shell: pwsh

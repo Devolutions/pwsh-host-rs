@@ -336,6 +336,44 @@ internal static class BridgeAttachmentSmoke
         return true;
     }
 
+    internal static bool VerifyFailedBridgeSetupClearsBrokerContext(PowerShellRuntime runtime)
+    {
+        using PowerShellBridgeChannel channel = runtime.CreateBridgeChannel(
+            new PowerShellBrokerChannelOptions(
+                maximumInflightFrames: 8,
+                maximumBodyBytes: 4096,
+                defaultDeadline: TimeSpan.FromSeconds(5)));
+        using var host = new BridgeTestCountHost(41);
+        using PowerShellBridgeBinding binding = channel.CreateBinding(host.Dispatcher);
+        using PowerShell command = runtime.Create();
+
+        command.AddScript("'bridge setup should fail'").WithBridge(binding, "RDM");
+        try
+        {
+            _ = command.InvokeAsync(CancellationToken.None).GetAwaiter().GetResult();
+            Console.Error.WriteLine("NativeAOT generated bridge setup unexpectedly succeeded without its payload contract pack.");
+            return false;
+        }
+        catch (PowerShellFfiException)
+        {
+        }
+
+        PowerShellInvocationResult output = command
+            .Clear()
+            .AddScript("if ($null -eq $DpsBroker) { 'cleared' } else { 'stale' }")
+            .InvokeAsync(CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        if (output.Output.Records.Count != 1 ||
+            output.Output.Records[0].DisplayText != "cleared")
+        {
+            Console.Error.WriteLine("NativeAOT generated bridge setup left a stale broker context on its reused builder.");
+            return false;
+        }
+
+        return true;
+    }
+
     private static bool VerifyCancellationAndLateReply(PowerShellRuntime runtime)
     {
         using var channel = runtime.CreateBridgeChannel(

@@ -121,6 +121,15 @@ if (args.Length == 2 && args[1].StartsWith("--expect-rejected-contract-pack:", S
     return 1;
 }
 
+if (args.Length == 2 &&
+    args[1].Equals("--expect-bridge-setup-failure-cleans-broker", StringComparison.Ordinal))
+{
+    PowerShellRuntime runtimeWithoutBridgePack = PowerShellRuntime.Activate(args[0], [contractPacks[0]]);
+    return BridgeAttachmentSmoke.VerifyFailedBridgeSetupClearsBrokerContext(runtimeWithoutBridgePack)
+        ? 0
+        : 1;
+}
+
 PowerShellRuntime runtime;
 switch (args.Length)
 {

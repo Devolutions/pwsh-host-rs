@@ -103,6 +103,7 @@ const VALUE_KIND_PROPERTY_BAG: u32 = 14;
 const CAPABILITY_REGISTRATION_VERSION: u32 = 1;
 const MAX_CAPABILITIES: usize = 16;
 const MAX_CAPABILITY_NAME_BYTES: usize = 64;
+const MAX_BRIDGE_VARIABLE_NAME_BYTES: usize = 64;
 const MAX_CAPABILITY_DEADLINE_MILLISECONDS: u32 = 30_000;
 const MAX_CAPABILITY_PERMISSIONS: u32 = 0x0f;
 const MAX_LIVE_OBJECT_CONTRACT_PACKS: usize = 16;
@@ -2291,6 +2292,7 @@ fn configure_broker(session: &Session, attachment: Option<&Arc<BrokerAttachment>
             variable_name: &bridge.variable_name,
         });
         if let Err(error) = configured {
+            clear_broker_context(session);
             finish_broker(session, Some(attachment));
             return Err(error);
         }
@@ -4971,6 +4973,10 @@ fn set_bridge(handle: u64, channel_handle: u64, bridge: BridgeAttachment) -> Res
 }
 
 fn is_valid_bridge_variable_name(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_BRIDGE_VARIABLE_NAME_BYTES {
+        return false;
+    }
+
     let mut characters = value.bytes();
     let Some(first) = characters.next() else {
         return false;
@@ -5024,6 +5030,16 @@ fn set_active_broker(session: &Session, attachment: Option<Arc<BrokerAttachment>
         .active_broker
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = attachment;
+}
+
+fn clear_broker_context(session: &Session) {
+    // Bridge setup can fail after the broker context is installed but before an
+    // invocation consumes it. Clear the managed slot before deactivating Rust state.
+    let _ = unsafe {
+        session
+            .power_shell
+            .set_broker_context(0, 0, std::ptr::null(), std::ptr::null(), 0)
+    };
 }
 
 fn finish_broker(session: &Session, attachment: Option<&Arc<BrokerAttachment>>) {
@@ -7104,8 +7120,7 @@ pub unsafe extern "C" fn multi_pwsh_set_bridge(
     result: *mut CallResult,
 ) -> i32 {
     v2_call(result, || {
-        let variable_name = utf8_span(variable_name)
-            .map_err(|status| (status, "bridge variable name is not valid UTF-8".to_owned()))?;
+        let variable_name = bridge_variable_name_input(variable_name)?;
         set_bridge(
             handle,
             channel_handle,
@@ -7121,6 +7136,25 @@ pub unsafe extern "C" fn multi_pwsh_set_bridge(
             },
         )
     })
+}
+
+unsafe fn bridge_variable_name_input<'a>(value: Utf8Span) -> Result<&'a str, (Status, String)> {
+    if value.len > MAX_BRIDGE_VARIABLE_NAME_BYTES {
+        return Err((
+            Status::InvalidArgument,
+            "bridge variable name exceeds 64 UTF-8 bytes".to_owned(),
+        ));
+    }
+
+    let value = utf8_span(value).map_err(|status| (status, "bridge variable name is not valid UTF-8".to_owned()))?;
+    if !is_valid_bridge_variable_name(value) {
+        return Err((
+            Status::InvalidArgument,
+            "bridge variable name must be a bounded ASCII identifier".to_owned(),
+        ));
+    }
+
+    Ok(value)
 }
 
 #[no_mangle]
@@ -11907,6 +11941,52 @@ mod tests {
             unsafe { data_value_input(&malformed) },
             Err((Status::InvalidArgument, _))
         ));
+    }
+
+    #[test]
+    fn bridge_variable_name_is_validated_before_attachment_copy() {
+        let oversized = [b'R'; MAX_BRIDGE_VARIABLE_NAME_BYTES + 1];
+        assert!(matches!(
+            unsafe {
+                bridge_variable_name_input(Utf8Span {
+                    data: oversized.as_ptr(),
+                    len: oversized.len(),
+                })
+            },
+            Err((Status::InvalidArgument, _))
+        ));
+
+        let maximum = [b'R'; MAX_BRIDGE_VARIABLE_NAME_BYTES];
+        assert!(unsafe {
+            bridge_variable_name_input(Utf8Span {
+                data: maximum.as_ptr(),
+                len: maximum.len(),
+            })
+        }
+        .is_ok());
+
+        let malformed = b"R-DM";
+        assert!(matches!(
+            unsafe {
+                bridge_variable_name_input(Utf8Span {
+                    data: malformed.as_ptr(),
+                    len: malformed.len(),
+                })
+            },
+            Err((Status::InvalidArgument, _))
+        ));
+
+        let valid = b"RDM";
+        assert_eq!(
+            unsafe {
+                bridge_variable_name_input(Utf8Span {
+                    data: valid.as_ptr(),
+                    len: valid.len(),
+                })
+            }
+            .unwrap(),
+            "RDM"
+        );
     }
 
     #[test]
