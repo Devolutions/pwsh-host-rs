@@ -177,6 +177,93 @@ public sealed unsafe class PowerShellObservedInvocation : IDisposable
             isComplete);
     }
 
+    /// <summary>
+    /// Acknowledges the prior diagnostic page and returns copied presentation records.
+    /// </summary>
+    /// <remarks>
+    /// This shares the diagnostic acknowledgement cursor with <see cref="ReadDiagnostics"/>.
+    /// Use one representation consistently for an invocation.
+    /// </remarks>
+    public PowerShellObservedPresentationPage ReadPresentation(ulong acknowledgedThrough, int? maximumRecords = null)
+    {
+        PowerShell.EnsureObservedPresentationSupported();
+        int limit = maximumRecords ?? maximumDiagnosticPageRecords;
+        if (limit < 1 || limit > maximumDiagnosticPageRecords)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumRecords));
+        }
+
+        using PowerShellObservedInvocationHandle.HandleLease lease = handle.Borrow();
+        byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+        NativeCallResult result = NativeCall.CreateResult(diagnostic);
+        ulong nativePageHandle = 0;
+        int status = NativeMethods.ReadObservedDiagnosticPage(
+            lease.Value,
+            acknowledgedThrough,
+            checked((uint)limit),
+            &nativePageHandle,
+            &result);
+        NativeCall.ThrowIfFailed(status, result, diagnostic);
+        if (nativePageHandle == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned an invalid observed presentation page handle.");
+        }
+
+        using var pageHandle = new PowerShellObservedDiagnosticPageHandle(nativePageHandle);
+        NativeTypedResultPageInfo info = ReadPageInfo(pageHandle.Value, diagnostic, isDiagnostic: true);
+        ValidatePageInfo(info, acknowledgedThrough, checked((uint)limit), isDiagnostic: true);
+
+        bool isTerminal = (info.Flags & Terminal) != 0;
+        bool isComplete = (info.Flags & Complete) != 0;
+        var records = new PowerShellObservedPresentationRecord[checked((int)info.RecordCount)];
+        ulong previousSequence = info.AcknowledgedSequence;
+        for (uint index = 0; index < info.RecordCount; index++)
+        {
+            uint stream = 0;
+            ulong sequence = 0;
+            result = NativeCall.CreateResult(diagnostic);
+            status = NativeMethods.GetObservedDiagnosticPageRecordInfo(
+                pageHandle.Value,
+                index,
+                &stream,
+                &sequence,
+                &result);
+            NativeCall.ThrowIfFailed(status, result, diagnostic);
+            if (!Enum.IsDefined((PowerShellStreamKind)stream) ||
+                sequence <= previousSequence ||
+                sequence > info.NextSequence)
+            {
+                throw new PowerShellFfiException(
+                    PowerShellFfiStatus.ManagedFailure,
+                    "Native PowerShell FFI returned unordered observed presentation records.");
+            }
+
+            PowerShellStreamKind streamKind = (PowerShellStreamKind)stream;
+            string text = ReadDiagnosticText(pageHandle.Value, index, diagnostic);
+            PowerShellProgressUpdate? progress = streamKind == PowerShellStreamKind.Progress
+                ? ReadDiagnosticProgress(pageHandle.Value, index, diagnostic)
+                : null;
+            records[checked((int)index)] = new PowerShellObservedPresentationRecord(
+                streamKind,
+                sequence,
+                text,
+                progress);
+            previousSequence = sequence;
+        }
+
+        ValidatePageCursor(records.Length, previousSequence, info, "observed presentation");
+        return new PowerShellObservedPresentationPage(
+            records,
+            info.AcknowledgedSequence,
+            info.NextSequence,
+            info.TotalRecordCount,
+            (PowerShellFfiStatus)info.TerminalStatus,
+            isTerminal,
+            isComplete);
+    }
+
     public void Stop()
     {
         PowerShell.EnsureObservedInvocationSupported();
@@ -304,5 +391,71 @@ public sealed unsafe class PowerShellObservedInvocation : IDisposable
         }
 
         return Encoding.UTF8.GetString(text);
+    }
+
+    private static PowerShellProgressUpdate ReadDiagnosticProgress(
+        ulong pageHandle,
+        uint recordIndex,
+        byte* diagnostic)
+    {
+        uint kind = 0;
+        nuint requiredLength = 0;
+        NativeCallResult result = NativeCall.CreateResult(diagnostic);
+        int status = NativeMethods.CopyObservedDiagnosticPageRecordValue(
+            pageHandle,
+            recordIndex,
+            &kind,
+            null,
+            0,
+            &requiredLength,
+            &result);
+        if (status != (int)PowerShellFfiStatus.Success &&
+            status != (int)PowerShellFfiStatus.BufferTooSmall)
+        {
+            NativeCall.ThrowIfFailed(status, result, diagnostic);
+        }
+
+        if (!Enum.IsDefined((PowerShellValueKind)kind) ||
+            requiredLength > PowerShellValue.MaximumPayloadLength)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned an invalid observed progress value.");
+        }
+
+        byte[] payload = new byte[checked((int)requiredLength)];
+        fixed (byte* payloadPointer = payload)
+        {
+            result = NativeCall.CreateResult(diagnostic);
+            status = NativeMethods.CopyObservedDiagnosticPageRecordValue(
+                pageHandle,
+                recordIndex,
+                &kind,
+                payloadPointer,
+                (nuint)payload.Length,
+                &requiredLength,
+                &result);
+            NativeCall.ThrowIfFailed(status, result, diagnostic);
+        }
+
+        if (requiredLength != (nuint)payload.Length ||
+            kind != (uint)PowerShellValueKind.PropertyBag)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned an invalid observed progress payload.");
+        }
+
+        try
+        {
+            return PowerShellHostInteraction.ParseProgressUpdate(
+                PowerShellValue.FromNative(kind, payload));
+        }
+        catch (ArgumentException)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned an invalid observed progress payload.");
+        }
     }
 }

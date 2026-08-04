@@ -71,6 +71,7 @@ namespace NativeHost
         private const ulong FfiFeatureDuplexBrokerChannel = 1UL << 25;
         private const ulong FfiFeatureGeneratedBridgeAttachment = 1UL << 26;
         private const ulong FfiFeatureReliableBridgeEvents = 1UL << 28;
+        private const ulong FfiFeatureObservedPresentation = 1UL << 29;
         private const uint FfiTypedResultPageTerminal = 1;
         private const uint FfiTypedResultPageTruncated = 1 << 1;
         private const uint FfiTypedResultPageComplete = 1 << 2;
@@ -206,6 +207,7 @@ namespace NativeHost
             public IntPtr RuntimeDiagnostics_CopyPowerShellFileVersionUtf8;
             public IntPtr PowerShell_SetBrokerContext;
             public IntPtr PowerShell_SetBridgeContext;
+            public IntPtr ObservedDiagnosticPage_CopyRecordValue;
         }
 
         private const int FfiPreflightMaximumTextLength = 128;
@@ -1137,7 +1139,8 @@ namespace NativeHost
                     FfiFeatureLiveObjectProbe | FfiFeatureLiveSessionObjectProbe | FfiFeatureLiveObjectContracts |
                     FfiFeatureLiveStreamPolling | FfiFeatureTypedResultPaging | FfiFeatureObservedInvocation |
                     FfiFeatureSessionPreflight | FfiFeatureRuntimeDiagnostics | FfiFeatureDuplexBrokerChannel |
-                    FfiFeatureGeneratedBridgeAttachment | FfiFeatureReliableBridgeEvents,
+                    FfiFeatureGeneratedBridgeAttachment | FfiFeatureReliableBridgeEvents |
+                    FfiFeatureObservedPresentation,
                 PowerShell_Create = (IntPtr)(delegate* unmanaged<IntPtr*, FfiCallResult*, int>)&FfiPowerShell_Create,
                 PowerShell_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiPowerShell_Release,
                 PowerShell_AddArgumentUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, FfiCallResult*, int>)&FfiPowerShell_AddArgumentUtf8,
@@ -1223,6 +1226,7 @@ namespace NativeHost
                 RuntimeDiagnostics_CopyPowerShellFileVersionUtf8 = (IntPtr)(delegate* unmanaged<byte*, int, int*, int*, FfiCallResult*, int>)&FfiRuntimeDiagnostics_CopyPowerShellFileVersionUtf8,
                 PowerShell_SetBrokerContext = (IntPtr)(delegate* unmanaged<IntPtr, ulong, ulong, IntPtr, IntPtr, uint, FfiCallResult*, int>)&FfiPowerShell_SetBrokerContext,
                 PowerShell_SetBridgeContext = (IntPtr)(delegate* unmanaged<IntPtr, ulong, ulong, ulong, ushort, ushort, uint, uint, byte*, int, FfiCallResult*, int>)&FfiPowerShell_SetBridgeContext,
+                ObservedDiagnosticPage_CopyRecordValue = (IntPtr)(delegate* unmanaged<IntPtr, int, uint*, byte*, int, int*, FfiCallResult*, int>)&FfiObservedDiagnosticPage_CopyRecordValue,
             };
         }
 
@@ -2878,6 +2882,43 @@ namespace NativeHost
                 {
                     byte[] valueBytes = Encoding.UTF8.GetBytes(value);
                     Marshal.Copy(valueBytes, 0, outputBuffer, required);
+                }
+            }, bufferTooSmallIsSuccess: true);
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiObservedDiagnosticPage_CopyRecordValue(
+            IntPtr ptrPageHandle,
+            int recordIndex,
+            uint* kind,
+            byte* buffer,
+            int bufferLength,
+            int* requiredLength,
+            FfiCallResult* result)
+        {
+            if (kind == null || requiredLength == null || bufferLength < 0)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Observed diagnostic page value buffer arguments are invalid.");
+            }
+
+            IntPtr outputBuffer = (IntPtr)buffer;
+            IntPtr outputKind = (IntPtr)kind;
+            IntPtr outputRequiredLength = (IntPtr)requiredLength;
+            return Execute(result, () =>
+            {
+                FfiSnapshotValue value = GetObservedDiagnosticPage(ptrPageHandle).GetRecord(recordIndex).Value
+                    ?? throw new InvalidOperationException("Observed diagnostic record has no copied value.");
+                Marshal.WriteInt32(outputKind, unchecked((int)value.Kind));
+                int required = value.Payload.Length;
+                Marshal.WriteInt32(outputRequiredLength, required);
+                if (bufferLength < required)
+                {
+                    throw new BufferTooSmallException();
+                }
+
+                if (required > 0)
+                {
+                    Marshal.Copy(value.Payload, 0, outputBuffer, required);
                 }
             }, bufferTooSmallIsSuccess: true);
         }
@@ -5582,11 +5623,12 @@ namespace NativeHost
 
         private sealed class FfiObservedDiagnosticRecord
         {
-            public FfiObservedDiagnosticRecord(int stream, long sequence, string text)
+            public FfiObservedDiagnosticRecord(int stream, long sequence, string text, FfiSnapshotValue value)
             {
                 Stream = stream;
                 Sequence = sequence;
                 Text = text;
+                Value = value;
             }
 
             public int Stream { get; }
@@ -5594,6 +5636,8 @@ namespace NativeHost
             public long Sequence { get; }
 
             public string Text { get; }
+
+            public FfiSnapshotValue Value { get; }
         }
 
         private sealed class FfiObservedDiagnosticPage
@@ -5868,10 +5912,12 @@ namespace NativeHost
                 records = new Queue<FfiObservedDiagnosticRecord>(maximumBufferedRecords);
             }
 
-            public bool Write(int stream, string text)
+            public bool Write(int stream, string text, FfiSnapshotValue value)
             {
                 if (stream < 0 || stream >= FfiStreamCount || text is null ||
-                    Encoding.UTF8.GetByteCount(text) > FfiMaxValuePayloadLength)
+                    Encoding.UTF8.GetByteCount(text) > FfiMaxValuePayloadLength ||
+                    (value is not null && (value.Kind != (uint)FfiValueKind.PropertyBag ||
+                                           value.Payload.Length > FfiMaxValuePayloadLength)))
                 {
                     Fail(FfiStatusUnsupportedValue);
                     return false;
@@ -5898,7 +5944,8 @@ namespace NativeHost
                     records.Enqueue(new FfiObservedDiagnosticRecord(
                         stream,
                         nextSequence++,
-                        text));
+                        text,
+                        value));
                     totalRecordCount++;
                     Monitor.PulseAll(gate);
                     return true;
@@ -7602,12 +7649,64 @@ namespace NativeHost
                 try
                 {
                     string text = record?.ToString() ?? string.Empty;
-                    _ = observedDiagnostics.Write((int)stream, text);
+                    FfiSnapshotValue progress = null;
+                    if (stream == FfiStreamKind.Progress &&
+                        !TryEncodeObservedProgress(record as ProgressRecord, out progress))
+                    {
+                        observedDiagnostics.Fail(FfiStatusUnsupportedValue);
+                        return;
+                    }
+
+                    _ = observedDiagnostics.Write((int)stream, text, progress);
                 }
                 catch
                 {
                     observedDiagnostics.Fail(FfiStatusUnsupportedValue);
                 }
+            }
+
+            private static bool TryEncodeObservedProgress(ProgressRecord progress, out FfiSnapshotValue value)
+            {
+                value = null;
+                if (progress is null ||
+                    progress.ActivityId < 0 ||
+                    progress.ParentActivityId < -1 ||
+                    progress.PercentComplete is < -1 or > 100 ||
+                    progress.SecondsRemaining < -1 ||
+                    !IsObservedProgressText(progress.Activity, 512) ||
+                    !IsObservedProgressText(progress.StatusDescription, 1024) ||
+                    !IsObservedProgressText(progress.CurrentOperation, 1024))
+                {
+                    return false;
+                }
+
+                var propertyBag = new PSObject();
+                propertyBag.Properties.Add(new PSNoteProperty("ActivityId", (long)progress.ActivityId));
+                propertyBag.Properties.Add(new PSNoteProperty("ParentActivityId", (long)progress.ParentActivityId));
+                propertyBag.Properties.Add(new PSNoteProperty("Activity", progress.Activity ?? string.Empty));
+                if (progress.StatusDescription is not null)
+                {
+                    propertyBag.Properties.Add(new PSNoteProperty("StatusDescription", progress.StatusDescription));
+                }
+
+                if (progress.CurrentOperation is not null)
+                {
+                    propertyBag.Properties.Add(new PSNoteProperty("CurrentOperation", progress.CurrentOperation));
+                }
+
+                propertyBag.Properties.Add(new PSNoteProperty("PercentComplete", (long)progress.PercentComplete));
+                propertyBag.Properties.Add(new PSNoteProperty("SecondsRemaining", (long)progress.SecondsRemaining));
+                propertyBag.Properties.Add(new PSNoteProperty(
+                    "IsCompleted",
+                    progress.RecordType == ProgressRecordType.Completed));
+                return FfiSnapshotCollector.TryEncodeCopiedValue(propertyBag, depth: 0, out value) &&
+                    value.Kind == (uint)FfiValueKind.PropertyBag &&
+                    value.Payload.Length <= FfiMaxValuePayloadLength;
+            }
+
+            private static bool IsObservedProgressText(string value, int maximumLength)
+            {
+                return value is null || value.Length <= maximumLength;
             }
 
             private static bool TryEncodeTypedResultValue(PSObject value, out FfiSnapshotValue typedValue)

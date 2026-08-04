@@ -704,6 +704,17 @@ internal static unsafe partial class NativeMethods
         nuint* requiredLength,
         NativeCallResult* result);
 
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_observed_diagnostic_page_copy_record_value")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CopyObservedDiagnosticPageRecordValue(
+        ulong pageHandle,
+        uint recordIndex,
+        uint* kind,
+        byte* buffer,
+        nuint bufferLength,
+        nuint* requiredLength,
+        NativeCallResult* result);
+
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_observed_diagnostic_page_release")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int ReleaseObservedDiagnosticPage(ulong pageHandle, NativeCallResult* result);

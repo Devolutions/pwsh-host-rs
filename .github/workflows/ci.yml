@@ -322,6 +322,9 @@ jobs:
           if (-not ($sampleOutput | Where-Object { $_ -eq 'NativeAOT generated bridge attachment: Success' })) {
             throw 'The NativeAOT SDK sample did not execute the generated bridge attachment smoke.'
           }
+          if (-not ($sampleOutput | Where-Object { $_ -eq 'NativeAOT observed presentation: Success' })) {
+            throw 'The NativeAOT SDK sample did not execute the observed presentation smoke.'
+          }
           foreach ($contractPackFixture in @(
             'duplicate-across-packs',
             'duplicate-within-pack',

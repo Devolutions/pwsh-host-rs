@@ -23,6 +23,7 @@ bindings:FfiLiveObjectContractPack_RegisterMany
 bindings:FfiLiveObjectProbe_Create
 bindings:FfiLiveObjectProbe_Release
 bindings:FfiLiveObjectProbe_Unregister
+bindings:FfiObservedDiagnosticPage_CopyRecordValue
 bindings:FfiObservedDiagnosticPage_CopyRecordTextToUtf8
 bindings:FfiObservedDiagnosticPage_GetInfo
 bindings:FfiObservedDiagnosticPage_GetRecordInfo
@@ -275,6 +276,7 @@ facade:method:Devolutions.PowerShell.Ffi.PowerShellLiveObject`1::Void Dispose()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe::Int64 Increment()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe::Void Dispose()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage ReadDiagnostics(UInt64, System.Nullable`1[System.Int32])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage ReadPresentation(UInt64, System.Nullable`1[System.Int32])
 facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Devolutions.PowerShell.Ffi.PowerShellValuePage ReadResults(UInt64, System.Nullable`1[System.Int32])
 facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Void Dispose()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Void Stop()
@@ -492,6 +494,17 @@ facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions::
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions::Int32 MaximumBufferedResultRecords
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions::Int32 MaximumDiagnosticPageRecords
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions::Int32 MaximumResultPageRecords
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::Boolean IsComplete
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::Boolean IsTerminal
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::Devolutions.PowerShell.Ffi.PowerShellFfiStatus TerminalStatus
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellObservedPresentationRecord] Records
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::UInt64 AcknowledgedSequence
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::UInt64 NextSequence
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::UInt64 TotalRecordCount
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationRecord::Devolutions.PowerShell.Ffi.PowerShellProgressUpdate Progress
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationRecord::Devolutions.PowerShell.Ffi.PowerShellStreamKind Stream
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationRecord::System.String Text
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationRecord::UInt64 Sequence
 facade:property:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate::Boolean IsCompleted
 facade:property:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate::Int32 PercentComplete
 facade:property:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate::Int64 ActivityId
@@ -647,6 +660,8 @@ facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage
 facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticRecord
 facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation
 facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions
+facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage
+facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationRecord
 facade:type:Devolutions.PowerShell.Ffi.PowerShellOperationState
 facade:type:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate
 facade:type:Devolutions.PowerShell.Ffi.PowerShellResultSchema
@@ -726,6 +741,7 @@ native:multi_pwsh_live_object_probe_create
 native:multi_pwsh_live_object_probe_release
 native:multi_pwsh_live_object_probe_unregister
 native:multi_pwsh_observed_diagnostic_page_copy_record_text_utf8
+native:multi_pwsh_observed_diagnostic_page_copy_record_value
 native:multi_pwsh_observed_diagnostic_page_get_info
 native:multi_pwsh_observed_diagnostic_page_get_record_info
 native:multi_pwsh_observed_diagnostic_page_release

@@ -53,6 +53,7 @@ const FEATURE_DUPLEX_BROKER_CHANNEL: u64 = 1 << 25;
 const FEATURE_GENERATED_BRIDGE_ATTACHMENT: u64 = 1 << 26;
 const FEATURE_BROKER_TERMINAL_OBSERVATION: u64 = 1 << 27;
 const FEATURE_RELIABLE_BRIDGE_EVENTS: u64 = 1 << 28;
+const FEATURE_OBSERVED_PRESENTATION: u64 = 1 << 29;
 const CALL_RESULT_DIAGNOSTIC_TRUNCATED: u32 = 1;
 #[cfg(test)]
 const RESULT_RECORD_SCALAR_VALUE_PRESENT: u32 = 1 << 1;
@@ -6234,6 +6235,7 @@ fn feature_flags() -> u64 {
         | FEATURE_GENERATED_BRIDGE_ATTACHMENT
         | FEATURE_BROKER_TERMINAL_OBSERVATION
         | FEATURE_RELIABLE_BRIDGE_EVENTS
+        | FEATURE_OBSERVED_PRESENTATION
 }
 
 fn create_live_object_probe(initial_count: i64) -> Result<*mut std::ffi::c_void, (Status, String)> {
@@ -8012,6 +8014,56 @@ pub unsafe extern "C" fn multi_pwsh_observed_diagnostic_page_copy_record_text_ut
             match unsafe { write_utf8(buffer, buffer_len, required_len, &record.text) } {
                 Status::Success => Ok(Status::Success),
                 status => Err((status, "observed diagnostic text buffer is invalid".to_owned())),
+            }
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_observed_diagnostic_page_copy_record_value(
+    page_handle: u64,
+    record_index: u32,
+    kind: *mut u32,
+    buffer: *mut u8,
+    buffer_len: usize,
+    required_len: *mut usize,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        if kind.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "observed diagnostic value kind output pointer is null".to_owned(),
+            ));
+        }
+        with_observed_diagnostic_page(page_handle, |page| {
+            let record = page.records.get(record_index as usize).ok_or_else(|| {
+                (
+                    Status::InvalidArgument,
+                    "observed diagnostic page record index is invalid".to_owned(),
+                )
+            })?;
+            let value = record.value.as_ref().ok_or_else(|| {
+                (
+                    Status::UnsupportedValue,
+                    "observed diagnostic record has no copied value".to_owned(),
+                )
+            })?;
+            if value.kind != VALUE_KIND_PROPERTY_BAG || value.payload.len() > MAX_TYPED_RESULT_PAYLOAD_BYTES {
+                return Err((
+                    Status::ManagedFailure,
+                    "observed progress value exceeds its fixed bounds".to_owned(),
+                ));
+            }
+            *kind = value.kind;
+            match write_bytes(buffer, buffer_len, required_len, &value.payload) {
+                Status::Success => Ok(Status::Success),
+                Status::BufferTooSmall => Ok(Status::BufferTooSmall),
+                Status::InvalidArgument => Err((
+                    Status::InvalidArgument,
+                    "observed progress value buffer arguments are invalid".to_owned(),
+                )),
+                _ => unreachable!(),
             }
         })
     })
@@ -10111,7 +10163,8 @@ mod tests {
             | FEATURE_DUPLEX_BROKER_CHANNEL
             | FEATURE_GENERATED_BRIDGE_ATTACHMENT
             | FEATURE_BROKER_TERMINAL_OBSERVATION
-            | FEATURE_RELIABLE_BRIDGE_EVENTS;
+            | FEATURE_RELIABLE_BRIDGE_EVENTS
+            | FEATURE_OBSERVED_PRESENTATION;
 
         assert_eq!(ABI_VERSION, 2);
         assert_eq!(MINIMUM_COMPATIBLE_ABI_VERSION, 2);

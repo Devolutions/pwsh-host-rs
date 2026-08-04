@@ -192,14 +192,17 @@ A session-affine dispatcher is required before supporting that category.
   asset that lacks polling before calling its additive export.
 - Generated Bridge Contract v2 attachment requires feature bit 26, bounded
   broker terminal observation requires bit 27, and retained generated bridge
-  events require bit 28. Bit 28 adds no native export and no second payload
-  table: it makes the V1 payload table fail closed unless both the payload and
-  native host recognize the `ReliableEvent` generated frame kind. A current
-  facade therefore rejects an old payload before it creates a bridge channel;
-  ABI v2 field ordering and existing exports remain unchanged.
+  events require bit 28. Structured observed presentation requires bit 29.
+  Bit 28 adds no payload callback slot; bit 29 appends the one
+  `ObservedDiagnosticPage_CopyRecordValue` slot. Both make the V1 payload
+  table fail closed unless the payload and native host recognize the current
+  shape. A current facade therefore rejects an old payload before it creates a
+  bridge channel or reads a typed progress presentation record; ABI v2 field
+  ordering and existing exports remain unchanged.
 - The managed payload and Rust host use one jointly shipped **V1 payload binding
   table**. It includes the core, live-stream, typed-result, and bounded runtime
-  diagnostics slots. This is
+  diagnostics slots, including the appended observed-progress value-copy slot.
+  This is
   separate from the public native ABI, which remains v2. Rust validates the
   fixed V1 header (size, version, features) before reading an extended table
   field, then requires the full current table size.
@@ -340,6 +343,35 @@ acknowledgement of every produced record. This remains copied data only:
 arrays and property bags are bounded `PowerShellValue` values, never `PSObject`
 or arbitrary CLR-object transfer.
 
+### Observed presentation paging
+
+`PowerShell.BeginObservedInvocation(options)` has independent result and
+diagnostic acknowledgement cursors. `ReadResults` returns copied tagged output
+values. For presentation, a host chooses exactly one reader for the diagnostic
+cursor sequence:
+
+- `ReadDiagnostics` returns the existing copied stream kind, sequence, and
+  bounded display text.
+- `ReadPresentation` returns the same cursor/page metadata and display text,
+  plus a fixed `PowerShellProgressUpdate` for a `Progress` record.
+
+The readers cannot be interleaved for one cursor: passing a later cursor
+acknowledges and releases the previous page regardless of which representation
+read it. A page can be retried before acknowledgement. `IsComplete` remains
+true only after both channels have successfully terminated and all their
+records were acknowledged.
+
+The progress projection is a closed copied property bag with only
+`ActivityId`, `ParentActivityId`, `Activity`, optional `StatusDescription` and
+`CurrentOperation`, `PercentComplete`, `SecondsRemaining`, and `IsCompleted`.
+It rejects non-progress values, unsupported fields, invalid ranges, text over
+512/1024 characters, malformed tagged values, and payloads over 64 KiB rather
+than parsing `ProgressRecord.ToString()` or falling back to a dynamic object.
+All other stream kinds remain bounded display text. This is a pull-only
+presentation path for `Write-Information`/stream output and `Write-Progress`;
+it is not a `PSHost`, RawUI, prompt-response API, arbitrary callback, or
+secret transport.
+
 ### Sessions, bounded settings, and polling
 
 `PowerShellRuntime.CreateSession(PowerShellSessionOptions)` creates a reusable
@@ -394,6 +426,23 @@ maximum of 1–64 sessions (with a minimum no greater than that) then always ret
 `MULTI_PWSH_UNSUPPORTED_CAPABILITY`: the current single CoreCLR, local-runspace
 model has no safe pool lifecycle/concurrency implementation. It does not
 pretend that serializing one runspace is a pool.
+
+#### Session snapshots are not durable restores
+
+`PowerShellSessionSnapshot` and session events are copied telemetry, not a
+serialized runspace image. The SDK intentionally exposes no variable
+enumeration, module inventory, restore operation, or general runspace
+serialization. A preflight report validates the caller's current roots and
+static import declarations, but it does not seal module identity, hash content,
+or atomically bind preflight to a later session creation. Treating it as a
+durable approved-import manifest would create a filesystem TOCTOU and module
+provenance policy that the generic SDK cannot own.
+
+An application that needs continuity must explicitly rehydrate its own
+reviewed, non-secret DTOs into a new `PowerShellSessionConfiguration` and
+copied session variables, then make its own authorization and module-integrity
+decision. This SDK provides neither persistence nor a claim that a local
+module is trusted across process lifetimes.
 
 The proxy surface is `Create`, `AddCommand`/`AddScript` (including
 `useLocalScope`), `AddArgument`, typed and switch parameters, `AddStatement`,
@@ -519,9 +568,9 @@ below defines the generic managed facade boundary.
 | Explicit payload activation, hostfxr startup, one runtime per process | Implemented | Direct payload or `PATH` activation and an opaque `PowerShellRuntime`; only `win-x64` has NativeAOT smoke evidence. |
 | Script or named-command execution with scalar parameters | Implemented | `AddScript`, `AddCommand`, `AddParameter`, and bounded `PowerShellValue` inputs. No raw `object`, `PSObject`, or `SecureString` overload exists. |
 | Script parameter declarations and syntax errors | Implemented, copied-only | `PowerShellRuntime.ParseScriptParameters` passes the input to payload-local `Parser.ParseInput` as data, never executable pipeline text. It returns bounded parameter/parse-error DTOs, not SMA AST or token objects. |
-| Output, errors, diagnostics, warning/progress streams | Implemented | Immutable bounded `PowerShellInvocationResult` snapshots. Safe scalar and property-bag projections are read through typed copied-value readers, never live SMA collections. |
+| Output, errors, diagnostics, warning/progress streams | Implemented | Immutable bounded snapshots, typed result pages, and observed result/diagnostic cursors. `ReadPresentation` adds fixed copied progress fields for pull-based text/progress rendering; it never returns SMA records or objects. |
 | Timeout, cancellation, async completion, deterministic disposal | Implemented | `InvokeAsync(CancellationToken)`, `BeginInvoke`, `Wait`, `Stop`, and `SafeHandle` ownership. Cancellation wins and never returns a partial success result. |
-| Long-lived local state | Implemented | Opaque local `PowerShellSession` plus serialized builders. It is not a pool or a remoting session. |
+| Long-lived local state | Implemented, local-only | Opaque local `PowerShellSession` plus serialized builders. Snapshots are telemetry only; generic durable restore, module provenance sealing, pools, and remoting are excluded. |
 | `SessionStateProxy.SetVariable` for value data | Implemented, copied-only | `SetVariable`, `TryGetVariable`, and `RemoveVariable` transfer bounded tagged values only. No methods, proxies, handles, or CLR identity survive the boundary. |
 | Application-selected local modules | Implemented, local-only | Each requested import is resolved by name beneath a caller-supplied module root. This does not validate PowerCLI or remoting dependencies. |
 | `PSCredential` parameter | Intentionally unsupported | Arbitrary scripts can emit or transform a supplied credential. The DTO result model cannot guarantee redaction or a zeroable managed lifetime. |
@@ -1811,7 +1860,12 @@ variable, and each assignment creates a payload proxy. Those proxies share one
 lease and one `Close`; that is the intended model, and it is why closure is
 first-caller-wins rather than reference-counted.
 
-### Transport binding, and what is not yet wired
+### Historical pre-DBC transport design (superseded)
+
+> This section records the discarded COM-carrier design. Generated Bridge
+> Contract v2 attachment is fully DBC-routed; see
+> [Generated Bridge Contract v2 over DBC](bridge-contract-v2-dbc.md). The
+> carrier/status statements below are not current behavior.
 
 | Direction | Carrier | Status |
 | --- | --- | --- |

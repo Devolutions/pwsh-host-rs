@@ -134,6 +134,13 @@ if (!System.IO.File.Exists(System.IO.Path.Combine(runtime.PayloadDirectory, "pws
     return 1;
 }
 
+if (!ObservedPresentationSmoke.Run(runtime))
+{
+    return 1;
+}
+
+Console.WriteLine("NativeAOT observed presentation: Success");
+
 using PowerShell powerShell = runtime.Create();
 PowerShellInvocationResult output = powerShell.AddScript("'nativeaot-in-process'").Invoke();
 PowerShellValue outputScalar = output.Output.Records.Count == 1

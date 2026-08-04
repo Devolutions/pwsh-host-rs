@@ -273,6 +273,13 @@ function is added. A host requires bit 28 before it can create a bridge
 channel, preventing a new facade from accepting a payload whose V1 table
 cannot recognize the reliable-event descriptor and wire kind.
 
+Structured observed presentation is independent of bridge routing. Feature bit
+29 appends one V1 payload-table value-copy slot for the fixed progress
+projection used by `PowerShellObservedInvocation.ReadPresentation`; it does not
+add a bridge frame, callback, or object transfer. The Rust host validates that
+slot and bit before dereferencing it, so an old or undersized payload fails
+activation rather than degrading progress to parsed display text.
+
 The attachment does not add credential or secret transfer, `PSHost`/RawUI,
 remoting/PSRP, named-pipe console attachment, pools or concurrent sessions,
 PowerCLI compatibility, generic RDM feature flags, or generic RDM

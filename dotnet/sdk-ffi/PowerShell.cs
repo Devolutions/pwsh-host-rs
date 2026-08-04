@@ -32,6 +32,7 @@ public sealed unsafe class PowerShell : IDisposable
     private const ulong GeneratedBridgeAttachmentFeature = 1UL << 26;
     private const ulong BrokerTerminalObservationFeature = 1UL << 27;
     private const ulong ReliableBridgeEventsFeature = 1UL << 28;
+    private const ulong ObservedPresentationFeature = 1UL << 29;
     private const ulong LiveObjectProbeFeature = 1UL << 17;
     private const ulong LiveSessionObjectProbeFeature = 1UL << 18;
     private const ulong LiveObjectContractsFeature = 1UL << 19;
@@ -860,6 +861,17 @@ public sealed unsafe class PowerShell : IDisposable
             throw new PowerShellFfiException(
                 PowerShellFfiStatus.UnsupportedCapability,
                 "The selected PowerShell native asset does not support observed invocations.");
+        }
+    }
+
+    internal static void EnsureObservedPresentationSupported()
+    {
+        EnsureObservedInvocationSupported();
+        if ((FeatureFlags & ObservedPresentationFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell payload does not support structured observed presentation records.");
         }
     }
 

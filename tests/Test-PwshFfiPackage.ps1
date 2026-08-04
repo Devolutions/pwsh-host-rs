@@ -682,6 +682,69 @@ void VerifyCompleteResultProjection(PowerShellRuntime runtime)
             observedDto.Count == 7,
             "The complete observed result sequence was not projected through the explicit generated DTO mapper.");
     }
+
+    using (PowerShell presentationBuilder = CreatePowerShellWhenAvailable(runtime, "the observed presentation builder"))
+    using (PowerShellObservedInvocation presentation = presentationBuilder
+        .AddScript(@"
+            Write-Information 'package-presentation-text' -InformationAction Continue
+            Write-Progress -Id 17 -ParentId 5 -Activity 'package-progress' -Status 'running' -CurrentOperation 'packaging' -PercentComplete 58 -SecondsRemaining 12
+        ")
+        .BeginObservedInvocation(new PowerShellObservedInvocationOptions(
+            maximumBufferedResultRecords: 4,
+            maximumResultPageRecords: 2,
+            maximumBufferedDiagnosticRecords: 4,
+            maximumDiagnosticPageRecords: 2)))
+    {
+        ulong resultAcknowledgement = 0;
+        ulong presentationAcknowledgement = 0;
+        var records = new List<PowerShellObservedPresentationRecord>();
+        PowerShellValuePage resultPage = null!;
+        PowerShellObservedPresentationPage presentationPage = null!;
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            resultPage = presentation.ReadResults(resultAcknowledgement, maximumRecords: 2);
+            resultAcknowledgement = resultPage.NextSequence;
+            presentationPage = presentation.ReadPresentation(presentationAcknowledgement, maximumRecords: 2);
+            presentationAcknowledgement = presentationPage.NextSequence;
+            records.AddRange(presentationPage.Records);
+            if (resultPage.IsComplete && presentationPage.IsComplete)
+            {
+                break;
+            }
+
+            Thread.Sleep(10);
+        }
+
+        PowerShellObservedPresentationRecord? progress = records.FirstOrDefault(
+            static record => record.Progress is { ActivityId: 17, IsCompleted: false });
+        bool hasInformation = records.Any(static record =>
+            record.Stream == PowerShellStreamKind.Information &&
+            record.Text.Contains("package-presentation-text", StringComparison.Ordinal));
+        bool hasProgress = progress?.Progress is
+        {
+            ActivityId: 17,
+            ParentActivityId: 5,
+            Activity: "package-progress",
+            StatusDescription: "running",
+            CurrentOperation: "packaging",
+            PercentComplete: 58,
+            SecondsRemaining: 12,
+            IsCompleted: false,
+        };
+        Require(
+            resultPage is not null &&
+            presentationPage is not null &&
+            resultPage.IsComplete &&
+            presentationPage.IsComplete &&
+            hasInformation &&
+            hasProgress,
+            string.Format(
+                "The package-only NativeAOT consumer did not preserve bounded text and typed progress presentation (information: {0}; progress: {1}; records: {2}).",
+                hasInformation,
+                hasProgress,
+                records.Count));
+    }
 }
 
 async Task VerifyRecipesSchemasAndPoliciesAsync(PowerShellRuntime runtime)
