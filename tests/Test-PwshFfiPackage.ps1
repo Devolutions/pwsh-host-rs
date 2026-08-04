@@ -161,6 +161,7 @@ try {
     $requiredPaths = @(
         'README.md',
         'buildTransitive/Devolutions.MultiPwsh.Sdk.targets',
+        'buildTransitive/Devolutions.MultiPwsh.LiveContracts/PowerShellFiniteOperations.cs',
         'lib/net10.0/Devolutions.MultiPwsh.Sdk.dll')
     foreach ($runtimeIdentifier in $ExpectedRuntimeIdentifiers) {
         $requiredPaths += "runtimes/$runtimeIdentifier/native/$($sdkNativeAssets[$runtimeIdentifier])"
@@ -254,6 +255,74 @@ try {
     if (Test-Path $inertNativeAsset -PathType Leaf) {
         throw "FFI native assets must be inert by default, but found $inertNativeAsset"
     }
+
+    $finitePayloadDirectory = Join-Path $workspace 'finite-payload'
+    New-Item -Path $finitePayloadDirectory -ItemType Directory -Force | Out-Null
+    $finitePayloadProject = Join-Path $finitePayloadDirectory 'FfiPackageFinitePayload.csproj'
+    @"
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LiveContractMode>Payload</LiveContractMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="$packageId" Version="$PackageVersion" />
+  </ItemGroup>
+</Project>
+"@ | Set-Content -Path $finitePayloadProject -Encoding utf8
+    @"
+using Devolutions.PowerShell.Ffi.LiveObjects;
+using Devolutions.PowerShell.Ffi.LiveObjects.FiniteOperations;
+
+internal static class Program
+{
+    private sealed class Codec : IPowerShellFinitePageCodec<int>
+    {
+        public bool TryCopy(int source, out int copy, out int itemCount, out int byteCount)
+        {
+            copy = source;
+            itemCount = 1;
+            byteCount = sizeof(int);
+            return true;
+        }
+    }
+
+    private sealed class Validator : IPowerShellFinitePageAccessValidator
+    {
+        public PowerShellFinitePageValidation Validate(in PowerShellFiniteOperationBinding binding) =>
+            PowerShellFinitePageValidation.Allowed;
+    }
+
+    private static void Main()
+    {
+        var contract = new PowerShellFinitePageContract<int>(
+            new Guid("59B43B9D-2D29-43EE-B25D-8706E3AA50C5"),
+            maximumPages: 1,
+            maximumItemsPerPage: 1,
+            maximumPageBytes: sizeof(int),
+            new Codec(),
+            new Validator());
+        using var registry = new PowerShellFiniteOperationRegistry<int>(contract, maximumOperations: 1);
+        using PowerShellFiniteOperationOwner owner = registry.CreateOwner();
+        PowerShellFiniteOperationResult result = registry.TryStart(
+            owner,
+            new PowerShellFiniteOperationBinding(contract.SchemaId, snapshotRevision: 1, permissionRevision: 1),
+            new PowerShellFiniteOperationOptions(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1)),
+            out _);
+
+        if (result.Status != PowerShellFiniteOperationStatus.Active)
+        {
+            throw new InvalidOperationException("The finite payload source was not usable.");
+        }
+    }
+}
+"@ | Set-Content -Path (Join-Path $finitePayloadDirectory 'Program.cs') -Encoding utf8
+    Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $finitePayloadProject, '--configfile', $nugetConfig)
+    Assert-RestoredPackageMatchesInspectedNupkg -NugetCache $nugetCache -PackageId $packageId -PackageVersion $PackageVersion -InspectedPackagePath $package.FullName
+    Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('build', $finitePayloadProject, '--no-restore', '-c', $Configuration)
 
     $consumerDirectory = Join-Path $workspace 'consumer'
     New-Item -Path $consumerDirectory -ItemType Directory -Force | Out-Null

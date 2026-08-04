@@ -246,6 +246,31 @@ surface loses most of its value when an open one sits beside it.
 `docs/in-process-ffi.md` carries the normative wire, descriptor, dispatcher,
 failure, lease, authorization, and staged-mutation rules.
 
+### Finite operation and typed report-page preview
+
+`PowerShellFiniteOperationRegistry<TPage>` in
+`Devolutions.PowerShell.Ffi.LiveObjects.FiniteOperations` is an opt-in host-only state machine
+for an application-selected generated Bridge Contract v2 page type. It has no
+generic script or job dispatch surface: the application supplies a fixed schema
+ID, a direct detached-copy codec, snapshot/permission validator, and only the
+specific generated members it intends to expose.
+
+Each operation ID is a random opaque `Guid`, but access always also requires a
+host-only `PowerShellFiniteOperationOwner`; the ID alone cannot authorize or
+probe an operation. Active deadlines are capped at one hour and terminal
+retention at fifteen minutes. Deadline, cancellation, and already committed
+terminal outcomes have deterministic precedence; cancellation is idempotent.
+Terminal entries become explicit `Expired` tombstones after retention and keep
+their bounded slot until `TryRelease` or owner disposal.
+
+The supplied codec must make detached pages and report exact item and byte
+counts. The registry enforces hard page, item, and byte bounds and revalidates
+the original snapshot and permission revisions before every page read.
+Snapshot/permission invalidation, bounds failure, expiry, and release are
+deterministic terminal outcomes. It does not supply durable sessions or
+checkpoints, persistence, generic targets/schemas, reflection/JSON, remoting,
+credentials, UI, callbacks, pools, or staged mutation semantics.
+
 ## DTO projections and bounded paging
 
 `PowerShellDtoContractAttribute` and `PowerShellDtoMemberAttribute` opt an

@@ -39,6 +39,9 @@
       <Compile Include="$(MSBuildThisFileDirectory)Devolutions.MultiPwsh.LiveContracts\PowerShellLiveObjectContract.cs"
                Link="Devolutions.MultiPwsh.LiveContracts\PowerShellLiveObjectContract.cs"
                Visible="false" />
+      <Compile Include="$(MSBuildThisFileDirectory)Devolutions.MultiPwsh.LiveContracts\PowerShellFiniteOperations.cs"
+               Link="Devolutions.MultiPwsh.LiveContracts\PowerShellFiniteOperations.cs"
+               Visible="false" />
       <ReferencePath Remove="@(ReferencePath)"
                      Condition="'%(ReferencePath.Filename)%(ReferencePath.Extension)' == 'Devolutions.MultiPwsh.LiveContracts.dll'" />
       <ReferencePathWithRefAssemblies Remove="@(ReferencePathWithRefAssemblies)"

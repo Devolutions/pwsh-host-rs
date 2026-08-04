@@ -13,6 +13,7 @@
     <ProjectReference Include="..\live-contracts\Devolutions.MultiPwsh.LiveContracts.csproj" />
     <ProjectReference Include="..\sdk-ffi\Devolutions.MultiPwsh.Sdk.csproj" />
     <ProjectReference Include="..\bridge-contract-test-host\BridgeContractTestHost.csproj" />
+    <ProjectReference Include="..\finite-operation-test-host\FiniteOperationTestHost.csproj" />
     <ProjectReference Include="..\live-contract-generator\Devolutions.MultiPwsh.LiveContract.Generator.csproj"
                       OutputItemType="Analyzer"
                       ReferenceOutputAssembly="false" />
@@ -33,6 +34,8 @@
     <LiveObjectTestPackAssembly>$(MSBuildThisFileDirectory)..\live-object-test-pack\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.LiveObject.TestPack.dll</LiveObjectTestPackAssembly>
     <BridgeContractTestPackProject>$(MSBuildThisFileDirectory)..\bridge-contract-test-pack\BridgeContractTestPack.csproj</BridgeContractTestPackProject>
     <BridgeContractTestPackAssembly>$(MSBuildThisFileDirectory)..\bridge-contract-test-pack\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.BridgeContract.TestPack.dll</BridgeContractTestPackAssembly>
+    <FiniteOperationTestPackProject>$(MSBuildThisFileDirectory)..\finite-operation-test-pack\FiniteOperationTestPack.csproj</FiniteOperationTestPackProject>
+    <FiniteOperationTestPackAssembly>$(MSBuildThisFileDirectory)..\finite-operation-test-pack\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.FiniteOperation.TestPack.dll</FiniteOperationTestPackAssembly>
     <IncompatibleLiveObjectTestPackProject>$(MSBuildThisFileDirectory)..\live-object-incompatible-test-pack\Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.csproj</IncompatibleLiveObjectTestPackProject>
     <IncompatibleLiveObjectTestPackAssembly>$(MSBuildThisFileDirectory)..\live-object-incompatible-test-pack\bin\$(Configuration)\net8.0\Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.dll</IncompatibleLiveObjectTestPackAssembly>
   </PropertyGroup>
@@ -43,6 +46,9 @@
              Targets="Restore;Build"
              Properties="Configuration=$(Configuration)" />
     <MSBuild Projects="$(BridgeContractTestPackProject)"
+             Targets="Restore;Build"
+             Properties="Configuration=$(Configuration)" />
+    <MSBuild Projects="$(FiniteOperationTestPackProject)"
              Targets="Restore;Build"
              Properties="Configuration=$(Configuration)" />
     <MSBuild Projects="$(IncompatibleLiveObjectTestPackProject)"
@@ -56,6 +62,8 @@
           DestinationFiles="$(PublishDir)Devolutions.MultiPwsh.LiveObject.TestPack.dll" />
     <Copy SourceFiles="$(BridgeContractTestPackAssembly)"
           DestinationFiles="$(PublishDir)Devolutions.MultiPwsh.BridgeContract.TestPack.dll" />
+    <Copy SourceFiles="$(FiniteOperationTestPackAssembly)"
+          DestinationFiles="$(PublishDir)Devolutions.MultiPwsh.FiniteOperation.TestPack.dll" />
     <Copy SourceFiles="$(IncompatibleLiveObjectTestPackAssembly)"
           DestinationFiles="$(PublishDir)Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack.dll" />
   </Target>

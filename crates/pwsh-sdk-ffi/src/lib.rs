@@ -8911,6 +8911,10 @@ mod tests {
         frame
     }
 
+    fn broker_attach_consumer(channel: u64) {
+        assert_eq!(broker_wait_for_frame(channel, 0), 0);
+    }
+
     fn broker_close_channel(channel: u64) {
         let mut diagnostic = [0_u8; 256];
         let mut result = broker_call_result(&mut diagnostic);
@@ -9004,6 +9008,7 @@ mod tests {
         let attachment = broker_test_attachment(channel);
         let generation = attachment.generation;
 
+        broker_attach_consumer(channel);
         let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 7, b"ping"));
 
         let frame = broker_wait_for_frame(channel, 5_000);
@@ -9061,6 +9066,7 @@ mod tests {
         let channel = open_broker_channel(&broker_default_options());
         let attachment = broker_test_attachment(channel);
         let generation = attachment.generation;
+        broker_attach_consumer(channel);
         let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 1, b"observe"));
 
         let frame = broker_wait_for_frame(channel, 5_000);
@@ -9145,6 +9151,7 @@ mod tests {
         let channel = open_broker_channel(&broker_default_options());
         let attachment = broker_test_attachment(channel);
         let generation = attachment.generation;
+        broker_attach_consumer(channel);
         let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 1, b"close"));
 
         let frame = broker_wait_for_frame(channel, 5_000);
@@ -9209,6 +9216,7 @@ mod tests {
         let channel = open_broker_channel(&broker_default_options());
         let attachment = broker_test_attachment(channel);
         let generation = attachment.generation;
+        broker_attach_consumer(channel);
         let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 1, b"x"));
 
         let frame = broker_wait_for_frame(channel, 5_000);
@@ -9253,6 +9261,7 @@ mod tests {
         let channel = open_broker_channel(&broker_default_options());
         let attachment = broker_test_attachment(channel);
         let generation = attachment.generation;
+        broker_attach_consumer(channel);
         let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 2, b"y"));
 
         let frame = broker_wait_for_frame(channel, 5_000);
@@ -9281,6 +9290,7 @@ mod tests {
         let channel = open_broker_channel(&broker_default_options());
         let attachment = broker_test_attachment(channel);
         let generation = attachment.generation;
+        broker_attach_consumer(channel);
         let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 3, b"z"));
 
         let frame = broker_wait_for_frame(channel, 5_000);
@@ -9359,7 +9369,7 @@ mod tests {
         let channel = open_broker_channel(&broker_default_options());
         let attachment = broker_test_attachment(channel);
         let generation = attachment.generation;
-        assert_eq!(broker_wait_for_frame(channel, 50), 0);
+        broker_attach_consumer(channel);
 
         let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 6, b"c"));
         // Let the request reach the queue, then close.
@@ -9419,6 +9429,7 @@ mod tests {
         let channel = open_broker_channel(&broker_default_options());
         let attachment = broker_test_attachment(channel);
         let generation = attachment.generation;
+        broker_attach_consumer(channel);
         let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 10, b"h"));
 
         let frame = broker_wait_for_frame(channel, 5_000);
@@ -9449,6 +9460,7 @@ mod tests {
         let channel = open_broker_channel(&broker_default_options());
         let attachment = broker_test_attachment(channel);
         let generation = attachment.generation;
+        broker_attach_consumer(channel);
         let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 11, b"d"));
 
         let frame = broker_wait_for_frame(channel, 5_000);
@@ -9489,6 +9501,7 @@ mod tests {
         let channel = open_broker_channel(&broker_default_options());
         let attachment = broker_test_attachment(channel);
         let generation = attachment.generation;
+        broker_attach_consumer(channel);
         let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 12, b"o"));
 
         let frame = broker_wait_for_frame(channel, 5_000);

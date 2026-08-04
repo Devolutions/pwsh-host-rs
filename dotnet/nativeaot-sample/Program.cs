@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Devolutions.MultiPwsh.BridgeTest;
+using Devolutions.MultiPwsh.FiniteOperationTest;
 using Devolutions.PowerShell.Ffi;
 using Devolutions.PowerShell.Ffi.LiveObjects;
 using NativeAotFfiSample;
@@ -18,6 +19,9 @@ string incompatibleContractPackPath = System.IO.Path.Combine(
 string bridgeContractPackPath = System.IO.Path.Combine(
     AppContext.BaseDirectory,
     "Devolutions.MultiPwsh.BridgeContract.TestPack.dll");
+string finiteOperationContractPackPath = System.IO.Path.Combine(
+    AppContext.BaseDirectory,
+    "Devolutions.MultiPwsh.FiniteOperation.TestPack.dll");
 if (!System.IO.File.Exists(contractPackPath))
 {
     Console.Error.WriteLine("NativeAOT facade did not publish the external live-object contract pack.");
@@ -33,6 +37,11 @@ if (!System.IO.File.Exists(bridgeContractPackPath))
     Console.Error.WriteLine("NativeAOT facade did not publish the bridge contract test pack.");
     return 1;
 }
+if (!System.IO.File.Exists(finiteOperationContractPackPath))
+{
+    Console.Error.WriteLine("NativeAOT facade did not publish the finite-operation test pack.");
+    return 1;
+}
 
 if (!FiniteOperationSmoke.Run())
 {
@@ -41,15 +50,17 @@ if (!FiniteOperationSmoke.Run())
 
 Console.WriteLine("NativeAOT finite operations: Success");
 
-PowerShellLiveObjectContractPack[] contractPacks =
-[
-    new PowerShellLiveObjectContractPack(
-        contractPackPath,
-        "Devolutions.MultiPwsh.LiveObject.TestPack.LiveObjectTestPack, Devolutions.MultiPwsh.LiveObject.TestPack"),
-    new PowerShellLiveObjectContractPack(
-        bridgeContractPackPath,
-        "Devolutions.MultiPwsh.BridgeTest.BridgeContractTestPack, Devolutions.MultiPwsh.BridgeContract.TestPack"),
-];
+var liveObjectContractPack = new PowerShellLiveObjectContractPack(
+    contractPackPath,
+    "Devolutions.MultiPwsh.LiveObject.TestPack.LiveObjectTestPack, Devolutions.MultiPwsh.LiveObject.TestPack");
+var bridgeContractPack = new PowerShellLiveObjectContractPack(
+    bridgeContractPackPath,
+    "Devolutions.MultiPwsh.BridgeTest.BridgeContractTestPack, Devolutions.MultiPwsh.BridgeContract.TestPack");
+var finiteOperationContractPack = new PowerShellLiveObjectContractPack(
+    finiteOperationContractPackPath,
+    "Devolutions.MultiPwsh.FiniteOperationTest.FiniteOperationTestPack, Devolutions.MultiPwsh.FiniteOperation.TestPack");
+PowerShellLiveObjectContractPack[] bridgeContractPacks = [liveObjectContractPack, bridgeContractPack];
+PowerShellLiveObjectContractPack[] finiteOperationContractPacks = [liveObjectContractPack, finiteOperationContractPack];
 
 if (args.Length == 2 && args[1].StartsWith("--expect-rejected-contract-pack:", StringComparison.Ordinal))
 {
@@ -88,7 +99,7 @@ if (args.Length == 2 && args[1].StartsWith("--expect-rejected-contract-pack:", S
     PowerShellLiveObjectContractPack[] rejectedPacks = fixtureName == "duplicate-across-packs"
         ?
         [
-            contractPacks[0],
+            liveObjectContractPack,
             new PowerShellLiveObjectContractPack(
                 incompatibleContractPackPath,
                 $"{scenario.Value.TypeName}, Devolutions.MultiPwsh.LiveObject.Incompatible.TestPack"),
@@ -124,23 +135,48 @@ if (args.Length == 2 && args[1].StartsWith("--expect-rejected-contract-pack:", S
 if (args.Length == 2 &&
     args[1].Equals("--expect-bridge-setup-failure-cleans-broker", StringComparison.Ordinal))
 {
-    PowerShellRuntime runtimeWithoutBridgePack = PowerShellRuntime.Activate(args[0], [contractPacks[0]]);
+    PowerShellRuntime runtimeWithoutBridgePack = PowerShellRuntime.Activate(args[0], [liveObjectContractPack]);
     return BridgeAttachmentSmoke.VerifyFailedBridgeSetupClearsBrokerContext(runtimeWithoutBridgePack)
         ? 0
         : 1;
 }
 
+if (args.Length == 2 &&
+    args[1].Equals("--expect-rejected-multiple-bridge-packs", StringComparison.Ordinal))
+{
+    try
+    {
+        _ = PowerShellRuntime.Activate(
+            args[0],
+            [liveObjectContractPack, bridgeContractPack, finiteOperationContractPack]);
+    }
+    catch (PowerShellFfiException exception) when (exception.Status == PowerShellFfiStatus.HostFailure &&
+        exception.Message.Contains("at most one bridge contract pack", StringComparison.Ordinal))
+    {
+        Console.WriteLine("Rejected multiple bridge contract packs.");
+        return 0;
+    }
+
+    Console.Error.WriteLine("NativeAOT facade accepted multiple bridge contract packs.");
+    return 1;
+}
+
+bool finiteOperationBridgeOnly = args.Length == 2 &&
+    args[1].Equals("--finite-operation-bridge-only", StringComparison.Ordinal);
 PowerShellRuntime runtime;
 switch (args.Length)
 {
     case 0:
-        runtime = PowerShellRuntime.Activate(contractPacks);
+        runtime = PowerShellRuntime.Activate(bridgeContractPacks);
         break;
     case 1:
-        runtime = PowerShellRuntime.Activate(args[0], contractPacks);
+        runtime = PowerShellRuntime.Activate(args[0], bridgeContractPacks);
+        break;
+    case 2 when finiteOperationBridgeOnly:
+        runtime = PowerShellRuntime.Activate(args[0], finiteOperationContractPacks);
         break;
     default:
-        Console.Error.WriteLine("Usage: NativeAotFfiSample [payload-directory]");
+        Console.Error.WriteLine("Usage: NativeAotFfiSample [payload-directory] [--finite-operation-bridge-only]");
         return 2;
 }
 
@@ -148,6 +184,17 @@ if (!System.IO.File.Exists(System.IO.Path.Combine(runtime.PayloadDirectory, "pws
 {
     Console.Error.WriteLine("NativeAOT facade did not report the selected PowerShell payload.");
     return 1;
+}
+
+if (finiteOperationBridgeOnly)
+{
+    if (!FiniteOperationAttachmentSmoke.Run(runtime))
+    {
+        return 1;
+    }
+
+    Console.WriteLine("NativeAOT in-process PowerShell FFI: Success");
+    return 0;
 }
 
 if (!ObservedPresentationSmoke.Run(runtime))

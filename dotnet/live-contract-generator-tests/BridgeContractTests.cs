@@ -94,6 +94,65 @@ internal static class BridgeContractTests
         }
         """;
 
+    private const string FiniteOperationContract = """
+        using System;
+        using System.Runtime.InteropServices;
+        using System.Runtime.InteropServices.Marshalling;
+        using Devolutions.PowerShell.Ffi.LiveObjects;
+
+        namespace Fixture;
+
+        [GeneratedComInterface]
+        [Guid("EDC40A8B-3320-4DA6-9A4D-321D27531FC0")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        public partial interface IFiniteOperationTransport
+        {
+            [PreserveSig]
+            int Invoke(ulong leaseId, uint generation, ulong objectId, uint memberId,
+                       nint input, int inputLength, nint output, int outputCapacity, out int outputLength);
+
+            [PreserveSig]
+            int CloseLease(ulong leaseId, uint generation);
+        }
+
+        [BridgeContract("2D24AB26-A9E5-4EF4-AC18-DB99F42B5B03", 1, 0, "EDC40A8B-3320-4DA6-9A4D-321D27531FC0")]
+        [BridgeObject(1, ReleaseId = 701)]
+        public interface IFiniteOperationRoot
+        {
+            [BridgeMember(1, Permission = BridgePermission.Execute)]
+            IFiniteOperationTicket Start(int mode);
+
+            [BridgeMember(2, Permission = BridgePermission.Read)]
+            IFiniteOperationPageRead ReadPage(Guid operationId, int cursor);
+
+            [BridgeMember(3, Permission = BridgePermission.Execute)]
+            IFiniteOperationTicket Cancel(Guid operationId);
+
+            [BridgeMember(4, Permission = BridgePermission.Execute)]
+            int Release(Guid operationId);
+        }
+
+        [BridgeData(80)]
+        public interface IFiniteOperationTicket
+        {
+            [BridgeField(1)] Guid OperationId { get; }
+            [BridgeField(2)] int Status { get; }
+            [BridgeField(3)] long SnapshotRevision { get; }
+            [BridgeField(4)] long PermissionRevision { get; }
+        }
+
+        [BridgeData(81)]
+        public interface IFiniteOperationPageRead
+        {
+            [BridgeField(1)] int Status { get; }
+            [BridgeField(2)] bool HasPage { get; }
+            [BridgeField(3)] int NextCursor { get; }
+            [BridgeField(4)] int Ordinal { get; }
+            [BridgeField(5, MaximumCollectionCount = 2, MaximumUtf8Bytes = 32)]
+            System.Collections.Generic.IReadOnlyList<string> Rows { get; }
+        }
+        """;
+
     internal static void Run(
         Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run,
         Action<IEnumerable<Diagnostic>> assertNoErrors)
@@ -110,6 +169,8 @@ internal static class BridgeContractTests
         VerifyNoDynamicDispatch(run, assertNoErrors);
         VerifyReleaseOrdinals(run, assertNoErrors);
         VerifyPayloadBindingSurface(run, assertNoErrors);
+        VerifySurface(run, assertNoErrors, "Host", "FiniteOperationPageReadValue", FiniteOperationContract);
+        VerifySurface(run, assertNoErrors, "Payload", "public FiniteOperationPageReadValue ReadPage", FiniteOperationContract);
 
         // Every rejection is a compile-time diagnostic, never a runtime failure.
         VerifyDiagnostic(run, Valid.Replace(", MaximumUtf8Bytes = 256", string.Empty, StringComparison.Ordinal), "MPWLC016");
@@ -643,9 +704,10 @@ internal static class BridgeContractTests
         Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run,
         Action<IEnumerable<Diagnostic>> assertNoErrors,
         string mode,
-        string required)
+        string required,
+        string? source = null)
     {
-        var (result, output) = run(Valid, mode);
+        var (result, output) = run(source ?? Valid, mode);
         assertNoErrors(Diagnostics(result));
         assertNoErrors(output.GetDiagnostics());
         string generated = Generated(result);

@@ -37,6 +37,12 @@ Only the async invocation paths are legal for an attached bridge. Synchronous
 invocation is rejected by the existing broker guard before a pipeline can
 block waiting for a host dispatcher.
 
+Each payload admits at most one independently compiled contract-pack API that
+declares a bridge contract. The shared generated COM handshake is payload-local,
+so registering a second bridge pack is rejected during activation rather than
+allowing incompatible projections to run. Add finite operations and typed pages
+as closed members or child objects of the existing bridge contract pack.
+
 ## Fixed DBC frames
 
 The DBC body for every generated bridge frame starts with this fixed
@@ -371,3 +377,48 @@ remoting/PSRP, named-pipe console attachment, pools or concurrent sessions,
 PowerCLI compatibility, generic RDM feature flags, or generic RDM
 authorization/persistence. It is a finite, generated, bounded local bridge
 only.
+
+## Finite operation and copied-page primitive
+
+`PowerShellFiniteOperationRegistry<TPage>` is a host-side, opt-in state
+machine for a trusted application that has already selected one generated
+Bridge Contract v2 page shape. It does not add a payload binding-table slot,
+event protocol, worker, dispatcher, or contract root. The application uses its
+generated data type as `TPage`, supplies a fixed schema identity and a direct
+copy codec, then exposes only its fixed generated `Start`, `ReadPage`,
+`Cancel`, and `Release` members.
+
+The registry allocates a cryptographically random `Guid` operation identifier.
+The value is opaque and is never re-issued, but it is not an authorization
+token: every registry call also requires the untransferable
+`PowerShellFiniteOperationOwner` that created it. Unknown, stale, released, or
+wrong-owner identifiers return the same access-denied outcome. Owner disposal
+explicitly releases all of its entries.
+
+The application supplies a positive deadline and terminal retention window,
+both capped by the primitive (one hour and fifteen minutes respectively).
+Under its locked state transition, deadline expiry wins first; otherwise a
+recorded cancellation wins over a later completion or failure; a committed
+terminal outcome wins over subsequent cancellation or completion. Cancellation
+is idempotent and every terminal transition signals the host-provided
+cooperative cancellation token. This primitive deliberately does not schedule
+or execute work.
+
+On completion, each page is copied with its exact item and encoded-byte count.
+The registry rejects over-limit page counts, item counts, byte counts, and
+failed copies before exposing any page. The hard ceilings are 256 pages, 4,096
+items per page, and the generated bridge-frame maximum (64 KiB) per page. Each
+`ReadPage` revalidates the original snapshot and permission revisions through
+the application validator before returning another detached copy. Snapshot
+invalidation, permission changes, bad cursors, bounds failures, cancellation,
+deadline expiry, and application failure are deterministic results; no event is
+used as completion authority.
+
+A terminal result remains readable only through its finite retention lease.
+After that lease it becomes an explicit `Expired` tombstone that continues to
+consume a bounded table entry until `TryRelease` or owner disposal. There is no
+implicit cleanup, durable session, checkpoint, persistence, dynamic schema,
+generic script or job dispatcher, arbitrary target, reflection, JSON,
+remoting, credential transfer, UI, callback, pooling, or staged mutation
+behavior in this primitive. Durable checkpoints require a separate
+identity/provenance/anti-rollback design.

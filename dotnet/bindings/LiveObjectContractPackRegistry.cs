@@ -626,6 +626,7 @@ internal unsafe sealed class FfiLiveObjectContractPackRegistry
 
         var additions = new Dictionary<PowerShellLiveObjectContract, Registration>();
         var interfaceIds = new HashSet<Guid>();
+        bool hasBridgeContractPack = false;
         for (uint packIndex = 0; packIndex < apiCount; packIndex++)
         {
             IntPtr apiPointer = apiPointers[packIndex];
@@ -648,32 +649,58 @@ internal unsafe sealed class FfiLiveObjectContractPackRegistry
 
             var create = (delegate* unmanaged<IntPtr, IntPtr*, int>)api.CreatePayloadProxy;
             var release = (delegate* unmanaged<IntPtr, void>)api.ReleasePayloadProxy;
+            bool packHasBridgeContract = false;
             for (uint contractIndex = 0; contractIndex < api.ContractCount; contractIndex++)
             {
                 PowerShellLiveObjectContract contract =
                     PowerShellLiveObjectContract.FromNative(api.Contracts[contractIndex]);
-                                if ((contract.Directions & PowerShellLiveObjectDirection.ConsumerToSession) == 0)
-                                {
-                                    throw new InvalidOperationException(
-                                        "Live object contract packs contain a contract with an unsupported direction.");
-                                }
+                if ((contract.Directions & PowerShellLiveObjectDirection.ConsumerToSession) == 0)
+                {
+                    throw new InvalidOperationException(
+                        "Live object contract packs contain a contract with an unsupported direction.");
+                }
 
-                                if (!interfaceIds.Add(contract.InterfaceId))
-                                {
-                                    throw new InvalidOperationException(
-                                        "Live object contract packs contain duplicate interface identifiers.");
-                                }
+                if (!interfaceIds.Add(contract.InterfaceId))
+                {
+                    throw new InvalidOperationException(
+                        "Live object contract packs contain duplicate interface identifiers.");
+                }
 
-                                if (!additions.TryAdd(contract, Registration.CreateExternal(create, release)))
-                                {
-                                    throw new InvalidOperationException(
-                                        "Live object contract packs contain incompatible interface identifiers.");
-                                }
+                if ((contract.Directions & PowerShellLiveObjectDirection.BridgeContract) != 0)
+                {
+                    packHasBridgeContract = true;
+                }
+
+                if (!additions.TryAdd(contract, Registration.CreateExternal(create, release)))
+                {
+                    throw new InvalidOperationException(
+                        "Live object contract packs contain incompatible interface identifiers.");
+                }
             }
+
+            if (packHasBridgeContract && hasBridgeContractPack)
+            {
+                throw new InvalidOperationException(
+                    "Live object contract packs support at most one bridge contract pack per payload.");
+            }
+
+            hasBridgeContractPack |= packHasBridgeContract;
         }
 
         lock (gate)
         {
+            if (hasBridgeContractPack)
+            {
+                foreach (PowerShellLiveObjectContract existing in registrations.Keys)
+                {
+                    if ((existing.Directions & PowerShellLiveObjectDirection.BridgeContract) != 0)
+                    {
+                        throw new InvalidOperationException(
+                            "Live object contract packs support at most one bridge contract pack per payload.");
+                    }
+                }
+            }
+
             foreach (PowerShellLiveObjectContract contract in additions.Keys)
             {
                 foreach (PowerShellLiveObjectContract existing in registrations.Keys)
