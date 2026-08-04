@@ -1,6 +1,6 @@
 [package]
 name = "pwsh-host"
-version = "0.18.0-bridge-v2.dbc.local.4"
+version = "0.18.0-bridge-v2.dbc.local.6"
 edition = "2018"
 license = "MIT/Apache-2.0"
 homepage = "https://github.com/Devolutions/pwsh-host-rs"
