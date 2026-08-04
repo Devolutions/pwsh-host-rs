@@ -631,12 +631,6 @@ public sealed class PowerShellFiniteOperationRegistry<TPage> :
             }
         }
 
-        PowerShellFinitePageValidation validation = contract.AccessValidator.Validate(in binding);
-        if (validation != PowerShellFinitePageValidation.Allowed)
-        {
-            return CreateResult(default, MapValidation(validation));
-        }
-
         lock (gate)
         {
             SweepExpiredLocked(GetTimestampMilliseconds());

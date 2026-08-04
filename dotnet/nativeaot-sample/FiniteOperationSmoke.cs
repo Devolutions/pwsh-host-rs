@@ -113,7 +113,6 @@ internal static class FiniteOperationSmoke
             }
         }
 
-        validator.Validation = PowerShellFinitePageValidation.Allowed;
         PowerShellFiniteOperationResult cancellable = registry.TryStart(
             owner,
             binding,

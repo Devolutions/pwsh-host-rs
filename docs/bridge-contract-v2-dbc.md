@@ -275,8 +275,7 @@ generated bridge handler exposes it. It has no SMA dependency and does not
 attach a page or an operation to a payload by itself. The application supplies
 one closed `TPage`, an `IPowerShellFinitePageCodec<TPage>` that copies that
 fixed shape, and an `IPowerShellFinitePageAccessValidator` that revalidates the
-opaque `PowerShellFiniteOperationBinding` before both admission and every page
-read.
+opaque `PowerShellFiniteOperationBinding` before every retained page read.
 
 The registry bounds operation count, pages, items per page, each page's byte
 count, registry-wide retained items (65,536), and registry-wide retained bytes
