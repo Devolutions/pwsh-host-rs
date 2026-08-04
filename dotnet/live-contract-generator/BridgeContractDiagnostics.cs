@@ -124,4 +124,12 @@ internal static class BridgeContractDiagnostics
         Category,
         DiagnosticSeverity.Error,
         isEnabledByDefault: true);
+
+    internal static readonly DiagnosticDescriptor InvalidFiniteOperation = new(
+        "MPWLC025",
+        "Invalid finite operation or snapshot page",
+        "Bridge declaration '{0}' has an invalid finite operation or snapshot page shape: {1}",
+        Category,
+        DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
 }

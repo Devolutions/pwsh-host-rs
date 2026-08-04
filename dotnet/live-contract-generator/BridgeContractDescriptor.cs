@@ -22,7 +22,7 @@ namespace Devolutions.MultiPwsh.LiveContract.Generator;
 internal static class BridgeContractDescriptor
 {
     private const uint Magic = 0x32574D42;
-    private const uint DescriptorVersion = 3;
+    private const uint DescriptorVersion = 4;
 
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
@@ -55,6 +55,7 @@ internal static class BridgeContractDescriptor
         {
             WriteUInt64(stream, model.Id);
             WriteName(stream, model.Name);
+            WriteSnapshotPage(stream, model.SnapshotPage);
             WriteUInt32(stream, (uint)model.Fields.Count);
             foreach (BridgeFieldModel field in model.Fields)
             {
@@ -70,6 +71,7 @@ internal static class BridgeContractDescriptor
             WriteUInt64(stream, model.Id);
             WriteName(stream, model.Name);
             WriteUInt32(stream, model.ReleaseId);
+            WriteFiniteOperation(stream, model.FiniteOperation);
             WriteUInt32(stream, (uint)model.Members.Count);
             foreach (BridgeMemberModel member in model.Members)
             {
@@ -133,6 +135,41 @@ internal static class BridgeContractDescriptor
         }
     }
 
+    private static void WriteFiniteOperation(Stream stream, BridgeFiniteOperationModel? operation)
+        {
+            stream.WriteByte(operation is null ? (byte)0 : (byte)1);
+            if (operation is null)
+            {
+                return;
+            }
+
+            WriteUInt32(stream, operation.StatusMemberId);
+            WriteUInt32(stream, operation.StatusTerminalFieldId);
+            WriteUInt32(stream, operation.CancelMemberId);
+            WriteUInt32(stream, operation.PageMemberId);
+            WriteUInt32(stream, (uint)operation.MaximumLifetimeMilliseconds);
+        }
+
+    private static void WriteSnapshotPage(Stream stream, BridgeSnapshotPageModel? page)
+        {
+            stream.WriteByte(page is null ? (byte)0 : (byte)1);
+            if (page is null)
+            {
+                return;
+            }
+
+            WriteUInt32(stream, page.ColumnsFieldId);
+            WriteUInt32(stream, page.RowsFieldId);
+            WriteUInt32(stream, page.NextCursorFieldId);
+            WriteUInt32(stream, page.SnapshotRevisionFieldId);
+            WriteUInt32(stream, page.PermissionRevisionFieldId);
+            WriteUInt32(stream, page.CursorLeaseExpiresAtFieldId);
+            WriteUInt32(stream, page.IsTerminalFieldId);
+            WriteUInt32(stream, page.IsGapFieldId);
+            WriteUInt32(stream, page.IsOverflowFieldId);
+            WriteUInt32(stream, page.IsTruncatedFieldId);
+            WriteUInt32(stream, page.TotalCountFieldId);
+        }
     private static void WriteName(Stream stream, string value)
     {
         byte[] bytes = StrictUtf8.GetBytes(value);

@@ -3216,13 +3216,14 @@ try
     using (PowerShell finiteJob = runtime.Create())
     {
         PowerShellInvocationResult jobOutput = await finiteJob
-            .AddScript("`$job = `$RDM.StartJob(); `$before = `$job.Status; `$page = `$job.ReadResults(0); `$job.Cancel(); \"`$(`$before.State)|`$(`$page.Columns[2].Name)|`$(`$page.Rows[0].Label)|`$(@(`$page.Rows).Count)|`$(`$job.Status.IsTerminal)\"")
+            .AddScript("`$job = `$RDM.StartJob(); `$before = `$job.Status; `$page = `$job.ReadResults([Guid]::Empty, 17, 29); `$terminal = `$job.ReadResults(`$page.NextCursor, 17, 29); `$gap = `$job.ReadResults([Guid]::Empty, 18, 29); `$job.Cancel(); `$job.Cancel(); \"`$(`$before.State)|`$(`$page.Columns[2].Name)|`$(`$page.Rows[0].Label)|`$(@(`$page.Rows).Count)|`$(`$page.SnapshotRevision)|`$(`$page.PermissionRevision)|`$(`$terminal.Rows[0].Label)|`$(`$terminal.IsTerminal)|`$(`$gap.IsGap)|`$(`$job.Status.IsTerminal)\"")
             .WithBridge(binding, "RDM")
             .InvokeAsync(CancellationToken.None);
         Require(
             jobOutput.Output.Records.Count == 1 &&
-            jobOutput.Output.Records[0].DisplayText == "Running|Label|result-10|2|True",
-            "The package-only generated bridge did not preserve its fixed-schema typed page, status, and cancellation.");
+            jobOutput.Output.Records[0].DisplayText == "Running|Label|result-10|2|17|29|result-30|True|True|True" &&
+            host.JobCancelDispatchCount == 1,
+            "The package-only generated bridge did not preserve its finite-operation page, revision gap, or first-wins cancellation.");
     }
 
     using PowerShell reliableEvent = runtime.Create();

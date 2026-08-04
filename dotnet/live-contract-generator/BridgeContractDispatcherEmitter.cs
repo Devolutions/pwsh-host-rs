@@ -628,6 +628,24 @@ internal static class BridgeContractDispatcherEmitter
         source.Append("            case ").Append(constants).Append(".Member").Append(BridgeTypeNames.Number(member.Ordinal)).AppendLine(":");
         source.AppendLine("            {");
         source.Append(Indent).Append("var __bridgeTarget = (").Append(handler).AppendLine(")admission.Handler!;");
+        if (model.FiniteOperation is { } operation && member.Ordinal == operation.CancelMemberId)
+        {
+            source.Append(Indent).Append("if (!__bridgeReader.IsComplete) ").AppendLine(fail);
+            source.Append(Indent).AppendLine("var __bridgeCancel = leases.TryBeginFiniteOperationCancel(");
+            source.Append(Indent).AppendLine("    admission.LeaseId, admission.Generation, admission.ObjectId);");
+            source.Append(Indent).Append("if (__bridgeCancel == global::Devolutions.PowerShell.Ffi.LiveObjects.")
+                .AppendLine("PowerShellBridgeFiniteOperationCancelResult.AlreadyCancelled)");
+            source.Append(Indent).AppendLine("{");
+            BridgeCodecEmitter.Guard(source, Indent + "    ", "__bridgeWriter.TryWriteNull()", fail);
+            source.Append(Indent).AppendLine("    return 0;");
+            source.Append(Indent).AppendLine("}");
+            source.Append(Indent).Append("if (__bridgeCancel != global::Devolutions.PowerShell.Ffi.LiveObjects.")
+                .AppendLine("PowerShellBridgeFiniteOperationCancelResult.InvokeHandler)");
+            source.Append(Indent).AppendLine("{");
+            source.Append(Indent).Append("    return ").Append(BridgeTypeNames.Status).AppendLine(".AccessDenied;");
+            source.Append(Indent).AppendLine("}");
+        }
+
         int temp = 0;
         var arguments = new List<string>();
         for (int index = 0; index < member.Parameters.Count; index++)
@@ -676,7 +694,16 @@ internal static class BridgeContractDispatcherEmitter
             source.Append("    private ulong Register").Append(id)
                 .AppendLine("(in global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeAdmission admission, " + handler + " handler)");
             source.AppendLine("    {");
-            source.Append("        return leases.Register(admission.LeaseId, admission.Generation, ").Append(id).AppendLine("UL, handler);");
+            if (model.FiniteOperation is { } operation)
+            {
+                source.Append("        return leases.RegisterFiniteOperation(admission.LeaseId, admission.Generation, admission.ObjectId, ")
+                    .Append(id).Append("UL, handler, ").Append(BridgeTypeNames.Number(operation.MaximumLifetimeMilliseconds))
+                    .AppendLine(");");
+            }
+            else
+            {
+                source.Append("        return leases.Register(admission.LeaseId, admission.Generation, ").Append(id).AppendLine("UL, handler);");
+            }
             source.AppendLine("    }");
             source.AppendLine();
             source.AppendLine("    /// <summary>Resolves an inbound handle within its own lease. A forged, stale, or cross-lease handle fails here.</summary>");

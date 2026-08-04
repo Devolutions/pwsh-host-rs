@@ -1,7 +1,9 @@
 #nullable enable
 
+using System.Buffers.Binary;
 using System;
 using System.Collections.Generic;
+using System.Security.Cryptography;
 using System.Threading;
 
 namespace Devolutions.PowerShell.Ffi.LiveObjects;
@@ -43,6 +45,19 @@ public readonly struct PowerShellBridgeAdmission
     public bool IsValid => Handler is not null;
 }
 
+/// <summary>Result of atomically admitting a generated finite-operation cancel request.</summary>
+public enum PowerShellBridgeFiniteOperationCancelResult
+{
+    /// <summary>The handle was not an active finite operation.</summary>
+    Invalid = 0,
+
+    /// <summary>The caller won the one handler dispatch for this operation's cancellation.</summary>
+    InvokeHandler = 1,
+
+    /// <summary>The operation was already cancelled; return the generated success reply without redispatching.</summary>
+    AlreadyCancelled = 2,
+}
+
 /// <summary>
 /// The bounded lease and object tables a generated bridge dispatcher admits
 /// calls against.
@@ -69,6 +84,9 @@ public sealed class PowerShellBridgeLeaseTable
 
     /// <summary>The number of live object handles one lease may retain.</summary>
     public const int MaximumObjectsPerLease = 1024;
+
+    /// <summary>The number of opaque finite-operation identities issued over one lease lifetime.</summary>
+    public const int MaximumFiniteOperationsPerLease = 1024;
 
     private static readonly object ProcessGate = new();
     private static readonly List<WeakReference<PowerShellBridgeLeaseTable>> ActiveTables = new();
@@ -205,6 +223,56 @@ public sealed class PowerShellBridgeLeaseTable
         }
     }
 
+    /// <summary>
+    /// Registers an owner-bound finite-operation handler with a nonzero
+    /// cryptographically random object identifier. The identifier cannot be
+    /// reissued during this lease lifetime.
+    /// </summary>
+    public ulong RegisterFiniteOperation(
+        ulong leaseId,
+        uint generation,
+        ulong ownerObjectId,
+        ulong objectTypeId,
+        object handler,
+        int maximumLifetimeMilliseconds)
+    {
+        if (objectTypeId == 0 ||
+            ownerObjectId == 0 ||
+            handler is null ||
+            maximumLifetimeMilliseconds is < 1 or > 3_600_000)
+        {
+            return 0;
+        }
+
+        lock (gate)
+        {
+            return !leases.TryGetValue(leaseId, out Lease? lease) || lease.Closed || lease.Generation != generation
+                ? 0
+                : lease.RegisterFiniteOperationLocked(
+                    ownerObjectId,
+                    objectTypeId,
+                    handler,
+                    maximumLifetimeMilliseconds);
+        }
+    }
+
+    /// <summary>
+    /// Atomically admits only the first cancel for an active finite operation.
+    /// Subsequent calls are successful no-ops and must not redispatch the handler.
+    /// </summary>
+    public PowerShellBridgeFiniteOperationCancelResult TryBeginFiniteOperationCancel(
+        ulong leaseId,
+        uint generation,
+        ulong objectId)
+    {
+        lock (gate)
+        {
+            return !leases.TryGetValue(leaseId, out Lease? lease) || lease.Closed || lease.Generation != generation
+                ? PowerShellBridgeFiniteOperationCancelResult.Invalid
+                : lease.TryBeginFiniteOperationCancelLocked(objectId);
+        }
+    }
+
     /// <summary>Releases one object handle. The identifier is never re-allocated.</summary>
     public bool TryRelease(ulong leaseId, uint generation, ulong objectId)
     {
@@ -306,6 +374,7 @@ public sealed class PowerShellBridgeLeaseTable
     {
         private readonly Dictionary<ulong, Entry> objectsById = new();
         private readonly Dictionary<object, ulong> idsByHandler = new(ReferenceEqualityComparer.Instance);
+        private readonly HashSet<ulong> issuedFiniteOperationIds = new();
         private ulong nextObjectId = 1;
 
         internal Lease(ulong id, uint generation)
@@ -329,7 +398,9 @@ public sealed class PowerShellBridgeLeaseTable
 
             if (idsByHandler.TryGetValue(handler, out ulong existing))
             {
-                return objectsById.TryGetValue(existing, out Entry entry) && entry.ObjectTypeId == objectTypeId
+                return objectsById.TryGetValue(existing, out Entry? entry) &&
+                    entry is not null &&
+                    entry.ObjectTypeId == objectTypeId
                     ? existing
                     : 0;
             }
@@ -340,34 +411,113 @@ public sealed class PowerShellBridgeLeaseTable
             }
 
             ulong id = nextObjectId++;
-            objectsById.Add(id, new Entry(objectTypeId, handler));
+            objectsById.Add(id, new Entry(objectTypeId, handler, 0, false, 0));
             idsByHandler.Add(handler, id);
             return id;
         }
 
+        internal ulong RegisterFiniteOperationLocked(
+            ulong ownerObjectId,
+            ulong objectTypeId,
+            object handler,
+            int maximumLifetimeMilliseconds)
+        {
+            if (Closed)
+            {
+                return 0;
+            }
+
+            SweepExpiredFiniteOperationsLocked();
+            if (!TryResolveLocked(ownerObjectId, out _, out _) ||
+                objectsById.Count >= MaximumObjectsPerLease ||
+                issuedFiniteOperationIds.Count >= MaximumFiniteOperationsPerLease)
+            {
+                return 0;
+            }
+
+            if (idsByHandler.TryGetValue(handler, out ulong existing))
+            {
+                if (objectsById.TryGetValue(existing, out Entry? entry) &&
+                    entry is not null &&
+                    entry.ObjectTypeId == objectTypeId &&
+                    entry.IsFiniteOperation &&
+                    entry.OwnerObjectId == ownerObjectId
+                    )
+                {
+                    if (IsAdmissibleLocked(entry))
+                    {
+                        return existing;
+                    }
+
+                    RemoveEntryAndDescendantsLocked(existing);
+                }
+                else
+                {
+                    return 0;
+                }
+            }
+
+            Span<byte> random = stackalloc byte[sizeof(ulong)];
+            for (int attempt = 0; attempt < 32; attempt++)
+            {
+                RandomNumberGenerator.Fill(random);
+                ulong id = BinaryPrimitives.ReadUInt64LittleEndian(random);
+                if (id == 0 || objectsById.ContainsKey(id) || !issuedFiniteOperationIds.Add(id))
+                {
+                    continue;
+                }
+
+                long deadline = checked(Environment.TickCount64 + maximumLifetimeMilliseconds);
+                objectsById.Add(id, new Entry(objectTypeId, handler, ownerObjectId, true, deadline));
+                idsByHandler.Add(handler, id);
+                return id;
+            }
+
+            return 0;
+        }
+
         internal bool TryResolveLocked(ulong objectId, out ulong objectTypeId, out object? handler)
         {
-            if (objectsById.TryGetValue(objectId, out Entry entry))
+            if (objectsById.TryGetValue(objectId, out Entry? entry) && IsAdmissibleLocked(entry))
             {
                 objectTypeId = entry.ObjectTypeId;
                 handler = entry.Handler;
                 return true;
             }
 
+            RemoveEntryAndDescendantsLocked(objectId);
             objectTypeId = 0;
             handler = null;
             return false;
         }
 
+        internal PowerShellBridgeFiniteOperationCancelResult TryBeginFiniteOperationCancelLocked(ulong objectId)
+        {
+            if (!objectsById.TryGetValue(objectId, out Entry? entry) ||
+                !entry.IsFiniteOperation ||
+                !IsAdmissibleLocked(entry))
+            {
+                RemoveEntryAndDescendantsLocked(objectId);
+                return PowerShellBridgeFiniteOperationCancelResult.Invalid;
+            }
+
+            if (entry.CancelDispatched)
+            {
+                return PowerShellBridgeFiniteOperationCancelResult.AlreadyCancelled;
+            }
+
+            entry.CancelDispatched = true;
+            return PowerShellBridgeFiniteOperationCancelResult.InvokeHandler;
+        }
+
         internal bool TryReleaseLocked(ulong objectId)
         {
-            if (!objectsById.TryGetValue(objectId, out Entry entry))
+            if (!objectsById.TryGetValue(objectId, out Entry? entry) || entry is null)
             {
                 return false;
             }
 
-            objectsById.Remove(objectId);
-            idsByHandler.Remove(entry.Handler);
+            RemoveEntryAndDescendantsLocked(objectId);
             return true;
         }
 
@@ -379,20 +529,92 @@ public sealed class PowerShellBridgeLeaseTable
             Generation = unchecked(Generation + 1);
         }
 
-        private readonly struct Entry
+        private bool IsAdmissibleLocked(Entry entry)
         {
-            internal Entry(ulong objectTypeId, object handler)
+            if (entry.ExpiresAtMilliseconds != 0 && Environment.TickCount64 >= entry.ExpiresAtMilliseconds)
+            {
+                return false;
+            }
+
+            if (entry.OwnerObjectId == 0)
+            {
+                return true;
+            }
+
+            return objectsById.TryGetValue(entry.OwnerObjectId, out Entry? owner) &&
+                owner != entry &&
+                IsAdmissibleLocked(owner);
+        }
+
+        private void SweepExpiredFiniteOperationsLocked()
+        {
+            var expired = new List<ulong>();
+            foreach (KeyValuePair<ulong, Entry> candidate in objectsById)
+            {
+                if (candidate.Value.IsFiniteOperation && !IsAdmissibleLocked(candidate.Value))
+                {
+                    expired.Add(candidate.Key);
+                }
+            }
+
+            foreach (ulong objectId in expired)
+            {
+                RemoveEntryAndDescendantsLocked(objectId);
+            }
+        }
+
+        private void RemoveEntryAndDescendantsLocked(ulong objectId)
+        {
+            if (!objectsById.TryGetValue(objectId, out Entry? entry))
+            {
+                return;
+            }
+
+            var children = new List<ulong>();
+            foreach (KeyValuePair<ulong, Entry> candidate in objectsById)
+            {
+                if (candidate.Value.OwnerObjectId == objectId)
+                {
+                    children.Add(candidate.Key);
+                }
+            }
+
+            foreach (ulong child in children)
+            {
+                RemoveEntryAndDescendantsLocked(child);
+            }
+
+            objectsById.Remove(objectId);
+            idsByHandler.Remove(entry.Handler);
+        }
+
+        private sealed class Entry
+        {
+            internal Entry(
+                ulong objectTypeId,
+                object handler,
+                ulong ownerObjectId,
+                bool isFiniteOperation,
+                long expiresAtMilliseconds)
             {
                 ObjectTypeId = objectTypeId;
                 Handler = handler;
+                OwnerObjectId = ownerObjectId;
+                IsFiniteOperation = isFiniteOperation;
+                ExpiresAtMilliseconds = expiresAtMilliseconds;
             }
 
             internal ulong ObjectTypeId { get; }
 
             internal object Handler { get; }
+
+            internal ulong OwnerObjectId { get; }
+
+            internal bool IsFiniteOperation { get; }
+
+            internal long ExpiresAtMilliseconds { get; }
+
+            internal bool CancelDispatched { get; set; }
         }
     }
 }
-
-
-

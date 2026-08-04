@@ -255,6 +255,37 @@ internal sealed class BridgeObjectModel
     internal string Name => Symbol.Name;
 
     internal List<BridgeMemberModel> Members { get; } = new();
+
+    /// <summary>Optional finite-operation declaration resolved from the source attribute.</summary>
+    internal BridgeFiniteOperationModel? FiniteOperation { get; set; }
+}
+
+/// <summary>Static ordinals and bounded admission lifetime for one finite operation.</summary>
+internal sealed class BridgeFiniteOperationModel
+{
+    internal BridgeFiniteOperationModel(
+        uint statusMemberId,
+        uint statusTerminalFieldId,
+        uint cancelMemberId,
+        uint pageMemberId,
+        int maximumLifetimeMilliseconds)
+    {
+        StatusMemberId = statusMemberId;
+        StatusTerminalFieldId = statusTerminalFieldId;
+        CancelMemberId = cancelMemberId;
+        PageMemberId = pageMemberId;
+        MaximumLifetimeMilliseconds = maximumLifetimeMilliseconds;
+    }
+
+    internal uint StatusMemberId { get; }
+
+    internal uint StatusTerminalFieldId { get; }
+
+    internal uint CancelMemberId { get; }
+
+    internal uint PageMemberId { get; }
+
+    internal int MaximumLifetimeMilliseconds { get; }
 }
 
 /// <summary>One field of a copied data contract.</summary>
@@ -294,6 +325,9 @@ internal sealed class BridgeDataModel
 
     internal List<BridgeFieldModel> Fields { get; } = new();
 
+    /// <summary>Optional fixed snapshot-page field layout resolved from the source attribute.</summary>
+    internal BridgeSnapshotPageModel? SnapshotPage { get; set; }
+
     internal int MaximumEncodedBytes(IReadOnlyDictionary<ulong, BridgeDataModel> data)
     {
         int total = BridgeLimits.ValueHeaderSize + BridgeLimits.DataPrologueSize;
@@ -305,6 +339,58 @@ internal sealed class BridgeDataModel
 
         return total;
     }
+}
+
+/// <summary>Static field ordinals required for one finite operation snapshot page.</summary>
+internal sealed class BridgeSnapshotPageModel
+{
+    internal BridgeSnapshotPageModel(
+        uint columnsFieldId,
+        uint rowsFieldId,
+        uint nextCursorFieldId,
+        uint snapshotRevisionFieldId,
+        uint permissionRevisionFieldId,
+        uint cursorLeaseExpiresAtFieldId,
+        uint isTerminalFieldId,
+        uint isGapFieldId,
+        uint isOverflowFieldId,
+        uint isTruncatedFieldId,
+        uint totalCountFieldId)
+    {
+        ColumnsFieldId = columnsFieldId;
+        RowsFieldId = rowsFieldId;
+        NextCursorFieldId = nextCursorFieldId;
+        SnapshotRevisionFieldId = snapshotRevisionFieldId;
+        PermissionRevisionFieldId = permissionRevisionFieldId;
+        CursorLeaseExpiresAtFieldId = cursorLeaseExpiresAtFieldId;
+        IsTerminalFieldId = isTerminalFieldId;
+        IsGapFieldId = isGapFieldId;
+        IsOverflowFieldId = isOverflowFieldId;
+        IsTruncatedFieldId = isTruncatedFieldId;
+        TotalCountFieldId = totalCountFieldId;
+    }
+
+    internal uint ColumnsFieldId { get; }
+
+    internal uint RowsFieldId { get; }
+
+    internal uint NextCursorFieldId { get; }
+
+    internal uint SnapshotRevisionFieldId { get; }
+
+    internal uint PermissionRevisionFieldId { get; }
+
+    internal uint CursorLeaseExpiresAtFieldId { get; }
+
+    internal uint IsTerminalFieldId { get; }
+
+    internal uint IsGapFieldId { get; }
+
+    internal uint IsOverflowFieldId { get; }
+
+    internal uint IsTruncatedFieldId { get; }
+
+    internal uint TotalCountFieldId { get; }
 }
 
 /// <summary>One member of a closed enumeration.</summary>

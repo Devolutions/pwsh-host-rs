@@ -149,10 +149,189 @@ internal static class BridgeContractTests
         VerifyUnannotatedReferenceTypeIsRejectedForHashParity(run);
         VerifyPayloadObjectTableIsLocallyBounded(run, assertNoErrors);
         VerifyBoundedDataRowPages(run, assertNoErrors);
+        VerifyFiniteOperationDeclarations(run, assertNoErrors);
         VerifyDiagnostic(run, Valid.Replace("string ProductVersion { get; }", "string __bridgeProductVersion { get; }", StringComparison.Ordinal), "MPWLC014");
         VerifyDiagnostic(run, Valid.Replace("[BridgeBound(MaximumUtf8Bytes = 128)] string name", "[BridgeBound(MaximumUtf8Bytes = 128)] string __bridgeRequest", StringComparison.Ordinal), "MPWLC014");
         VerifyMissingMode(run);
         VerifyMixedFamilies(run);
+    }
+
+    private static void VerifyFiniteOperationDeclarations(
+        Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run,
+        Action<IEnumerable<Diagnostic>> assertNoErrors)
+    {
+        const string child = """
+            [BridgeObject(2, ReleaseId = 901)]
+            [BridgeFiniteOperation(
+                StatusMemberId = 10,
+                StatusTerminalFieldId = 2,
+                CancelMemberId = 11,
+                PageMemberId = 12,
+                MaximumLifetimeMilliseconds = 60000)]
+            public interface ISampleChild
+            {
+                [BridgeMember(10, Permission = BridgePermission.Read)]
+                ISampleOperationStatus Status { get; }
+
+                [BridgeMember(11, Permission = BridgePermission.Execute, Mutation = BridgeMutation.Direct)]
+                void Cancel();
+
+                [BridgeMember(12, Permission = BridgePermission.Read)]
+                ISampleOperationPage ReadPage(Guid cursor, long snapshotRevision, long permissionRevision);
+            }
+            """;
+        const string originalChild = """
+            [BridgeObject(2, ReleaseId = 901)]
+            public interface ISampleChild
+            {
+                [BridgeMember(10, SetterId = 11,
+                    Permission = BridgePermission.Read,
+                    SetterPermission = BridgePermission.Write,
+                    SetterMutation = BridgeMutation.Direct,
+                    MaximumUtf8Bytes = 256)]
+                string Name { get; set; }
+
+                [BridgeMember(12, Permission = BridgePermission.Read)]
+                long? Size { get; }
+            }
+            """;
+        string source = Valid.Replace(originalChild, child, StringComparison.Ordinal) + """
+
+            [BridgeData(81)]
+            public interface ISampleOperationStatus
+            {
+                [BridgeField(1)]
+                long ResultCount { get; }
+
+                [BridgeField(2)]
+                bool IsTerminal { get; }
+            }
+
+            [BridgeData(82)]
+            [BridgeSnapshotPage(
+                ColumnsFieldId = 1,
+                RowsFieldId = 2,
+                NextCursorFieldId = 3,
+                SnapshotRevisionFieldId = 4,
+                PermissionRevisionFieldId = 5,
+                CursorLeaseExpiresAtFieldId = 6,
+                IsTerminalFieldId = 7,
+                IsGapFieldId = 8,
+                IsOverflowFieldId = 9,
+                IsTruncatedFieldId = 10,
+                TotalCountFieldId = 11)]
+            public interface ISampleOperationPage
+            {
+                [BridgeField(1, MaximumCollectionCount = 4)]
+                IReadOnlyList<ISampleOperationColumn> Columns { get; }
+
+                [BridgeField(2, MaximumCollectionCount = 8)]
+                IReadOnlyList<ISampleOperationRow> Rows { get; }
+
+                [BridgeField(3)]
+                Guid NextCursor { get; }
+
+                [BridgeField(4)]
+                long SnapshotRevision { get; }
+
+                [BridgeField(5)]
+                long PermissionRevision { get; }
+
+                [BridgeField(6)]
+                long CursorLeaseExpiresAtMilliseconds { get; }
+
+                [BridgeField(7)]
+                bool IsTerminal { get; }
+
+                [BridgeField(8)]
+                bool IsGap { get; }
+
+                [BridgeField(9)]
+                bool IsOverflow { get; }
+
+                [BridgeField(10)]
+                bool IsTruncated { get; }
+
+                [BridgeField(11)]
+                long TotalCount { get; }
+            }
+
+            [BridgeData(83)]
+            public interface ISampleOperationColumn
+            {
+                [BridgeField(1, MaximumUtf8Bytes = 32)]
+                string Name { get; }
+
+                [BridgeField(2)]
+                SampleOperationColumnType Type { get; }
+            }
+
+            [BridgeData(84)]
+            public interface ISampleOperationRow
+            {
+                [BridgeField(1)]
+                long Sequence { get; }
+
+                [BridgeField(2)]
+                long Value { get; }
+            }
+
+            [BridgeEnum(85)]
+            public enum SampleOperationColumnType
+            {
+                Int64 = 0,
+            }
+            """;
+        foreach (string mode in new[] { "Host", "Payload" })
+        {
+            var (result, output) = run(source, mode);
+            assertNoErrors(Diagnostics(result));
+            assertNoErrors(output.GetDiagnostics());
+            string generated = Generated(result);
+            string required = mode == "Host"
+                ? "RegisterFiniteOperation"
+                : "DescriptorHashHex";
+            if (!generated.Contains(required, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"The {mode} finite-operation output must contain '{required}'.");
+            }
+
+            if (mode == "Host")
+            {
+                int cancelGate = generated.IndexOf("var __bridgeCancel =", StringComparison.Ordinal);
+                int completionCheck = cancelGate < 0
+                    ? -1
+                    : generated.LastIndexOf("if (!__bridgeReader.IsComplete)", cancelGate, StringComparison.Ordinal);
+                if (completionCheck < 0)
+                {
+                    throw new InvalidOperationException("A finite-operation cancel must reject trailing request data before it changes cancellation state.");
+                }
+            }
+        }
+
+        string firstHash = ExtractHash(run, assertNoErrors, source, "Host");
+        string payloadHash = ExtractHash(run, assertNoErrors, source, "Payload");
+        string changedHash = ExtractHash(
+            run,
+            assertNoErrors,
+            source.Replace("MaximumLifetimeMilliseconds = 60000", "MaximumLifetimeMilliseconds = 60001", StringComparison.Ordinal),
+            "Host");
+        if (!string.Equals(firstHash, payloadHash, StringComparison.Ordinal) ||
+            string.Equals(firstHash, changedHash, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Finite-operation metadata must contribute to the canonical descriptor hash.");
+        }
+
+        VerifyDiagnostic(run, source.Replace("StatusTerminalFieldId = 2", "StatusTerminalFieldId = 1", StringComparison.Ordinal), "MPWLC025");
+        VerifyDiagnostic(run, source.Replace("Mutation = BridgeMutation.Direct", "Mutation = BridgeMutation.None", StringComparison.Ordinal), "MPWLC025");
+        VerifyDiagnostic(run, source.Replace("ReadPage(Guid cursor, long snapshotRevision, long permissionRevision)", "ReadPage(Guid cursor, long snapshotRevision)", StringComparison.Ordinal), "MPWLC025");
+        VerifyDiagnostic(run, source.Replace("Guid NextCursor { get; }", "long NextCursor { get; }", StringComparison.Ordinal), "MPWLC025");
+        VerifyDiagnostic(run, source.Replace("IReadOnlyList<ISampleOperationColumn> Columns { get; }", "IReadOnlyList<long> Columns { get; }", StringComparison.Ordinal), "MPWLC025");
+        VerifyDiagnostic(run, source.Replace(", MaximumCollectionCount = 4", string.Empty, StringComparison.Ordinal), "MPWLC025");
+        VerifyDiagnostic(run, source.Replace("long Value { get; }", "long Value { get; } [BridgeField(3, MaximumCollectionCount = 2)] IReadOnlyList<long> Values { get; }", StringComparison.Ordinal), "MPWLC025");
+        VerifyDiagnostic(run, source.Replace("ISampleOperationPage ReadPage(Guid cursor, long snapshotRevision, long permissionRevision);", "ISampleOperationPage ReadPage(Guid cursor, long snapshotRevision, long permissionRevision); [BridgeMember(13, Permission = BridgePermission.Read)] long Extra { get; }", StringComparison.Ordinal), "MPWLC025");
+        VerifyDiagnostic(run, source.Replace("PageMemberId = 12", "PageMemberId = 13", StringComparison.Ordinal), "MPWLC025");
+        VerifyDiagnostic(run, source.Replace("[BridgeObject(1, ReleaseId = 900)]", "[BridgeObject(1, ReleaseId = 900)]\n        [BridgeFiniteOperation(StatusMemberId = 10, StatusTerminalFieldId = 2, CancelMemberId = 11, PageMemberId = 12, MaximumLifetimeMilliseconds = 60000)]", StringComparison.Ordinal), "MPWLC025");
     }
 
     private static void VerifyBoundedDataRowPages(
@@ -494,7 +673,16 @@ internal static class BridgeContractTests
         Action<IEnumerable<Diagnostic>> assertNoErrors,
         string mode)
     {
-        var (result, output) = run(Valid, mode);
+        return ExtractHash(run, assertNoErrors, Valid, mode);
+    }
+
+    private static string ExtractHash(
+        Func<string, string, (GeneratorDriverRunResult Result, Compilation Output)> run,
+        Action<IEnumerable<Diagnostic>> assertNoErrors,
+        string source,
+        string mode)
+    {
+        var (result, output) = run(source, mode);
         assertNoErrors(Diagnostics(result));
         assertNoErrors(output.GetDiagnostics());
         string generated = Generated(result);

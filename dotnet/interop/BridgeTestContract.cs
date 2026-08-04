@@ -34,7 +34,7 @@ public partial interface IPowerShellBridgeTestCountTransport
 }
 
 /// <summary>Acceptance-only closed bridge contract with no transport-specific members.</summary>
-[BridgeContract("496D8528-7AE6-4C31-835E-597E2166E35B", 1, 0, "BF3A7727-1B58-435D-A4E9-C4E83A93D47E")]
+[BridgeContract("496D8528-7AE6-4C31-835E-597E2166E35B", 1, 1, "BF3A7727-1B58-435D-A4E9-C4E83A93D47E")]
 [BridgeObject(1, ReleaseId = 100)]
 public interface IPowerShellBridgeTestCount
 {
@@ -63,6 +63,12 @@ public interface IPowerShellBridgeTestCount
 /// operation remains a generated bounded member.
 /// </summary>
 [BridgeObject(2, ReleaseId = 101)]
+[BridgeFiniteOperation(
+    StatusMemberId = 10,
+    StatusTerminalFieldId = 2,
+    CancelMemberId = 11,
+    PageMemberId = 12,
+    MaximumLifetimeMilliseconds = 60_000)]
 public interface IPowerShellBridgeTestJob
 {
     [BridgeMember(10, Permission = BridgePermission.Read)]
@@ -72,7 +78,7 @@ public interface IPowerShellBridgeTestJob
     void Cancel();
 
     [BridgeMember(12, Permission = BridgePermission.Read)]
-    PowerShellBridgeTestJobPage ReadResults(int cursor);
+    PowerShellBridgeTestJobPage ReadResults(Guid cursor, long snapshotRevision, long permissionRevision);
 }
 
 [BridgeEnum(90)]
@@ -97,6 +103,18 @@ public interface PowerShellBridgeTestJobStatus
 }
 
 [BridgeData(92)]
+[BridgeSnapshotPage(
+    ColumnsFieldId = 1,
+    RowsFieldId = 2,
+    NextCursorFieldId = 3,
+    SnapshotRevisionFieldId = 4,
+    PermissionRevisionFieldId = 5,
+    CursorLeaseExpiresAtFieldId = 6,
+    IsTerminalFieldId = 7,
+    IsGapFieldId = 8,
+    IsOverflowFieldId = 9,
+    IsTruncatedFieldId = 10,
+    TotalCountFieldId = 11)]
 public interface PowerShellBridgeTestJobPage
 {
     [BridgeField(1, MaximumCollectionCount = 4)]
@@ -106,15 +124,30 @@ public interface PowerShellBridgeTestJobPage
     IReadOnlyList<PowerShellBridgeTestGridRow> Rows { get; }
 
     [BridgeField(3)]
-    int NextCursor { get; }
+    Guid NextCursor { get; }
 
     [BridgeField(4)]
-    bool IsComplete { get; }
+    long SnapshotRevision { get; }
 
     [BridgeField(5)]
-    bool IsTruncated { get; }
+    long PermissionRevision { get; }
 
     [BridgeField(6)]
+    long CursorLeaseExpiresAtMilliseconds { get; }
+
+    [BridgeField(7)]
+    bool IsTerminal { get; }
+
+    [BridgeField(8)]
+    bool IsGap { get; }
+
+    [BridgeField(9)]
+    bool IsOverflow { get; }
+
+    [BridgeField(10)]
+    bool IsTruncated { get; }
+
+    [BridgeField(11)]
     long TotalCount { get; }
 }
 

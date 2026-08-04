@@ -113,16 +113,17 @@ internal static class BridgeAttachmentSmoke
 
             using PowerShell finiteJob = runtime.Create();
             PowerShellInvocationResult jobOutput = finiteJob
-                .AddScript("$job = $RDM.StartJob(); $before = $job.Status; $page = $job.ReadResults(0); $job.Cancel(); \"$($before.State)|$($page.Columns[2].Name)|$($page.Rows[0].Label)|$(@($page.Rows).Count)|$($job.Status.IsTerminal)\"")
+                .AddScript("$job = $RDM.StartJob(); $before = $job.Status; $page = $job.ReadResults([Guid]::Empty, 17, 29); $terminal = $job.ReadResults($page.NextCursor, 17, 29); $gap = $job.ReadResults([Guid]::Empty, 18, 29); $job.Cancel(); $job.Cancel(); \"$($before.State)|$($page.Columns[2].Name)|$($page.Rows[0].Label)|$(@($page.Rows).Count)|$($page.SnapshotRevision)|$($page.PermissionRevision)|$($terminal.Rows[0].Label)|$($terminal.IsTerminal)|$($gap.IsGap)|$($job.Status.IsTerminal)\"")
                 .WithBridge(binding, "RDM")
                 .InvokeAsync(CancellationToken.None)
                 .GetAwaiter()
                 .GetResult();
             if (pumpFailure is not null ||
                 jobOutput.Output.Records.Count != 1 ||
-                jobOutput.Output.Records[0].DisplayText != "Running|Label|result-10|2|True")
+                jobOutput.Output.Records[0].DisplayText != "Running|Label|result-10|2|17|29|result-30|True|True|True" ||
+                host.JobCancelDispatchCount != 1)
             {
-                Console.Error.WriteLine("NativeAOT generated bridge job did not preserve its fixed-schema typed page, status, and cancellation.");
+                Console.Error.WriteLine("NativeAOT generated bridge finite operation did not preserve its fixed snapshot page, revision gap, or first-wins cancellation.");
                 return false;
             }
 

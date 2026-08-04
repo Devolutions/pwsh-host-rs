@@ -21,6 +21,8 @@ internal static class BridgeContractAnalyzer
     internal const string EventAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeEventAttribute";
     internal const string ReliableEventAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeReliableEventAttribute";
     internal const string DataAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeDataAttribute";
+    internal const string FiniteOperationAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeFiniteOperationAttribute";
+    internal const string SnapshotPageAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeSnapshotPageAttribute";
     internal const string FieldAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeFieldAttribute";
     internal const string BoundAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeBoundAttribute";
     internal const string EnumAttribute = "Devolutions.PowerShell.Ffi.LiveObjects.BridgeEnumAttribute";
@@ -162,6 +164,9 @@ internal static class BridgeContractAnalyzer
         {
             AnalyzeMembers(model, objects, data, enums, well, ordinals, diagnostics, ref valid);
         }
+
+        ValidateSnapshotPages(data, diagnostics, ref valid);
+        ValidateFiniteOperations(root, objects, data, diagnostics, ref valid);
 
         if (!valid)
         {
@@ -343,7 +348,14 @@ internal static class BridgeContractAnalyzer
                 continue;
             }
 
-            models.Add(new BridgeDataModel(symbol, id));
+            var model = new BridgeDataModel(symbol, id);
+            AttributeData? snapshotPage = GetAttribute(symbol, SnapshotPageAttribute);
+            if (snapshotPage is not null)
+            {
+                model.SnapshotPage = CreateSnapshotPageModel(snapshotPage, symbol, diagnostics, ref valid);
+            }
+
+            models.Add(model);
         }
 
         models.Sort(static (left, right) => left.Id.CompareTo(right.Id));
@@ -410,6 +422,253 @@ internal static class BridgeContractAnalyzer
         return models;
     }
 
+    private static BridgeFiniteOperationModel? CreateFiniteOperationModel(
+        AttributeData attribute,
+        ISymbol symbol,
+        List<Diagnostic> diagnostics,
+        ref bool valid)
+    {
+        uint statusMemberId = GetNamedUInt(attribute, "StatusMemberId");
+        uint statusTerminalFieldId = GetNamedUInt(attribute, "StatusTerminalFieldId");
+        uint cancelMemberId = GetNamedUInt(attribute, "CancelMemberId");
+        uint pageMemberId = GetNamedUInt(attribute, "PageMemberId");
+        int maximumLifetimeMilliseconds = GetNamedInt(attribute, "MaximumLifetimeMilliseconds");
+        if (!AreDistinctNonZero(statusMemberId, cancelMemberId, pageMemberId) ||
+            statusTerminalFieldId == 0 ||
+            maximumLifetimeMilliseconds is < 1 or > 3_600_000)
+        {
+            Report(
+                diagnostics,
+                ref valid,
+                BridgeContractDiagnostics.InvalidFiniteOperation,
+                symbol,
+                "declare distinct non-zero StatusMemberId, CancelMemberId, and PageMemberId, a non-zero StatusTerminalFieldId, and MaximumLifetimeMilliseconds in 1..3600000");
+            return null;
+        }
+
+        return new BridgeFiniteOperationModel(
+            statusMemberId,
+            statusTerminalFieldId,
+            cancelMemberId,
+            pageMemberId,
+            maximumLifetimeMilliseconds);
+    }
+
+    private static BridgeSnapshotPageModel? CreateSnapshotPageModel(
+        AttributeData attribute,
+        ISymbol symbol,
+        List<Diagnostic> diagnostics,
+        ref bool valid)
+    {
+        uint columnsFieldId = GetNamedUInt(attribute, "ColumnsFieldId");
+        uint rowsFieldId = GetNamedUInt(attribute, "RowsFieldId");
+        uint nextCursorFieldId = GetNamedUInt(attribute, "NextCursorFieldId");
+        uint snapshotRevisionFieldId = GetNamedUInt(attribute, "SnapshotRevisionFieldId");
+        uint permissionRevisionFieldId = GetNamedUInt(attribute, "PermissionRevisionFieldId");
+        uint cursorLeaseExpiresAtFieldId = GetNamedUInt(attribute, "CursorLeaseExpiresAtFieldId");
+        uint isTerminalFieldId = GetNamedUInt(attribute, "IsTerminalFieldId");
+        uint isGapFieldId = GetNamedUInt(attribute, "IsGapFieldId");
+        uint isOverflowFieldId = GetNamedUInt(attribute, "IsOverflowFieldId");
+        uint isTruncatedFieldId = GetNamedUInt(attribute, "IsTruncatedFieldId");
+        uint totalCountFieldId = GetNamedUInt(attribute, "TotalCountFieldId");
+        if (!AreDistinctNonZero(
+                columnsFieldId,
+                rowsFieldId,
+                nextCursorFieldId,
+                snapshotRevisionFieldId,
+                permissionRevisionFieldId,
+                cursorLeaseExpiresAtFieldId,
+                isTerminalFieldId,
+                isGapFieldId,
+                isOverflowFieldId,
+                isTruncatedFieldId,
+                totalCountFieldId))
+        {
+            Report(
+                diagnostics,
+                ref valid,
+                BridgeContractDiagnostics.InvalidFiniteOperation,
+                symbol,
+                "declare distinct non-zero snapshot-page field ordinals");
+            return null;
+        }
+
+        return new BridgeSnapshotPageModel(
+            columnsFieldId,
+            rowsFieldId,
+            nextCursorFieldId,
+            snapshotRevisionFieldId,
+            permissionRevisionFieldId,
+            cursorLeaseExpiresAtFieldId,
+            isTerminalFieldId,
+            isGapFieldId,
+            isOverflowFieldId,
+            isTruncatedFieldId,
+            totalCountFieldId);
+    }
+
+    private static void ValidateSnapshotPages(
+        List<BridgeDataModel> data,
+        List<Diagnostic> diagnostics,
+        ref bool valid)
+    {
+        foreach (BridgeDataModel page in data)
+        {
+            BridgeSnapshotPageModel? layout = page.SnapshotPage;
+            if (layout is null)
+            {
+                continue;
+            }
+
+            bool pageValid =
+                HasFlatListOfDataField(page, layout.ColumnsFieldId, data) &&
+                HasFlatListOfDataField(page, layout.RowsFieldId, data) &&
+                HasFieldTag(page, layout.NextCursorFieldId, BridgeTag.Guid) &&
+                HasFieldTag(page, layout.SnapshotRevisionFieldId, BridgeTag.Int64) &&
+                HasFieldTag(page, layout.PermissionRevisionFieldId, BridgeTag.Int64) &&
+                HasFieldTag(page, layout.CursorLeaseExpiresAtFieldId, BridgeTag.Int64) &&
+                HasFieldTag(page, layout.IsTerminalFieldId, BridgeTag.Bool) &&
+                HasFieldTag(page, layout.IsGapFieldId, BridgeTag.Bool) &&
+                HasFieldTag(page, layout.IsOverflowFieldId, BridgeTag.Bool) &&
+                HasFieldTag(page, layout.IsTruncatedFieldId, BridgeTag.Bool) &&
+                HasFieldTag(page, layout.TotalCountFieldId, BridgeTag.Int64);
+            if (!pageValid)
+            {
+                Report(
+                    diagnostics,
+                    ref valid,
+                    BridgeContractDiagnostics.InvalidFiniteOperation,
+                    page.Symbol,
+                    "declare bounded flat copied data column/row lists, Guid NextCursor, long snapshot/permission/expiry/total fields, and bool terminal/gap/overflow/truncation fields at the configured ordinals");
+            }
+        }
+    }
+
+    private static void ValidateFiniteOperations(
+        INamedTypeSymbol root,
+        List<BridgeObjectModel> objects,
+        List<BridgeDataModel> data,
+        List<Diagnostic> diagnostics,
+        ref bool valid)
+    {
+        var referencedPages = new HashSet<ulong>();
+        foreach (BridgeObjectModel operation in objects)
+        {
+            BridgeFiniteOperationModel? definition = operation.FiniteOperation;
+            if (definition is null)
+            {
+                continue;
+            }
+
+            bool operationValid = !SymbolEqualityComparer.Default.Equals(operation.Symbol, root) &&
+                operation.Members.Count == 3;
+            BridgeMemberModel? status = operation.Members.Find(member => member.Ordinal == definition.StatusMemberId);
+            BridgeMemberModel? cancel = operation.Members.Find(member => member.Ordinal == definition.CancelMemberId);
+            BridgeMemberModel? page = operation.Members.Find(member => member.Ordinal == definition.PageMemberId);
+            operationValid &= status is not null &&
+                status.Kind == BridgeRecordKind.Getter &&
+                status.Permission == 1 &&
+                status.Mutation == 0 &&
+                status.Result.Tag == BridgeTag.Data &&
+                !status.Result.IsNullable;
+            operationValid &= cancel is not null &&
+                cancel.Kind == BridgeRecordKind.Method &&
+                cancel.Permission == 3 &&
+                cancel.Mutation == 1 &&
+                cancel.Result.Tag == BridgeTag.Null &&
+                !cancel.Result.IsNullable &&
+                cancel.Parameters.Count == 0;
+            operationValid &= page is not null &&
+                page.Kind == BridgeRecordKind.Method &&
+                page.Permission == 1 &&
+                page.Mutation == 0 &&
+                page.Result.Tag == BridgeTag.Data &&
+                !page.Result.IsNullable &&
+                page.Parameters.Count == 3 &&
+                HasTag(page.Parameters, 0, BridgeTag.Guid) &&
+                HasTag(page.Parameters, 1, BridgeTag.Int64) &&
+                HasTag(page.Parameters, 2, BridgeTag.Int64);
+
+            BridgeDataModel? statusData = status is null
+                ? null
+                : data.Find(candidate => candidate.Id == status.Result.TypeId);
+            operationValid &= statusData is not null &&
+                HasFieldTag(statusData, definition.StatusTerminalFieldId, BridgeTag.Bool);
+
+            BridgeDataModel? pageData = page is null
+                ? null
+                : data.Find(candidate => candidate.Id == page.Result.TypeId);
+            operationValid &= pageData?.SnapshotPage is not null;
+            operationValid &= pageData is not null && referencedPages.Add(pageData.Id);
+            if (!operationValid)
+            {
+                Report(
+                    diagnostics,
+                    ref valid,
+                    BridgeContractDiagnostics.InvalidFiniteOperation,
+                    operation.Symbol,
+                    "declare a non-root object with exactly a read-only copied status (including its configured bool terminal field), direct execute-only void Cancel(), and ReadPage(Guid, long, long) returning one uniquely marked [BridgeSnapshotPage]");
+            }
+        }
+
+        foreach (BridgeDataModel page in data)
+        {
+            if (page.SnapshotPage is not null && !referencedPages.Contains(page.Id))
+            {
+                Report(
+                    diagnostics,
+                    ref valid,
+                    BridgeContractDiagnostics.InvalidFiniteOperation,
+                    page.Symbol,
+                    "a [BridgeSnapshotPage] must be the unique page result of one [BridgeFiniteOperation]");
+            }
+        }
+    }
+
+    private static bool AreDistinctNonZero(params uint[] values)
+    {
+        var seen = new HashSet<uint>();
+        foreach (uint value in values)
+        {
+            if (value == 0 || !seen.Add(value))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool HasFlatListOfDataField(
+        BridgeDataModel model,
+        uint ordinal,
+        List<BridgeDataModel> data)
+    {
+        BridgeFieldModel? field = model.Fields.Find(candidate => candidate.Ordinal == ordinal);
+        if (field is null ||
+            field.Type.IsNullable ||
+            field.Type.Tag != BridgeTag.List ||
+            field.Type.Element is not { IsNullable: false, Tag: BridgeTag.Data } element)
+        {
+            return false;
+        }
+
+        BridgeDataModel? item = data.Find(candidate => candidate.Id == element.TypeId);
+        return item is not null &&
+            item.Fields.All(candidate =>
+                candidate.Type.Tag != BridgeTag.List &&
+                candidate.Type.Tag != BridgeTag.Data);
+    }
+
+    private static bool HasFieldTag(BridgeDataModel? model, uint ordinal, byte tag)
+    {
+        BridgeFieldModel? field = model?.Fields.Find(candidate => candidate.Ordinal == ordinal);
+        return field is not null && !field.Type.IsNullable && field.Type.Tag == tag;
+    }
+
+    private static bool HasTag(IReadOnlyList<BridgeParameterModel> parameters, int index, byte tag) =>
+        parameters.Count > index && !parameters[index].Type.IsNullable && parameters[index].Type.Tag == tag;
+
     private static List<BridgeObjectModel> AnalyzeObjects(
         IReadOnlyList<INamedTypeSymbol> declarations,
         Dictionary<uint, string> ordinals,
@@ -447,7 +706,14 @@ internal static class BridgeContractAnalyzer
             }
 
             ordinals.Add(releaseId, symbol.Name + ".Release");
-            models.Add(new BridgeObjectModel(symbol, id, releaseId));
+            var model = new BridgeObjectModel(symbol, id, releaseId);
+            AttributeData? finiteOperation = GetAttribute(symbol, FiniteOperationAttribute);
+            if (finiteOperation is not null)
+            {
+                model.FiniteOperation = CreateFiniteOperationModel(finiteOperation, symbol, diagnostics, ref valid);
+            }
+
+            models.Add(model);
         }
 
         models.Sort(static (left, right) => left.Id.CompareTo(right.Id));
@@ -1454,4 +1720,3 @@ internal static class BridgeContractAnalyzer
             ? (byte)value
             : (byte)0;
 }
-

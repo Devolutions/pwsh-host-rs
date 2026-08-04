@@ -483,7 +483,7 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
         new PowerShellLiveObjectContract(
             typeof(IPowerShellBridgeTestCountTransport).GUID,
             majorVersion: 1,
-            minorVersion: 0,
+            minorVersion: 1,
             PowerShellLiveObjectDirection.ConsumerToSession | PowerShellLiveObjectDirection.BridgeContract),
         bridgeBroker))
     {

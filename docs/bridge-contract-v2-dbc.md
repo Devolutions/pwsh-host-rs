@@ -220,6 +220,53 @@ cancel request. Applications must expose the resulting terminal status through
 their static status/page values; the SDK does not imply task, process, or
 external-side-effect atomicity.
 
+### Generated finite operations and snapshot pages
+
+An opt-in finite operation is a closed child `[BridgeObject]` marked with
+`[BridgeFiniteOperation]`. Its declaration names exactly one read-only status
+member, one direct execute-only `void Cancel()` member, and one read-only page
+member. It also declares a bounded admission lifetime. The status data carries
+an explicitly identified `bool IsTerminal` field.
+
+The page result is a copied `[BridgeData]` marked with
+`[BridgeSnapshotPage]`. It has bounded static column and row lists plus
+statically typed `Guid NextCursor`, `long SnapshotRevision`, `long
+PermissionRevision`, `long CursorLeaseExpiresAtMilliseconds`, `bool
+IsTerminal`, `bool IsGap`, `bool IsOverflow`, `bool IsTruncated`, and `long
+TotalCount` fields. The generated page member has exactly the copied input
+shape `ReadPage(Guid cursor, long snapshotRevision, long permissionRevision)`.
+The generator rejects a missing field, a mismatched tag, a dynamic/handle row,
+an unbounded collection, or any extra operation member.
+
+The dispatcher allocates finite-operation child handles with a nonzero
+cryptographically random object identifier, bounded to 1,024 issued operation
+identities for one lease. An operation is bound to the admitted parent object;
+releasing that parent invalidates every owned operation child. Its deadline is
+checked before each later admission, so a request admitted before expiry can
+finish but no request at or after expiry reaches application code. Repeating
+`Cancel` returns the same generated success reply without calling the handler
+again. These are local bridge-lifetime guarantees, not a promise that external
+work was stopped.
+
+The operation handler owns the application snapshot and permission revisions:
+it creates opaque cursor values, binds them to the caller's snapshot and
+authorization revision, checks their expiry, and returns a terminal gap or
+overflow page rather than silently replaying or skipping records. The generated
+per-member authorizer still runs before every first cancel, status, and page
+call. The SDK deliberately does not persist cursors, infer a permission
+revision, retain report objects, or claim durable checkpoint semantics; those
+need product authentication and retention policy.
+
+Finite-operation and snapshot-page metadata is encoded in descriptor format
+version 4. It changes neither the public native ABI nor the required V1 payload
+binding table. A host and payload pack for an annotated contract must be
+regenerated together: a version-3 descriptor or a different finite-operation
+layout produces a different exact descriptor hash and fails `Open` before a
+lease is allocated. An additive contract member must also advance the declared
+contract minor version on both the host dispatcher and payload-pack
+registration; bridge declaration matching remains exact rather than a
+compatible-version range.
+
 ## Authorization, mutation, and errors
 
 Generated dispatch preserves this order: structural frame validation, reply
