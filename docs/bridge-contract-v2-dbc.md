@@ -267,6 +267,46 @@ contract minor version on both the host dispatcher and payload-pack
 registration; bridge declaration matching remains exact rather than a
 compatible-version range.
 
+### Host finite-operation page registry
+
+`PowerShellFiniteOperationRegistry<TPage>` is a separate, host-only primitive
+for retaining the copied result of a finite application operation before a
+generated bridge handler exposes it. It has no SMA dependency and does not
+attach a page or an operation to a payload by itself. The application supplies
+one closed `TPage`, an `IPowerShellFinitePageCodec<TPage>` that copies that
+fixed shape, and an `IPowerShellFinitePageAccessValidator` that revalidates the
+opaque `PowerShellFiniteOperationBinding` before both admission and every page
+read.
+
+The registry bounds operation count, pages, items per page, each page's byte
+count, registry-wide retained items (65,536), and registry-wide retained bytes
+(16 MiB). `TryStart` issues a cryptographically random owner-scoped
+`PowerShellFiniteOperationId`; `TryComplete` accepts only an
+`IReadOnlyList<TPage>` that the codec copies within those bounds. A page cursor
+is an opaque random operation-scoped capability. Cursors cannot cross an
+operation, and all cursors are invalidated when their owner, lease, registry,
+or retained terminal lifetime ends.
+
+An active deadline wins before a later completion or cancellation is admitted.
+The first terminal transition wins: success, cancellation, or timeout. A
+successful operation's pages remain readable only through its configured
+terminal lease lifetime. The registry rechecks the supplied access validator
+for every page read. `SnapshotInvalidated` and `PermissionDenied` terminalize a
+previously successful retained result and return no page; a caller must start a
+new operation under a newly admitted binding. `TryCancel` is idempotent only
+for cancellation: later cancels return `Cancelled`, while a cancel after a
+success or timeout returns that existing terminal state. `TryRelease`, owner
+disposal, and registry disposal cancel and remove retained state.
+
+The `PowerShellFiniteOperationLease.CancellationToken` is a cooperative signal
+for the host's own operation work only. It is not a DBC callback capability:
+its registrations must not synchronously invoke PowerShell, invoke foreign FFI
+work, or wait on a pipeline. The registry does not dispatch jobs, authorize
+application actions, serialize arbitrary objects, persist a checkpoint, or
+make external effects atomic. Generated bridge contracts still need a static
+handler, per-member authorization, and fixed wire DTOs to expose an accepted
+registry result to a payload.
+
 ## Authorization, mutation, and errors
 
 Generated dispatch preserves this order: structural frame validation, reply

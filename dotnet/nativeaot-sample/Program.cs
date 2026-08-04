@@ -34,6 +34,13 @@ if (!System.IO.File.Exists(bridgeContractPackPath))
     return 1;
 }
 
+if (!FiniteOperationSmoke.Run())
+{
+    return 1;
+}
+
+Console.WriteLine("NativeAOT finite operations: Success");
+
 PowerShellLiveObjectContractPack[] contractPacks =
 [
     new PowerShellLiveObjectContractPack(

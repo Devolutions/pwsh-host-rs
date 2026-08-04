@@ -817,6 +817,77 @@ facade:type:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootDiagnostic
 facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootDiagnostic::System.String CanonicalPath
 facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootDiagnostic::System.String Diagnostic
 facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootDiagnostic::System.String Path
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationBinding::Void .ctor(System.Guid, Int64, Int64)
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOptions::Void .ctor(System.TimeSpan, System.TimeSpan)
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationRegistry`1::Void .ctor(Devolutions.PowerShell.Ffi.PowerShellFinitePageContract`1[TPage], Int32)
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellFinitePageContract`1::Void .ctor(System.Guid, Int32, Int32, Int32, Devolutions.PowerShell.Ffi.IPowerShellFinitePageCodec`1[TPage], Devolutions.PowerShell.Ffi.IPowerShellFinitePageAccessValidator)
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus AccessDenied
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus Active
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus Cancelled
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus Expired
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus PermissionDenied
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus RegistryDisposed
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus Rejected
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus Released
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus SnapshotInvalidated
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus Succeeded
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus TimedOut
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFinitePageValidation::Devolutions.PowerShell.Ffi.PowerShellFinitePageValidation Allowed
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFinitePageValidation::Devolutions.PowerShell.Ffi.PowerShellFinitePageValidation PermissionDenied
+facade:field:Devolutions.PowerShell.Ffi.PowerShellFinitePageValidation::Devolutions.PowerShell.Ffi.PowerShellFinitePageValidation SnapshotInvalidated
+facade:method:Devolutions.PowerShell.Ffi.IPowerShellFinitePageAccessValidator::Devolutions.PowerShell.Ffi.PowerShellFinitePageValidation Validate(Devolutions.PowerShell.Ffi.PowerShellFiniteOperationBinding ByRef)
+facade:method:Devolutions.PowerShell.Ffi.IPowerShellFinitePageCodec`1::Boolean TryCopy(TPage, TPage ByRef, Int32 ByRef, Int32 ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationId::Boolean Equals(Devolutions.PowerShell.Ffi.PowerShellFiniteOperationId)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationId::Boolean Equals(System.Object)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationId::Int32 GetHashCode()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationLease::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOwner::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationRegistry`1::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOwner CreateOwner()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationRegistry`1::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationResult TryCancel(Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOwner, Devolutions.PowerShell.Ffi.PowerShellFiniteOperationId)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationRegistry`1::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationResult TryComplete(Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOwner, Devolutions.PowerShell.Ffi.PowerShellFiniteOperationId, System.Collections.Generic.IReadOnlyList`1[TPage])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationRegistry`1::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationResult TryGetStatus(Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOwner, Devolutions.PowerShell.Ffi.PowerShellFiniteOperationId)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationRegistry`1::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationResult TryRelease(Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOwner, Devolutions.PowerShell.Ffi.PowerShellFiniteOperationId)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationRegistry`1::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationResult TryStart(Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOwner, Devolutions.PowerShell.Ffi.PowerShellFiniteOperationBinding, Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOptions, Devolutions.PowerShell.Ffi.PowerShellFiniteOperationLease ByRef)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationRegistry`1::Devolutions.PowerShell.Ffi.PowerShellFinitePageReadResult`1[TPage] TryReadPage(Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOwner, Devolutions.PowerShell.Ffi.PowerShellFiniteOperationId, Devolutions.PowerShell.Ffi.PowerShellFinitePageCursor)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationRegistry`1::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFinitePageCursor::Boolean Equals(Devolutions.PowerShell.Ffi.PowerShellFinitePageCursor)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFinitePageCursor::Boolean Equals(System.Object)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellFinitePageCursor::Int32 GetHashCode()
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationBinding::Int64 PermissionRevision
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationBinding::Int64 SnapshotRevision
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationBinding::System.Guid SchemaId
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationId::Boolean IsValid
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationLease::System.Threading.CancellationToken CancellationToken
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOptions::System.TimeSpan ExecutionDeadline
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOptions::System.TimeSpan TerminalLeaseLifetime
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationRegistry`1::Int32 Count
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationResult::Boolean IsTerminal
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationResult::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationId OperationId
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationResult::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus Status
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFinitePageContract`1::Int32 MaximumItemsPerPage
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFinitePageContract`1::Int32 MaximumPageBytes
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFinitePageContract`1::Int32 MaximumPages
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFinitePageContract`1::System.Guid SchemaId
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFinitePageCursor::Boolean IsStart
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFinitePageCursor::Devolutions.PowerShell.Ffi.PowerShellFinitePageCursor Start
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFinitePageReadResult`1::Boolean HasPage
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFinitePageReadResult`1::Devolutions.PowerShell.Ffi.PowerShellFiniteOperationResult Operation
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFinitePageReadResult`1::System.Nullable`1[Devolutions.PowerShell.Ffi.PowerShellFinitePageCursor] NextCursor
+facade:property:Devolutions.PowerShell.Ffi.PowerShellFinitePageReadResult`1::TPage Page
+facade:type:Devolutions.PowerShell.Ffi.IPowerShellFinitePageAccessValidator
+facade:type:Devolutions.PowerShell.Ffi.IPowerShellFinitePageCodec`1
+facade:type:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationBinding
+facade:type:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationId
+facade:type:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationLease
+facade:type:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOptions
+facade:type:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationOwner
+facade:type:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationRegistry`1
+facade:type:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationResult
+facade:type:Devolutions.PowerShell.Ffi.PowerShellFiniteOperationStatus
+facade:type:Devolutions.PowerShell.Ffi.PowerShellFinitePageContract`1
+facade:type:Devolutions.PowerShell.Ffi.PowerShellFinitePageCursor
+facade:type:Devolutions.PowerShell.Ffi.PowerShellFinitePageReadResult`1
+facade:type:Devolutions.PowerShell.Ffi.PowerShellFinitePageValidation
 facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootDiagnostic::Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootStatus Status
 facade:type:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootStatus
 facade:field:Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootStatus::Devolutions.PowerShell.Ffi.PowerShellSessionModuleRootStatus Invalid
