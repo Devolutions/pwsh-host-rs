@@ -39,6 +39,11 @@ internal sealed unsafe partial class FfiBridgeBrokerSink : IPowerShellBridgeBrok
     private IntPtr activeRootHandle;
     private int state;
 
+    ~FfiBridgeBrokerSink()
+    {
+        ReleaseCallback();
+    }
+
     internal FfiBridgeBrokerSink(
         PowerShellLiveObjectContract contract,
         ulong bindingId,
@@ -391,6 +396,12 @@ internal sealed unsafe partial class FfiBridgeBrokerSink : IPowerShellBridgeBrok
     }
 
     public void Dispose()
+    {
+        ReleaseCallback();
+        GC.SuppressFinalize(this);
+    }
+
+    private void ReleaseCallback()
     {
         ComObject? current;
         lock (gate)
