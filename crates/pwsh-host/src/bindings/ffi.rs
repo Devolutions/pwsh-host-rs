@@ -29,6 +29,9 @@ const FFI_FEATURE_OBSERVED_INVOCATION: u64 = 1 << 22;
 const FFI_FEATURE_SESSION_PREFLIGHT: u64 = 1 << 23;
 const FFI_FEATURE_RUNTIME_DIAGNOSTICS: u64 = 1 << 24;
 const FFI_FEATURE_DUPLEX_BROKER_CHANNEL: u64 = 1 << 25;
+const FFI_FEATURE_GENERATED_BRIDGE_ATTACHMENT: u64 = 1 << 26;
+const FFI_FEATURE_RELIABLE_BRIDGE_EVENTS: u64 = 1 << 28;
+const FFI_FEATURE_OBSERVED_PRESENTATION: u64 = 1 << 29;
 const FFI_REQUIRED_FEATURES: u64 = FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
     | FFI_FEATURE_SESSION_PRIMITIVES
     | FFI_FEATURE_SESSION_POLLING
@@ -44,9 +47,13 @@ const FFI_REQUIRED_FEATURES: u64 = FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
     | FFI_FEATURE_OBSERVED_INVOCATION
     | FFI_FEATURE_SESSION_PREFLIGHT
     | FFI_FEATURE_RUNTIME_DIAGNOSTICS
-    | FFI_FEATURE_DUPLEX_BROKER_CHANNEL;
+    | FFI_FEATURE_DUPLEX_BROKER_CHANNEL
+    | FFI_FEATURE_GENERATED_BRIDGE_ATTACHMENT
+    | FFI_FEATURE_RELIABLE_BRIDGE_EVENTS
+    | FFI_FEATURE_OBSERVED_PRESENTATION;
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_BUFFER_TOO_SMALL: i32 = 1;
+const VALUE_KIND_PROPERTY_BAG: u32 = 14;
 
 #[repr(C)]
 struct FfiCallResult {
@@ -169,6 +176,8 @@ struct FfiApiV1 {
     session_preflight_configured_fn: *const libc::c_void,
     runtime_diagnostics_copy_power_shell_file_version_utf8_fn: *const libc::c_void,
     power_shell_set_broker_context_fn: *const libc::c_void,
+    power_shell_set_bridge_context_fn: *const libc::c_void,
+    observed_diagnostic_page_copy_record_value_fn: *const libc::c_void,
 }
 
 type FnBindingsGetFfiApiV1 = unsafe extern "system" fn() -> *const FfiApiV1;
@@ -248,6 +257,8 @@ type FnFfiObservedDiagnosticPageGetRecordInfo =
     unsafe extern "system" fn(PowerShellHandle, i32, *mut i32, *mut i64, *mut FfiCallResult) -> i32;
 type FnFfiObservedDiagnosticPageCopyRecordTextToUtf8 =
     unsafe extern "system" fn(PowerShellHandle, i32, *mut u8, i32, *mut i32, *mut FfiCallResult) -> i32;
+type FnFfiObservedDiagnosticPageCopyRecordValue =
+    unsafe extern "system" fn(PowerShellHandle, i32, *mut u32, *mut u8, i32, *mut i32, *mut FfiCallResult) -> i32;
 type FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8 =
     unsafe extern "system" fn(*mut u8, i32, *mut i32, *mut i32, *mut FfiCallResult) -> i32;
 type FnFfiInvocationResultRelease = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
@@ -384,6 +395,19 @@ type FnFfiPowerShellSetBrokerContext = unsafe extern "system" fn(
     u32,
     *mut FfiCallResult,
 ) -> i32;
+type FnFfiPowerShellSetBridgeContext = unsafe extern "system" fn(
+    PowerShellHandle,
+    u64,
+    u64,
+    u64,
+    u16,
+    u16,
+    u32,
+    u32,
+    *const u8,
+    i32,
+    *mut FfiCallResult,
+) -> i32;
 type FnFfiPowerShellSetCapabilityContext =
     unsafe extern "system" fn(PowerShellHandle, u64, u64, *const libc::c_void, *mut FfiCallResult) -> i32;
 type FnFfiInvocationResultGetStreamTotals =
@@ -476,6 +500,7 @@ pub(crate) struct FfiBindings {
     session_preflight_configured_fn: FnFfiPowerShellSessionPreflightConfigured,
     runtime_diagnostics_copy_power_shell_file_version_utf8_fn: FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8,
     power_shell_set_broker_context_fn: FnFfiPowerShellSetBrokerContext,
+    power_shell_set_bridge_context_fn: FnFfiPowerShellSetBridgeContext,
 }
 
 pub struct FfiPayloadRuntimeDiagnostics {
@@ -526,6 +551,7 @@ struct FfiObservedInvocationBindings {
     observed_diagnostic_page_get_record_info_fn: FnFfiObservedDiagnosticPageGetRecordInfo,
     observed_diagnostic_page_copy_record_text_to_utf8_fn: FnFfiObservedDiagnosticPageCopyRecordTextToUtf8,
     observed_diagnostic_page_release_fn: FnFfiObservedInvocationComplete,
+    observed_diagnostic_page_copy_record_value_fn: FnFfiObservedDiagnosticPageCopyRecordValue,
 }
 
 #[derive(Debug)]
@@ -694,6 +720,8 @@ impl FfiBindings {
             api.session_preflight_configured_fn,
             api.runtime_diagnostics_copy_power_shell_file_version_utf8_fn,
             api.power_shell_set_broker_context_fn,
+            api.power_shell_set_bridge_context_fn,
+            api.observed_diagnostic_page_copy_record_value_fn,
         ];
         if fields.iter().any(|field| field.is_null()) {
             return Err(Error::IO(std::io::Error::new(
@@ -842,6 +870,11 @@ impl FfiBindings {
             observed_diagnostic_page_release_fn: unsafe {
                 mem::transmute::<*const libc::c_void, FnFfiObservedInvocationComplete>(
                     api.observed_diagnostic_page_release_fn,
+                )
+            },
+            observed_diagnostic_page_copy_record_value_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiObservedDiagnosticPageCopyRecordValue>(
+                    api.observed_diagnostic_page_copy_record_value_fn,
                 )
             },
         };
@@ -1007,6 +1040,11 @@ impl FfiBindings {
             power_shell_set_broker_context_fn: unsafe {
                 mem::transmute::<*const libc::c_void, FnFfiPowerShellSetBrokerContext>(
                     api.power_shell_set_broker_context_fn,
+                )
+            },
+            power_shell_set_bridge_context_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellSetBridgeContext>(
+                    api.power_shell_set_bridge_context_fn,
                 )
             },
             power_shell_set_capability_context_fn: unsafe {
@@ -1226,6 +1264,17 @@ impl FfiBindings {
         };
         check_status(status, &call_result, &diagnostic)
     }
+}
+
+pub struct FfiBridgeContext<'a> {
+    pub binding_id: u64,
+    pub contract_id_low: u64,
+    pub contract_id_high: u64,
+    pub contract_major_version: u16,
+    pub contract_minor_version: u16,
+    pub maximum_request_bytes: u32,
+    pub maximum_reply_bytes: u32,
+    pub variable_name: &'a str,
 }
 
 pub struct FfiPowerShell {
@@ -1593,6 +1642,26 @@ impl FfiPowerShell {
                 enqueue,
                 post,
                 maximum_body_bytes,
+                result,
+            )
+        })
+    }
+
+    pub fn set_bridge_context(&self, context: &FfiBridgeContext<'_>) -> Result<(), FfiBindingError> {
+        let variable_name_length = i32::try_from(context.variable_name.len())
+            .map_err(|_| FfiBindingError::from_status(-6, "bridge variable name is too long".to_owned()))?;
+        self.call(|handle, result| unsafe {
+            (self.bindings.power_shell_set_bridge_context_fn)(
+                handle,
+                context.binding_id,
+                context.contract_id_low,
+                context.contract_id_high,
+                context.contract_major_version,
+                context.contract_minor_version,
+                context.maximum_request_bytes,
+                context.maximum_reply_bytes,
+                context.variable_name.as_ptr(),
+                variable_name_length,
                 result,
             )
         })
@@ -2259,6 +2328,7 @@ pub struct FfiObservedDiagnosticRecord {
     pub stream: u32,
     pub sequence: u64,
     pub text: String,
+    pub value: Option<FfiTypedResultRecord>,
 }
 
 #[derive(Clone, Debug)]
@@ -2669,12 +2739,64 @@ impl FfiObservedInvocation {
                         "managed observed diagnostic text changed during copy".to_owned(),
                     ));
                 }
+                let text = String::from_utf8(text).map_err(|_| {
+                    FfiBindingError::from_status(-6, "managed observed diagnostic text is not UTF-8".to_owned())
+                })?;
+                let value = if stream == 6 {
+                    let mut kind = 0_u32;
+                    let mut required_length = 0_i32;
+                    call_result = new_call_result(&mut diagnostic);
+                    let status = unsafe {
+                        (observed_invocation.observed_diagnostic_page_copy_record_value_fn)(
+                            page_handle,
+                            index,
+                            &mut kind,
+                            std::ptr::null_mut(),
+                            0,
+                            &mut required_length,
+                            &mut call_result,
+                        )
+                    };
+                    check_status_allow_buffer_too_small(status, &call_result, &diagnostic)?;
+                    if kind != VALUE_KIND_PROPERTY_BAG || required_length < 0 || required_length as usize > 64 * 1024 {
+                        return Err(FfiBindingError::from_status(
+                            -6,
+                            "managed observed progress value exceeds its fixed bounds".to_owned(),
+                        ));
+                    }
+                    let mut payload = vec![0_u8; required_length as usize];
+                    call_result = new_call_result(&mut diagnostic);
+                    let status = unsafe {
+                        (observed_invocation.observed_diagnostic_page_copy_record_value_fn)(
+                            page_handle,
+                            index,
+                            &mut kind,
+                            payload.as_mut_ptr(),
+                            required_length,
+                            &mut required_length,
+                            &mut call_result,
+                        )
+                    };
+                    check_status(status, &call_result, &diagnostic)?;
+                    if kind != VALUE_KIND_PROPERTY_BAG || required_length as usize != payload.len() {
+                        return Err(FfiBindingError::from_status(
+                            -6,
+                            "managed observed progress value changed during copy".to_owned(),
+                        ));
+                    }
+                    Some(FfiTypedResultRecord {
+                        sequence,
+                        kind,
+                        payload,
+                    })
+                } else {
+                    None
+                };
                 records.push(FfiObservedDiagnosticRecord {
                     stream,
                     sequence,
-                    text: String::from_utf8(text).map_err(|_| {
-                        FfiBindingError::from_status(-6, "managed observed diagnostic text is not UTF-8".to_owned())
-                    })?,
+                    text,
+                    value,
                 });
             }
 
@@ -3628,12 +3750,42 @@ mod tests {
         feature_flags: FFI_REQUIRED_FEATURES,
     };
 
+    static MISSING_BRIDGE_FEATURE_FFI_API_V1: FfiApiV1Header = FfiApiV1Header {
+        size: mem::size_of::<FfiApiV1>(),
+        abi_version: FFI_BINDINGS_ABI_VERSION,
+        feature_flags: FFI_REQUIRED_FEATURES & !FFI_FEATURE_GENERATED_BRIDGE_ATTACHMENT,
+    };
+
+    static MISSING_OBSERVED_PRESENTATION_FEATURE_FFI_API_V1: FfiApiV1Header = FfiApiV1Header {
+        size: mem::size_of::<FfiApiV1>(),
+        abi_version: FFI_BINDINGS_ABI_VERSION,
+        feature_flags: FFI_REQUIRED_FEATURES & !FFI_FEATURE_OBSERVED_PRESENTATION,
+    };
+
     unsafe extern "system" fn get_small_ffi_api_v1() -> *const FfiApiV1 {
         &SMALL_FFI_API_V1 as *const FfiApiV1Header as *const FfiApiV1
+    }
+
+    unsafe extern "system" fn get_missing_bridge_feature_ffi_api_v1() -> *const FfiApiV1 {
+        &MISSING_BRIDGE_FEATURE_FFI_API_V1 as *const FfiApiV1Header as *const FfiApiV1
+    }
+
+    unsafe extern "system" fn get_missing_observed_presentation_feature_ffi_api_v1() -> *const FfiApiV1 {
+        &MISSING_OBSERVED_PRESENTATION_FEATURE_FFI_API_V1 as *const FfiApiV1Header as *const FfiApiV1
     }
 
     #[test]
     fn rejects_smaller_ffi_api_before_copying_extended_fields() {
         assert!(unsafe { load_ffi_api_v1(get_small_ffi_api_v1) }.is_err());
+    }
+
+    #[test]
+    fn rejects_missing_generated_bridge_feature_before_copying_extended_fields() {
+        assert!(unsafe { load_ffi_api_v1(get_missing_bridge_feature_ffi_api_v1) }.is_err());
+    }
+
+    #[test]
+    fn rejects_missing_observed_presentation_feature_before_copying_extended_fields() {
+        assert!(unsafe { load_ffi_api_v1(get_missing_observed_presentation_feature_ffi_api_v1) }.is_err());
     }
 }

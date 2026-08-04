@@ -101,7 +101,7 @@ internal sealed unsafe class FfiExternalLiveObjectLease : FfiLiveObjectLease
 /// the associated proxy is bound to an invocation.
 /// </summary>
 [GeneratedComClass]
-internal sealed unsafe partial class FfiBridgeContractSink : IPowerShellBridgeContractSink, IDisposable
+internal sealed unsafe partial class FfiBridgeContractSink : IPowerShellBridgeContractSink, IFfiBridgeContractLeaseSink
 {
     private const int Created = 0;
     private const int Declared = 1;
@@ -275,6 +275,10 @@ internal sealed unsafe partial class FfiBridgeContractSink : IPowerShellBridgeCo
         }
     }
 
+    int IFfiBridgeContractLeaseSink.BeginBinding(out object root) => BeginBinding(out root);
+
+    void IFfiBridgeContractLeaseSink.EndBinding() => EndBinding();
+
     internal IntPtr Export()
     {
         IntPtr value = ComWrappers.GetOrCreateComInterfaceForObject(this, CreateComInterfaceFlags.None);
@@ -429,11 +433,18 @@ internal sealed unsafe partial class FfiBridgeContractSink : IPowerShellBridgeCo
 
 }
 
+internal interface IFfiBridgeContractLeaseSink : IDisposable
+{
+    int BeginBinding(out object root);
+
+    void EndBinding();
+}
+
 internal sealed unsafe class FfiBridgeContractLease : FfiLiveObjectLease
 {
     private readonly object gate = new();
     private readonly delegate* unmanaged<IntPtr, void> release;
-    private readonly FfiBridgeContractSink sink;
+    private readonly IFfiBridgeContractLeaseSink sink;
     private readonly object unboundValue = new();
     private IntPtr proxyHandle;
     private object currentValue;
@@ -443,7 +454,7 @@ internal sealed unsafe class FfiBridgeContractLease : FfiLiveObjectLease
     internal FfiBridgeContractLease(
         IntPtr proxyHandle,
         delegate* unmanaged<IntPtr, void> release,
-        FfiBridgeContractSink sink)
+        IFfiBridgeContractLeaseSink sink)
     {
         if (proxyHandle == IntPtr.Zero)
         {
@@ -520,7 +531,7 @@ internal sealed unsafe class FfiBridgeContractLease : FfiLiveObjectLease
     }
 
     internal bool Matches(PowerShellLiveObjectContract contract, IntPtr candidate) =>
-        sink.Matches(contract, candidate);
+        sink is FfiBridgeContractSink contractSink && contractSink.Matches(contract, candidate);
 
     public override void Dispose()
     {
@@ -704,6 +715,31 @@ internal unsafe sealed class FfiLiveObjectContractPackRegistry
         return registration!.CreateLease(contract, comObject);
     }
 
+    internal FfiLiveObjectLease CreateBridgeBrokerLease(
+        PowerShellLiveObjectContract contract,
+        FfiBridgeBrokerSink sink)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        if ((contract.Directions & (PowerShellLiveObjectDirection.ConsumerToSession |
+                                    PowerShellLiveObjectDirection.BridgeContract)) !=
+            (PowerShellLiveObjectDirection.ConsumerToSession |
+             PowerShellLiveObjectDirection.BridgeContract))
+        {
+            throw new InvalidOperationException("Bridge attachment metadata is invalid.");
+        }
+
+        Registration? registration;
+        lock (gate)
+        {
+            if (!registrations.TryGetValue(contract, out registration))
+            {
+                throw new InvalidOperationException("The bridge contract is not registered by the payload.");
+            }
+        }
+
+        return registration!.CreateBridgeBrokerLease(contract, sink);
+    }
+
     private sealed class Registration
     {
         private readonly Func<IntPtr, FfiLiveObjectLease>? managedFactory;
@@ -781,6 +817,48 @@ internal unsafe sealed class FfiLiveObjectContractPackRegistry
                 FfiLiveObjectLease lease = new FfiBridgeContractLease(proxyHandle, release, sink);
                 proxyHandle = IntPtr.Zero;
                 sink = null;
+                return lease;
+            }
+            finally
+            {
+                if (sinkPointer != IntPtr.Zero)
+                {
+                    PowerShellBridgeComReference.Release(sinkPointer);
+                }
+
+                if (proxyHandle != IntPtr.Zero)
+                {
+                    release(proxyHandle);
+                }
+
+                sink?.Dispose();
+            }
+        }
+
+        internal FfiLiveObjectLease CreateBridgeBrokerLease(
+            PowerShellLiveObjectContract contract,
+            FfiBridgeBrokerSink sink)
+        {
+            IntPtr sinkPointer = IntPtr.Zero;
+            IntPtr proxyHandle = IntPtr.Zero;
+            try
+            {
+                sinkPointer = sink.Export();
+                int hresult = create(sinkPointer, &proxyHandle);
+                if (hresult != 0 || proxyHandle == IntPtr.Zero)
+                {
+                    throw new COMException("The bridge payload contract pack could not project the broker bridge.", hresult);
+                }
+
+                if (!sink.IsDeclared)
+                {
+                    throw new InvalidOperationException(
+                        "The bridge payload contract pack returned a proxy without declaring the attached bridge.");
+                }
+
+                FfiLiveObjectLease lease = new FfiBridgeContractLease(proxyHandle, release, sink);
+                proxyHandle = IntPtr.Zero;
+                sink = null!;
                 return lease;
             }
             finally

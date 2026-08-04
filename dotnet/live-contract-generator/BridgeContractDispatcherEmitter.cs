@@ -28,6 +28,7 @@ internal static class BridgeContractDispatcherEmitter
         string rootHandler = BridgeNames.Handler(contract.RootObject);
         string authorizer = "I" + BridgeNames.Prefix(contract.Root) + "Authorizer";
         int maximumReply = MaximumReply(contract);
+        int maximumRequest = MaximumRequest(contract);
 
         source.AppendLine("/// <summary>");
         source.AppendLine("/// Dispatches bridge frames to typed application handlers. Every getter,");
@@ -54,6 +55,9 @@ internal static class BridgeContractDispatcherEmitter
             .AppendLine();
         source.Append("    public const int MaximumReplyBytes = ").Append(BridgeTypeNames.Number(maximumReply)).AppendLine(";");
         source.AppendLine();
+        source.AppendLine("    /// <summary>The largest request frame any declared member can accept, computed at compile time.</summary>");
+        source.Append("    public const int MaximumRequestBytes = ").Append(BridgeTypeNames.Number(maximumRequest)).AppendLine(";");
+        source.AppendLine();
         source.AppendLine("    /// <summary>The contract transport identity used for payload discovery.</summary>");
         source.Append("    public global::System.Guid ContractInterfaceId { get; } = global::System.Guid.Parse(")
             .Append(constants).AppendLine(".TransportInterfaceId);");
@@ -65,13 +69,36 @@ internal static class BridgeContractDispatcherEmitter
         source.Append("    public ushort ContractMinorVersion => checked((ushort)").Append(constants).AppendLine(".MinorVersion);");
         source.AppendLine();
         source.AppendLine("    int global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeDispatcher.MaximumReplyBytes => MaximumReplyBytes;");
+        source.AppendLine("    int global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeDispatcher.MaximumRequestBytes => MaximumRequestBytes;");
+        source.AppendLine();
+        source.AppendLine("    int global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeDispatcher.GetReliableEventMaximumRetained(uint memberId)");
+        source.AppendLine("    {");
+        source.AppendLine("        return memberId switch");
+        source.AppendLine("        {");
+        foreach (BridgeObjectModel model in contract.Objects)
+        {
+            foreach (BridgeMemberModel member in model.Members)
+            {
+                if (member.Kind == BridgeRecordKind.ReliableEvent)
+                {
+                    source.Append("            ").Append(BridgeTypeNames.Number(member.Ordinal)).Append("U => ")
+                        .Append(BridgeTypeNames.Number(member.MaximumRetainedEvents)).AppendLine(",");
+                }
+            }
+        }
+        source.AppendLine("            _ => 0,");
+        source.AppendLine("        };");
+        source.AppendLine("    }");
         source.AppendLine();
         EmitComEntryPoint(source, name, maximumReply);
         EmitCloseAndDispose(source);
         EmitCore(source, contract, constants, context, maximumReply);
+        EmitEvent(source, contract, constants, context);
         EmitOpen(source, contract, constants);
+        EmitClose(source, context);
         EmitRelease(source, contract, constants, context);
         EmitMemberDispatch(source, contract, constants, context);
+        EmitEventMemberDispatch(source, contract, context);
         EmitHandleHelpers(source, contract);
         EmitReplyHelpers(source, contract);
         source.AppendLine("}");
@@ -187,10 +214,15 @@ internal static class BridgeContractDispatcherEmitter
         source.AppendLine("            return DispatchOpen(in header, request, reply, outputCapacity, out replyLength);");
         source.AppendLine("        }");
         source.AppendLine();
-        source.Append("        if (header.FrameKind == ").Append(BridgeTypeNames.FrameKind).AppendLine(".Event)");
+        source.Append("        if (header.FrameKind == ").Append(BridgeTypeNames.FrameKind).Append(".Event || header.FrameKind == ")
+            .Append(BridgeTypeNames.FrameKind).AppendLine(".ReliableEvent)");
         source.AppendLine("        {");
-        source.AppendLine("            // A one-way event is never accepted on the request/reply carrier.");
         source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".InvalidArgument;");
+        source.AppendLine("        }");
+        source.AppendLine();
+        source.Append("        if (header.FrameKind == ").Append(BridgeTypeNames.FrameKind).AppendLine(".Close)");
+        source.AppendLine("        {");
+        source.AppendLine("            return DispatchClose(in header, reply, outputCapacity, out replyLength);");
         source.AppendLine("        }");
         source.AppendLine();
         source.Append("        if (header.FrameKind == ").Append(BridgeTypeNames.FrameKind).AppendLine(".Release)");
@@ -200,7 +232,8 @@ internal static class BridgeContractDispatcherEmitter
         source.AppendLine();
         source.Append("        if (!").Append(constants).AppendLine(".TryGetMemberByOrdinal(memberId, out var entry) ||");
         source.AppendLine("            entry.ArgumentCount != header.ArgumentCount ||");
-        source.Append("            entry.Kind == global::Devolutions.PowerShell.Ffi.LiveObjects.BridgeMemberKind.Event)").AppendLine();
+        source.Append("            (entry.Kind == global::Devolutions.PowerShell.Ffi.LiveObjects.BridgeMemberKind.Event || ")
+            .Append("entry.Kind == global::Devolutions.PowerShell.Ffi.LiveObjects.BridgeMemberKind.ReliableEvent))").AppendLine();
         source.AppendLine("        {");
         source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".InvalidArgument;");
         source.AppendLine("        }");
@@ -245,6 +278,95 @@ internal static class BridgeContractDispatcherEmitter
         source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".InvalidArgument;");
         source.AppendLine("        }");
         source.AppendLine();
+        source.Append("        return CompleteReply(").Append(BridgeTypeNames.ReplyKind)
+            .AppendLine(".Value, __bridgeWriter.Length, reply, out replyLength);");
+        source.AppendLine("    }");
+        source.AppendLine();
+    }
+
+    private static void EmitEvent(
+        StringBuilder source,
+        BridgeContractModel contract,
+        string constants,
+        string context)
+    {
+        source.AppendLine("    /// <summary>Dispatches a generated one-way event after DBC has copied it off the pump thread.</summary>");
+        source.AppendLine("    public int DispatchEvent(global::System.ReadOnlySpan<byte> request)");
+        source.AppendLine("    {");
+        source.AppendLine("        if (global::System.Threading.Volatile.Read(ref disposed) != 0 ||");
+        source.Append("            !").Append(BridgeTypeNames.RequestHeader).AppendLine(".TryRead(request, out var header) ||");
+        source.Append("            (header.FrameKind != ").Append(BridgeTypeNames.FrameKind).Append(".Event && header.FrameKind != ")
+            .Append(BridgeTypeNames.FrameKind).AppendLine(".ReliableEvent) ||");
+        source.Append("            !").Append(constants).AppendLine(".TryGetMemberByOrdinal(header.MemberId, out var entry) ||");
+        source.AppendLine("            (entry.Kind != global::Devolutions.PowerShell.Ffi.LiveObjects.BridgeMemberKind.Event &&");
+        source.AppendLine("             entry.Kind != global::Devolutions.PowerShell.Ffi.LiveObjects.BridgeMemberKind.ReliableEvent) ||");
+        source.AppendLine("            (header.FrameKind == global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeFrameKind.Event &&");
+        source.AppendLine("             entry.Kind != global::Devolutions.PowerShell.Ffi.LiveObjects.BridgeMemberKind.Event) ||");
+        source.AppendLine("            (header.FrameKind == global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeFrameKind.ReliableEvent &&");
+        source.AppendLine("             entry.Kind != global::Devolutions.PowerShell.Ffi.LiveObjects.BridgeMemberKind.ReliableEvent) ||");
+        source.AppendLine("            entry.ArgumentCount != header.ArgumentCount ||");
+        source.AppendLine("            !leases.TryAdmit(header.LeaseId, header.Generation, header.ObjectId, out var admission) ||");
+        source.AppendLine("            admission.ObjectTypeId != entry.ObjectTypeId)");
+        source.AppendLine("        {");
+        source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".AccessDenied;");
+        source.AppendLine("        }");
+        source.AppendLine();
+        source.Append("        var context = new ").Append(context).AppendLine("(");
+        source.AppendLine("            header.LeaseId, header.Generation, header.ObjectId, header.MemberId, entry.Kind, entry.Permission, entry.Mutation);");
+        source.AppendLine("        if (!authorizer.IsAuthorized(in context))");
+        source.AppendLine("        {");
+        source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".AccessDenied;");
+        source.AppendLine("        }");
+        source.AppendLine();
+        source.Append("        var __bridgeReader = new ").Append(BridgeTypeNames.Reader).Append("(request.Slice(")
+            .Append(BridgeTypeNames.Wire).AppendLine(".RequestHeaderSize));");
+        source.AppendLine("        int status = DispatchEventMember(in admission, in context, header.MemberId, ref __bridgeReader);");
+        source.AppendLine("        return status == 0 && __bridgeReader.IsComplete ? 0 :");
+        source.Append("            status == 0 ? ").Append(BridgeTypeNames.Status).AppendLine(".InvalidArgument : status;");
+        source.AppendLine("    }");
+        source.AppendLine();
+    }
+
+    private static void EmitClose(StringBuilder source, string context)
+    {
+        source.AppendLine("    private int DispatchClose(");
+        source.Append("        in ").Append(BridgeTypeNames.RequestHeader).AppendLine(" header,");
+        source.AppendLine("        global::System.Span<byte> reply,");
+        source.AppendLine("        int outputCapacity,");
+        source.AppendLine("        out int replyLength)");
+        source.AppendLine("    {");
+        source.AppendLine("        replyLength = 0;");
+        source.Append("        const int CloseReplyBytes = ").Append(BridgeTypeNames.Wire).Append(".ReplyHeaderSize + ")
+            .Append(BridgeTypeNames.Wire).AppendLine(".ValueHeaderSize;");
+        source.AppendLine("        if (header.MemberId != 0U || header.ObjectId != 0UL || header.ArgumentCount != 0 || header.BodyLength != 0)");
+        source.AppendLine("        {");
+        source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".InvalidArgument;");
+        source.AppendLine("        }");
+        source.AppendLine("        if (outputCapacity < CloseReplyBytes)");
+        source.AppendLine("        {");
+        source.AppendLine("            replyLength = CloseReplyBytes;");
+        source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".BufferTooSmall;");
+        source.AppendLine("        }");
+        source.AppendLine();
+        source.Append("        var context = new ").Append(context).AppendLine("(");
+        source.AppendLine("            header.LeaseId, header.Generation, 0UL, 0U,");
+        source.AppendLine("            global::Devolutions.PowerShell.Ffi.LiveObjects.BridgeMemberKind.Method,");
+        source.AppendLine("            global::Devolutions.PowerShell.Ffi.LiveObjects.BridgePermission.Execute,");
+        source.AppendLine("            global::Devolutions.PowerShell.Ffi.LiveObjects.BridgeMutation.None);");
+        source.AppendLine("        if (!authorizer.IsAuthorized(in context))");
+        source.AppendLine("        {");
+        source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".AccessDenied;");
+        source.AppendLine("        }");
+        source.AppendLine("        if (leases.Close(header.LeaseId, header.Generation) != 0)");
+        source.AppendLine("        {");
+        source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".AccessDenied;");
+        source.AppendLine("        }");
+        source.Append("        var __bridgeWriter = new ").Append(BridgeTypeNames.Writer).Append("(reply.Slice(")
+            .Append(BridgeTypeNames.Wire).AppendLine(".ReplyHeaderSize));");
+        source.AppendLine("        if (!__bridgeWriter.TryWriteNull() || !__bridgeWriter.IsComplete)");
+        source.AppendLine("        {");
+        source.Append("            return ").Append(BridgeTypeNames.Status).AppendLine(".InvalidArgument;");
+        source.AppendLine("        }");
         source.Append("        return CompleteReply(").Append(BridgeTypeNames.ReplyKind)
             .AppendLine(".Value, __bridgeWriter.Length, reply, out replyLength);");
         source.AppendLine("    }");
@@ -414,12 +536,76 @@ internal static class BridgeContractDispatcherEmitter
         {
             foreach (BridgeMemberModel member in model.Members)
             {
-                if (member.Kind == BridgeRecordKind.Event)
+                if (member.Kind is BridgeRecordKind.Event or BridgeRecordKind.ReliableEvent)
                 {
                     continue;
                 }
 
                 EmitMemberCase(source, contract, model, member, constants);
+            }
+        }
+
+        source.Append("            default: return ").Append(BridgeTypeNames.Status).AppendLine(".InvalidArgument;");
+        source.AppendLine("        }");
+        source.AppendLine("    }");
+        source.AppendLine();
+    }
+
+    private static void EmitEventMemberDispatch(
+        StringBuilder source,
+        BridgeContractModel contract,
+        string context)
+    {
+        source.AppendLine("    private int DispatchEventMember(");
+        source.AppendLine("        in global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeAdmission admission,");
+        source.Append("        in ").Append(context).AppendLine(" context,");
+        source.AppendLine("        uint memberId,");
+        source.Append("        ref ").Append(BridgeTypeNames.Reader).AppendLine(" __bridgeReader)");
+        source.AppendLine("    {");
+        source.AppendLine("        switch (memberId)");
+        source.AppendLine("        {");
+        foreach (BridgeObjectModel model in contract.Objects)
+        {
+            foreach (BridgeMemberModel member in model.Members)
+            {
+                if (member.Kind is not (BridgeRecordKind.Event or BridgeRecordKind.ReliableEvent))
+                {
+                    continue;
+                }
+
+                const string Indent = "                ";
+                source.Append("            case ").Append(BridgeNames.Contract(contract)).Append(".Member")
+                    .Append(BridgeTypeNames.Number(member.Ordinal)).AppendLine(":");
+                source.AppendLine("            {");
+                source.Append(Indent).Append("var __bridgeTarget = (").Append(BridgeNames.Handler(model))
+                    .AppendLine(")admission.Handler!;");
+                int temp = 0;
+                var arguments = new List<string>();
+                for (int index = 0; index < member.Parameters.Count; index++)
+                {
+                    BridgeParameterModel parameter = member.Parameters[index];
+                    string local = "__bridgeArgument" + BridgeTypeNames.Number(index);
+                    arguments.Add(local);
+                    source.Append(Indent).Append(BridgeTypeNames.Full(parameter.Type, contract, payload: false)).Append(' ')
+                        .Append(local).AppendLine(" = default!;");
+                    BridgeCodecEmitter.EmitRead(
+                        source,
+                        contract,
+                        parameter.Type,
+                        local,
+                        Indent,
+                        "return " + BridgeTypeNames.Status + ".InvalidArgument;",
+                        payload: false,
+                        ref temp);
+                }
+
+                source.Append(Indent).Append("__bridgeTarget.On").Append(BridgeNames.Identifier(member.Name))
+                    .Append("(in context")
+                    .Append(arguments.Count == 0 ? string.Empty : ", " + string.Join(", ", arguments))
+                    .AppendLine(");");
+                source.AppendLine(Indent + "return 0;");
+                source.AppendLine("            }");
+                source.AppendLine();
             }
         }
 
@@ -442,6 +628,24 @@ internal static class BridgeContractDispatcherEmitter
         source.Append("            case ").Append(constants).Append(".Member").Append(BridgeTypeNames.Number(member.Ordinal)).AppendLine(":");
         source.AppendLine("            {");
         source.Append(Indent).Append("var __bridgeTarget = (").Append(handler).AppendLine(")admission.Handler!;");
+        if (model.FiniteOperation is { } operation && member.Ordinal == operation.CancelMemberId)
+        {
+            source.Append(Indent).Append("if (!__bridgeReader.IsComplete) ").AppendLine(fail);
+            source.Append(Indent).AppendLine("var __bridgeCancel = leases.TryBeginFiniteOperationCancel(");
+            source.Append(Indent).AppendLine("    admission.LeaseId, admission.Generation, admission.ObjectId);");
+            source.Append(Indent).Append("if (__bridgeCancel == global::Devolutions.PowerShell.Ffi.LiveObjects.")
+                .AppendLine("PowerShellBridgeFiniteOperationCancelResult.AlreadyCancelled)");
+            source.Append(Indent).AppendLine("{");
+            BridgeCodecEmitter.Guard(source, Indent + "    ", "__bridgeWriter.TryWriteNull()", fail);
+            source.Append(Indent).AppendLine("    return 0;");
+            source.Append(Indent).AppendLine("}");
+            source.Append(Indent).Append("if (__bridgeCancel != global::Devolutions.PowerShell.Ffi.LiveObjects.")
+                .AppendLine("PowerShellBridgeFiniteOperationCancelResult.InvokeHandler)");
+            source.Append(Indent).AppendLine("{");
+            source.Append(Indent).Append("    return ").Append(BridgeTypeNames.Status).AppendLine(".AccessDenied;");
+            source.Append(Indent).AppendLine("}");
+        }
+
         int temp = 0;
         var arguments = new List<string>();
         for (int index = 0; index < member.Parameters.Count; index++)
@@ -490,7 +694,16 @@ internal static class BridgeContractDispatcherEmitter
             source.Append("    private ulong Register").Append(id)
                 .AppendLine("(in global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeAdmission admission, " + handler + " handler)");
             source.AppendLine("    {");
-            source.Append("        return leases.Register(admission.LeaseId, admission.Generation, ").Append(id).AppendLine("UL, handler);");
+            if (model.FiniteOperation is { } operation)
+            {
+                source.Append("        return leases.RegisterFiniteOperation(admission.LeaseId, admission.Generation, admission.ObjectId, ")
+                    .Append(id).Append("UL, handler, ").Append(BridgeTypeNames.Number(operation.MaximumLifetimeMilliseconds))
+                    .AppendLine(");");
+            }
+            else
+            {
+                source.Append("        return leases.Register(admission.LeaseId, admission.Generation, ").Append(id).AppendLine("UL, handler);");
+            }
             source.AppendLine("    }");
             source.AppendLine();
             source.AppendLine("    /// <summary>Resolves an inbound handle within its own lease. A forged, stale, or cross-lease handle fails here.</summary>");
@@ -546,7 +759,24 @@ internal static class BridgeContractDispatcherEmitter
         return maximum;
     }
 
+    private static int MaximumRequest(BridgeContractModel contract)
+    {
+        int maximum = BridgeLimits.RequestHeaderSize + BridgeLimits.ValueHeaderSize + 32;
+        foreach (BridgeObjectModel model in contract.Objects)
+        {
+            foreach (BridgeMemberModel member in model.Members)
+            {
+                int value = member.MaximumRequestBytes(contract.DataById);
+                if (value > maximum)
+                {
+                    maximum = value;
+                }
+            }
+        }
+
+        return maximum;
+    }
+
     private static string MethodName(BridgeMemberModel member) =>
         member.Name == "get_Item" ? "GetAt" : member.Name;
 }
-

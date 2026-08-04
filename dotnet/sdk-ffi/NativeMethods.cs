@@ -60,6 +60,16 @@ internal struct NativeBrokerFrameInfo
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct NativeBrokerTerminalInfo
+{
+    internal uint Size;
+    internal uint AbiVersion;
+    internal uint State;
+    internal int TerminalStatus;
+    internal ulong TerminalEpochMilliseconds;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeCapabilityRegistration
 {
     internal uint Size;
@@ -694,6 +704,17 @@ internal static unsafe partial class NativeMethods
         nuint* requiredLength,
         NativeCallResult* result);
 
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_observed_diagnostic_page_copy_record_value")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int CopyObservedDiagnosticPageRecordValue(
+        ulong pageHandle,
+        uint recordIndex,
+        uint* kind,
+        byte* buffer,
+        nuint bufferLength,
+        nuint* requiredLength,
+        NativeCallResult* result);
+
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_observed_diagnostic_page_release")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int ReleaseObservedDiagnosticPage(ulong pageHandle, NativeCallResult* result);
@@ -851,6 +872,35 @@ internal static unsafe partial class NativeMethods
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int BrokerFrameRelease(ulong frameHandle, NativeCallResult* result);
 
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_observe")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerObserve(
+        ulong channelHandle,
+        ulong correlationId,
+        ulong* observationHandle,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_observation_get_info")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerObservationGetInfo(
+        ulong observationHandle,
+        NativeBrokerTerminalInfo* info,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_observation_wait")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerObservationWait(
+        ulong observationHandle,
+        uint timeoutMilliseconds,
+        NativeBrokerTerminalInfo* info,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_observation_release")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int BrokerObservationRelease(
+        ulong observationHandle,
+        NativeCallResult* result);
+
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_broker_reply")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int BrokerReply(
@@ -881,5 +931,20 @@ internal static unsafe partial class NativeMethods
     internal static partial int SetBroker(
         ulong builderHandle,
         ulong channelHandle,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_set_bridge")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int SetBridge(
+        ulong builderHandle,
+        ulong channelHandle,
+        ulong bindingId,
+        ulong contractIdLow,
+        ulong contractIdHigh,
+        ushort contractMajorVersion,
+        ushort contractMinorVersion,
+        uint maximumRequestBytes,
+        uint maximumReplyBytes,
+        NativeUtf8Span variableName,
         NativeCallResult* result);
 }

@@ -82,6 +82,11 @@ consumer, and exercises the SDK surface end to end. It prints the qualified
 PowerShell version and cross-checks it against the `PowerShellFileVersion`
 reported by `PowerShellRuntime.Diagnostics`.
 
+The harness normally requires the package version to match the crate version.
+For an explicitly named local preview built with a package-version override,
+pass `-AllowPreviewVersionMismatch`; this opt-in retains all package hash and
+NativeAOT checks while making the version mismatch visible as a warning.
+
 Verify the public/binding API baseline after changing any exported surface:
 
 ```powershell

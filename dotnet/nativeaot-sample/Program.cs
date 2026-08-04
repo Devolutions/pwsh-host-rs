@@ -34,6 +34,13 @@ if (!System.IO.File.Exists(bridgeContractPackPath))
     return 1;
 }
 
+if (!FiniteOperationSmoke.Run())
+{
+    return 1;
+}
+
+Console.WriteLine("NativeAOT finite operations: Success");
+
 PowerShellLiveObjectContractPack[] contractPacks =
 [
     new PowerShellLiveObjectContractPack(
@@ -114,6 +121,15 @@ if (args.Length == 2 && args[1].StartsWith("--expect-rejected-contract-pack:", S
     return 1;
 }
 
+if (args.Length == 2 &&
+    args[1].Equals("--expect-bridge-setup-failure-cleans-broker", StringComparison.Ordinal))
+{
+    PowerShellRuntime runtimeWithoutBridgePack = PowerShellRuntime.Activate(args[0], [contractPacks[0]]);
+    return BridgeAttachmentSmoke.VerifyFailedBridgeSetupClearsBrokerContext(runtimeWithoutBridgePack)
+        ? 0
+        : 1;
+}
+
 PowerShellRuntime runtime;
 switch (args.Length)
 {
@@ -133,6 +149,13 @@ if (!System.IO.File.Exists(System.IO.Path.Combine(runtime.PayloadDirectory, "pws
     Console.Error.WriteLine("NativeAOT facade did not report the selected PowerShell payload.");
     return 1;
 }
+
+if (!ObservedPresentationSmoke.Run(runtime))
+{
+    return 1;
+}
+
+Console.WriteLine("NativeAOT observed presentation: Success");
 
 using PowerShell powerShell = runtime.Create();
 PowerShellInvocationResult output = powerShell.AddScript("'nativeaot-in-process'").Invoke();
@@ -476,7 +499,7 @@ using (PowerShell sessionPowerShell = session.CreatePowerShell())
         new PowerShellLiveObjectContract(
             typeof(IPowerShellBridgeTestCountTransport).GUID,
             majorVersion: 1,
-            minorVersion: 0,
+            minorVersion: 1,
             PowerShellLiveObjectDirection.ConsumerToSession | PowerShellLiveObjectDirection.BridgeContract),
         bridgeBroker))
     {
@@ -970,6 +993,11 @@ catch (PowerShellValueConversionException)
 }
 
 if (!BrokerChannelSmoke.Run(runtime))
+{
+    return 1;
+}
+
+if (!BridgeAttachmentSmoke.Run(runtime))
 {
     return 1;
 }

@@ -17,10 +17,10 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use pwsh_host::FfiLiveStreamRecord;
 use pwsh_host::{
-    find_pwsh_dir, FfiBindingError, FfiInvocationResult, FfiLiveInvocation, FfiLiveObjectContractDescriptor,
-    FfiLiveStreamBatch, FfiObservedDiagnosticPage, FfiObservedInvocation, FfiPowerShell, FfiPowerShellSession,
-    FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue, FfiTypedResultInvocation, FfiTypedResultPage,
-    FfiTypedResultRecord, HostedRuntime, LiveObjectContractPack,
+    find_pwsh_dir, FfiBindingError, FfiBridgeContext, FfiInvocationResult, FfiLiveInvocation,
+    FfiLiveObjectContractDescriptor, FfiLiveStreamBatch, FfiObservedDiagnosticPage, FfiObservedInvocation,
+    FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue,
+    FfiTypedResultInvocation, FfiTypedResultPage, FfiTypedResultRecord, HostedRuntime, LiveObjectContractPack,
 };
 
 const ABI_VERSION: u32 = 2;
@@ -50,6 +50,10 @@ const FEATURE_OBSERVED_INVOCATION: u64 = 1 << 22;
 const FEATURE_SESSION_PREFLIGHT: u64 = 1 << 23;
 const FEATURE_RUNTIME_DIAGNOSTICS: u64 = 1 << 24;
 const FEATURE_DUPLEX_BROKER_CHANNEL: u64 = 1 << 25;
+const FEATURE_GENERATED_BRIDGE_ATTACHMENT: u64 = 1 << 26;
+const FEATURE_BROKER_TERMINAL_OBSERVATION: u64 = 1 << 27;
+const FEATURE_RELIABLE_BRIDGE_EVENTS: u64 = 1 << 28;
+const FEATURE_OBSERVED_PRESENTATION: u64 = 1 << 29;
 const CALL_RESULT_DIAGNOSTIC_TRUNCATED: u32 = 1;
 #[cfg(test)]
 const RESULT_RECORD_SCALAR_VALUE_PRESENT: u32 = 1 << 1;
@@ -74,6 +78,7 @@ const BROKER_MAX_INFLIGHT_LIMIT: u32 = 32;
 const BROKER_MAX_BODY_BYTES_LIMIT: u32 = 64 * 1024;
 const BROKER_MAX_DEADLINE_MS: u32 = 30_000;
 const BROKER_MAX_ERROR_MESSAGE_BYTES: usize = 512;
+const BROKER_MAX_OBSERVERS_PER_FRAME: u32 = 4;
 const BROKER_FRAME_FLAG_ONE_WAY: u32 = 1;
 const BROKER_FRAME_FLAG_MUTATING: u32 = 1 << 1;
 const BROKER_FRAME_FLAG_MASK: u32 = BROKER_FRAME_FLAG_ONE_WAY | BROKER_FRAME_FLAG_MUTATING;
@@ -84,6 +89,11 @@ const BROKER_FRAME_STATE_FAILED: u32 = 3;
 const BROKER_FRAME_STATE_CANCELLED: u32 = 4;
 const BROKER_FRAME_STATE_TIMED_OUT: u32 = 5;
 const BROKER_FRAME_STATE_ABORTED: u32 = 6;
+const BRIDGE_BROKER_REQUEST_KIND: u32 = 0x4252_0001;
+const BRIDGE_ROUTE_HEADER_SIZE: usize = 8;
+const BRIDGE_REQUEST_HEADER_SIZE: usize = 32;
+const BRIDGE_PROTOCOL_VERSION: u8 = 2;
+const BRIDGE_CLOSE_FRAME_KIND: u8 = 4;
 const SESSION_OPTIONS_PREFIX_SIZE: u32 = mem::size_of::<SessionOptionsPrefix>() as u32;
 const EMPTY_VALUE_CONTAINER: [u8; 4] = [0; 4];
 const VALUE_KIND_STRING: u32 = 1;
@@ -93,6 +103,7 @@ const VALUE_KIND_PROPERTY_BAG: u32 = 14;
 const CAPABILITY_REGISTRATION_VERSION: u32 = 1;
 const MAX_CAPABILITIES: usize = 16;
 const MAX_CAPABILITY_NAME_BYTES: usize = 64;
+const MAX_BRIDGE_VARIABLE_NAME_BYTES: usize = 64;
 const MAX_CAPABILITY_DEADLINE_MILLISECONDS: u32 = 30_000;
 const MAX_CAPABILITY_PERMISSIONS: u32 = 0x0f;
 const MAX_LIVE_OBJECT_CONTRACT_PACKS: usize = 16;
@@ -333,8 +344,87 @@ pub struct BrokerFrameInfo {
     dropped_before: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct BrokerTerminalInfo {
+    size: u32,
+    abi_version: u32,
+    state: u32,
+    terminal_status: i32,
+    terminal_epoch_ms: u64,
+}
+
+#[derive(Clone, Copy)]
+struct BrokerTerminalState {
+    state: u32,
+    terminal_status: i32,
+    terminal_epoch_ms: u64,
+}
+
+struct BrokerTerminalObservation {
+    state: Mutex<BrokerTerminalState>,
+    signal: Condvar,
+    leases: AtomicU32,
+}
+
+impl BrokerTerminalObservation {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(BrokerTerminalState {
+                state: BROKER_FRAME_STATE_QUEUED,
+                terminal_status: Status::OperationNotTerminal.value(),
+                terminal_epoch_ms: 0,
+            }),
+            signal: Condvar::new(),
+            leases: AtomicU32::new(0),
+        }
+    }
+
+    fn complete(&self, state: u32, terminal_epoch_ms: u64) {
+        let mut observed = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if observed.state >= BROKER_FRAME_STATE_COMPLETED {
+            return;
+        }
+
+        observed.state = state;
+        observed.terminal_status = broker_terminal_status(state).value();
+        observed.terminal_epoch_ms = terminal_epoch_ms;
+        drop(observed);
+        self.signal.notify_all();
+    }
+
+    fn mark_dispatched(&self) {
+        let mut observed = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if observed.state < BROKER_FRAME_STATE_COMPLETED {
+            observed.state = BROKER_FRAME_STATE_DISPATCHED;
+        }
+    }
+
+    fn try_acquire(&self) -> bool {
+        let mut current = self.leases.load(Ordering::Acquire);
+        loop {
+            if current >= BROKER_MAX_OBSERVERS_PER_FRAME {
+                return false;
+            }
+
+            match self
+                .leases
+                .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return true,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    fn release(&self) {
+        let _ = self.leases.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 struct BrokerFrame {
     correlation_id: u64,
+    generation: u64,
     ordering_key: u64,
     kind: u32,
     flags: u32,
@@ -345,6 +435,7 @@ struct BrokerFrame {
     reply: Vec<u8>,
     error_message: String,
     owner_token: u64,
+    terminal_observation: Arc<BrokerTerminalObservation>,
 }
 
 impl BrokerFrame {
@@ -372,6 +463,7 @@ struct BrokerChannel {
     max_inflight: u32,
     max_body_bytes: u32,
     default_deadline_ms: u32,
+    observer_leases: AtomicU32,
     inner: Mutex<BrokerChannelInner>,
     payload_signal: Condvar,
     consumer_signal: Condvar,
@@ -395,6 +487,26 @@ struct BrokerAttachment {
     channel: Arc<BrokerChannel>,
     generation: u64,
     active: AtomicBool,
+    cancelled: AtomicBool,
+    bridge: Option<BridgeAttachment>,
+}
+
+#[derive(Clone)]
+struct BridgeAttachment {
+    binding_id: u64,
+    contract_id_low: u64,
+    contract_id_high: u64,
+    contract_major_version: u16,
+    contract_minor_version: u16,
+    maximum_request_bytes: u32,
+    maximum_reply_bytes: u32,
+    variable_name: String,
+}
+
+struct BrokerConfiguration {
+    channel_handle: u64,
+    channel: Arc<BrokerChannel>,
+    bridge: Option<BridgeAttachment>,
 }
 
 struct State {
@@ -431,7 +543,7 @@ struct Session {
     runspace_session: Option<Arc<RunspaceSession>>,
     capability_registration: Mutex<Option<Arc<CapabilityRegistrationState>>>,
     active_capability: Mutex<Option<CapabilityInvocation>>,
-    broker_channel: Mutex<Option<(u64, Arc<BrokerChannel>)>>,
+    broker_channel: Mutex<Option<BrokerConfiguration>>,
     active_broker: Mutex<Option<Arc<BrokerAttachment>>>,
 }
 
@@ -698,6 +810,16 @@ impl Session {
             broker_deactivate_attachment(&attachment);
         }
     }
+
+    fn cancel_broker(&self) {
+        let active = self
+            .active_broker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(attachment) = active.as_ref() {
+            broker_cancel_attachment(attachment);
+        }
+    }
 }
 
 impl Operation {
@@ -809,10 +931,12 @@ impl Operation {
         };
 
         if finish_cancelled_capability {
+            self.session.cancel_broker();
             cancel_and_finish_capability(self.capability.as_ref());
         } else if should_stop {
             // A cancellation request wins even if the managed Stop call races a
             // natural completion; the worker discards any captured result.
+            self.session.cancel_broker();
             self.cancel_capability();
             let _ = self.session.power_shell.stop();
         }
@@ -953,6 +1077,7 @@ impl TypedResultOperation {
 
     fn request_stop(&self) {
         if !self.cancellation_requested.swap(true, Ordering::AcqRel) {
+            self.session.cancel_broker();
             self.cancel_capability();
             if let Some(invocation) = self
                 .invocation
@@ -1082,6 +1207,7 @@ impl ObservedInvocationOperation {
 
     fn request_stop(&self) {
         if !self.cancellation_requested.swap(true, Ordering::AcqRel) {
+            self.session.cancel_broker();
             self.cancel_capability();
             let invocation = self
                 .invocation
@@ -2153,6 +2279,23 @@ fn configure_broker(session: &Session, attachment: Option<&Arc<BrokerAttachment>
     if let Err(error) = configured {
         finish_broker(session, Some(attachment));
         return Err(error);
+    }
+    if let Some(bridge) = &attachment.bridge {
+        let configured = session.power_shell.set_bridge_context(&FfiBridgeContext {
+            binding_id: bridge.binding_id,
+            contract_id_low: bridge.contract_id_low,
+            contract_id_high: bridge.contract_id_high,
+            contract_major_version: bridge.contract_major_version,
+            contract_minor_version: bridge.contract_minor_version,
+            maximum_request_bytes: bridge.maximum_request_bytes,
+            maximum_reply_bytes: bridge.maximum_reply_bytes,
+            variable_name: &bridge.variable_name,
+        });
+        if let Err(error) = configured {
+            clear_broker_context(session);
+            finish_broker(session, Some(attachment));
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -3993,6 +4136,7 @@ fn set_capabilities(handle: u64, capability_handle: u64) -> Result<Status, (Stat
 static NEXT_BROKER_FRAME_HANDLE: AtomicU64 = AtomicU64::new(1_u64 << 53);
 static NEXT_BROKER_OWNER_TOKEN: AtomicU64 = AtomicU64::new(1);
 static NEXT_BROKER_GENERATION: AtomicU64 = AtomicU64::new(1);
+static NEXT_BROKER_OBSERVATION_HANDLE: AtomicU64 = AtomicU64::new(1_u64 << 54);
 
 /// One delivery of a frame to one pump thread. The owner token is recorded
 /// here, not on the frame, so releasing a delivery handle still succeeds after
@@ -4005,10 +4149,17 @@ struct BrokerDelivery {
 
 /// Delivery handle -> delivery record.
 type BrokerFrameRegistry = Option<HashMap<u64, BrokerDelivery>>;
+struct BrokerObservation {
+    channel: Arc<BrokerChannel>,
+    completion: Arc<BrokerTerminalObservation>,
+}
+/// Correlation terminal observation handle -> copied completion cell.
+type BrokerObservationRegistry = Option<HashMap<u64, BrokerObservation>>;
 /// Generation -> the attachment that owns it.
 type BrokerAttachmentRegistry = Option<HashMap<u64, Arc<BrokerAttachment>>>;
 
 static BROKER_FRAME_REGISTRY: Mutex<BrokerFrameRegistry> = Mutex::new(None);
+static BROKER_OBSERVATION_REGISTRY: Mutex<BrokerObservationRegistry> = Mutex::new(None);
 static BROKER_ATTACHMENTS: Mutex<BrokerAttachmentRegistry> = Mutex::new(None);
 
 thread_local! {
@@ -4020,6 +4171,12 @@ thread_local! {
 
 fn broker_frame_registry() -> MutexGuard<'static, BrokerFrameRegistry> {
     BROKER_FRAME_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn broker_observation_registry() -> MutexGuard<'static, BrokerObservationRegistry> {
+    BROKER_OBSERVATION_REGISTRY
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -4072,8 +4229,8 @@ fn broker_has_active_mutating_key(inner: &BrokerChannelInner, ordering_key: u64)
     })
 }
 
-/// Applies a terminal transition exactly once and wakes the blocked raiser.
-fn broker_finish_frame(inner: &mut BrokerChannelInner, correlation: u64, state: u32) -> bool {
+/// Applies a terminal transition exactly once and wakes every terminal observer.
+fn broker_finish_frame(inner: &mut BrokerChannelInner, correlation: u64, state: u32, terminal_epoch_ms: u64) -> bool {
     let Some(frame) = inner.frames.get_mut(&correlation) else {
         return false;
     };
@@ -4081,6 +4238,7 @@ fn broker_finish_frame(inner: &mut BrokerChannelInner, correlation: u64, state: 
         return false;
     }
     frame.state = state;
+    frame.terminal_observation.complete(state, terminal_epoch_ms);
     true
 }
 
@@ -4093,7 +4251,7 @@ fn broker_expire_due_frames(inner: &mut BrokerChannelInner, now_ms: u64) -> bool
         .collect();
     let changed = !expired.is_empty();
     for correlation in expired {
-        broker_finish_frame(inner, correlation, BROKER_FRAME_STATE_TIMED_OUT);
+        broker_finish_frame(inner, correlation, BROKER_FRAME_STATE_TIMED_OUT, now_ms);
         inner.queue.retain(|queued| *queued != correlation);
     }
     // A one-way frame has no blocked raiser to collect it, so an expired event
@@ -4103,6 +4261,38 @@ fn broker_expire_due_frames(inner: &mut BrokerChannelInner, now_ms: u64) -> bool
         .frames
         .retain(|_, frame| !(frame.is_terminal() && frame.is_one_way() && frame.owner_token == 0));
     changed
+}
+
+/// Terminates only the frames created by one invocation attachment. A channel
+/// may be shared by independent sessions, so its remaining frames must not be
+/// affected when another attachment stops or completes.
+fn broker_finish_attachment_frames(attachment: &BrokerAttachment, state: u32) {
+    let mut inner = attachment.channel.lock();
+    broker_finish_attachment_frames_locked(attachment, &mut inner, state);
+    drop(inner);
+    attachment.channel.payload_signal.notify_all();
+    attachment.channel.consumer_signal.notify_all();
+}
+
+fn broker_finish_attachment_frames_locked(attachment: &BrokerAttachment, inner: &mut BrokerChannelInner, state: u32) {
+    let now_ms = attachment.channel.now_epoch_ms();
+    let correlations: Vec<u64> = inner
+        .frames
+        .values()
+        .filter(|frame| {
+            !frame.is_terminal()
+                && frame.generation == attachment.generation
+                // A sink-validated bridge Close is teardown metadata, not
+                // application work. Preserve one admitted before cancellation
+                // as well as one admitted after the atomic cancellation sweep.
+                && (state != BROKER_FRAME_STATE_CANCELLED || !is_bridge_close_request(frame.kind, &frame.body))
+        })
+        .map(|frame| frame.correlation_id)
+        .collect();
+    for correlation in correlations {
+        broker_finish_frame(inner, correlation, state, now_ms);
+        inner.queue.retain(|queued| *queued != correlation);
+    }
 }
 
 fn broker_channel_for(handle: u64) -> Result<Arc<BrokerChannel>, (Status, String)> {
@@ -4172,6 +4362,7 @@ unsafe fn broker_open(
         max_inflight: header.max_inflight,
         max_body_bytes: header.max_body_bytes,
         default_deadline_ms: header.default_deadline_ms,
+        observer_leases: AtomicU32::new(0),
         inner: Mutex::new(BrokerChannelInner {
             next_correlation: 1,
             ..BrokerChannelInner::default()
@@ -4211,7 +4402,12 @@ fn broker_close(handle: u64) -> Result<Status, (Status, String)> {
             .map(|frame| frame.correlation_id)
             .collect();
         for correlation in outstanding {
-            broker_finish_frame(&mut inner, correlation, BROKER_FRAME_STATE_ABORTED);
+            broker_finish_frame(
+                &mut inner,
+                correlation,
+                BROKER_FRAME_STATE_ABORTED,
+                channel.now_epoch_ms(),
+            );
         }
         inner.queue.clear();
     }
@@ -4280,6 +4476,7 @@ fn broker_wait(handle: u64, timeout_ms: u32, frame_handle: *mut u64) -> Result<S
             let delivery = NEXT_BROKER_FRAME_HANDLE.fetch_add(1, Ordering::AcqRel);
             if let Some(frame) = inner.frames.get_mut(&correlation) {
                 frame.state = BROKER_FRAME_STATE_DISPATCHED;
+                frame.terminal_observation.mark_dispatched();
                 frame.owner_token = token;
                 frame.dropped_before = dropped_before;
             }
@@ -4424,11 +4621,190 @@ fn broker_frame_release(delivery: u64) -> Result<Status, (Status, String)> {
         frame.owner_token = 0;
         if frame.is_one_way() && !frame.is_terminal() {
             frame.state = BROKER_FRAME_STATE_COMPLETED;
+            frame
+                .terminal_observation
+                .complete(BROKER_FRAME_STATE_COMPLETED, channel.now_epoch_ms());
         }
     }
     inner
         .frames
         .retain(|_, frame| !(frame.is_terminal() && frame.is_one_way()));
+    Ok(Status::Success)
+}
+
+fn broker_observe(
+    channel_handle: u64,
+    correlation: u64,
+    observation_handle: *mut u64,
+) -> Result<Status, (Status, String)> {
+    if observation_handle.is_null() {
+        return Err((
+            Status::InvalidArgument,
+            "broker terminal observation output pointer is null".to_owned(),
+        ));
+    }
+
+    let channel = broker_channel_for(channel_handle)?;
+    let observation = {
+        let inner = channel.lock();
+        let frame = inner.frames.get(&correlation).ok_or_else(|| {
+            (
+                Status::BrokerInvalidTerminalState,
+                "broker correlation identifier is unknown".to_owned(),
+            )
+        })?;
+        if frame.is_one_way() {
+            return Err((
+                Status::InvalidArgument,
+                "one-way broker frames do not have terminal observations".to_owned(),
+            ));
+        }
+        Arc::clone(&frame.terminal_observation)
+    };
+    if !observation.try_acquire() {
+        return Err((
+            Status::Backpressure,
+            "the broker correlation has reached its terminal observation limit".to_owned(),
+        ));
+    }
+    let maximum_leases = channel.max_inflight.saturating_mul(BROKER_MAX_OBSERVERS_PER_FRAME);
+    let mut leased = channel.observer_leases.load(Ordering::Acquire);
+    loop {
+        if leased >= maximum_leases {
+            observation.release();
+            return Err((
+                Status::Backpressure,
+                "the broker channel has reached its terminal observation limit".to_owned(),
+            ));
+        }
+        match channel
+            .observer_leases
+            .compare_exchange_weak(leased, leased + 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => break,
+            Err(next) => leased = next,
+        }
+    }
+
+    let handle = NEXT_BROKER_OBSERVATION_HANDLE.fetch_add(1, Ordering::AcqRel);
+    if handle == 0 {
+        observation.release();
+        let _ = channel.observer_leases.fetch_sub(1, Ordering::AcqRel);
+        return Err((
+            Status::HostFailure,
+            "broker terminal observation handles are exhausted".to_owned(),
+        ));
+    }
+    let mut registry = broker_observation_registry();
+    registry.get_or_insert_with(HashMap::new).insert(
+        handle,
+        BrokerObservation {
+            channel,
+            completion: observation,
+        },
+    );
+    // SAFETY: the pointer was checked above and remains caller-owned.
+    unsafe { *observation_handle = handle };
+    Ok(Status::Success)
+}
+
+fn broker_observation_for(handle: u64) -> Result<Arc<BrokerTerminalObservation>, (Status, String)> {
+    let registry = broker_observation_registry();
+    registry
+        .as_ref()
+        .and_then(|observations| observations.get(&handle))
+        .map(|observation| Arc::clone(&observation.completion))
+        .ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "broker terminal observation handle is invalid".to_owned(),
+            )
+        })
+}
+
+unsafe fn write_broker_terminal_info(
+    info: *mut BrokerTerminalInfo,
+    state: BrokerTerminalState,
+) -> Result<Status, (Status, String)> {
+    if info.is_null() {
+        return Err((
+            Status::InvalidArgument,
+            "broker terminal info pointer is null".to_owned(),
+        ));
+    }
+    let size = std::ptr::read_unaligned(std::ptr::addr_of!((*info).size));
+    let abi_version = std::ptr::read_unaligned(std::ptr::addr_of!((*info).abi_version));
+    if size as usize != mem::size_of::<BrokerTerminalInfo>() || abi_version != BROKER_ABI_V1 {
+        return Err((
+            Status::InvalidArgument,
+            "broker terminal info reports an unsupported size or ABI version".to_owned(),
+        ));
+    }
+
+    info.write(BrokerTerminalInfo {
+        size: mem::size_of::<BrokerTerminalInfo>() as u32,
+        abi_version: BROKER_ABI_V1,
+        state: state.state,
+        terminal_status: state.terminal_status,
+        terminal_epoch_ms: state.terminal_epoch_ms,
+    });
+    Ok(Status::Success)
+}
+
+unsafe fn broker_observation_get_info(
+    observation_handle: u64,
+    info: *mut BrokerTerminalInfo,
+) -> Result<Status, (Status, String)> {
+    let observation = broker_observation_for(observation_handle)?;
+    let state = *observation
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    write_broker_terminal_info(info, state)
+}
+
+unsafe fn broker_observation_wait(
+    observation_handle: u64,
+    timeout_ms: u32,
+    info: *mut BrokerTerminalInfo,
+) -> Result<Status, (Status, String)> {
+    let observation = broker_observation_for(observation_handle)?;
+    let state = {
+        let state = observation
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.state >= BROKER_FRAME_STATE_COMPLETED || timeout_ms == 0 {
+            *state
+        } else {
+            let (state, _) = observation
+                .signal
+                .wait_timeout(state, Duration::from_millis(u64::from(timeout_ms)))
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *state
+        }
+    };
+    write_broker_terminal_info(info, state)
+}
+
+fn broker_observation_release(observation_handle: u64) -> Result<Status, (Status, String)> {
+    let observation = {
+        let mut registry = broker_observation_registry();
+        let observations = registry.as_mut().ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "broker terminal observation handle is invalid".to_owned(),
+            )
+        })?;
+        observations.remove(&observation_handle).ok_or_else(|| {
+            (
+                Status::InvalidHandle,
+                "broker terminal observation handle is invalid".to_owned(),
+            )
+        })?
+    };
+    observation.completion.release();
+    let _ = observation.channel.observer_leases.fetch_sub(1, Ordering::AcqRel);
     Ok(Status::Success)
 }
 
@@ -4471,6 +4847,7 @@ unsafe fn broker_complete(
     frame.state = state;
     frame.reply = reply.to_vec();
     frame.error_message = message;
+    frame.terminal_observation.complete(state, channel.now_epoch_ms());
     let correlation_id = frame.correlation_id;
     inner.queue.retain(|queued| *queued != correlation_id);
     drop(inner);
@@ -4516,8 +4893,98 @@ fn set_broker(handle: u64, channel_handle: u64) -> Result<Status, (Status, Strin
             "a broker channel is already attached; invoke or clear the builder first".to_owned(),
         ));
     }
-    *attached = Some((channel_handle, channel));
+    *attached = Some(BrokerConfiguration {
+        channel_handle,
+        channel,
+        bridge: None,
+    });
     Ok(Status::Success)
+}
+
+fn set_bridge(handle: u64, channel_handle: u64, bridge: BridgeAttachment) -> Result<Status, (Status, String)> {
+    if bridge.binding_id == 0
+        || (bridge.contract_id_low == 0 && bridge.contract_id_high == 0)
+        || bridge.contract_major_version == 0
+        || bridge.maximum_request_bytes == 0
+        || bridge.maximum_reply_bytes == 0
+        || !is_valid_bridge_variable_name(&bridge.variable_name)
+    {
+        return Err((
+            Status::InvalidArgument,
+            "bridge attachment metadata is invalid".to_owned(),
+        ));
+    }
+
+    let required_request_bytes = bridge
+        .maximum_request_bytes
+        .checked_add(8)
+        .ok_or_else(|| (Status::InvalidArgument, "bridge request bound overflows".to_owned()))?;
+    let required_reply_bytes = bridge
+        .maximum_reply_bytes
+        .checked_add(8)
+        .ok_or_else(|| (Status::InvalidArgument, "bridge reply bound overflows".to_owned()))?;
+    let (session, channel) = {
+        let state = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let session = state
+            .sessions
+            .get(&handle)
+            .cloned()
+            .ok_or_else(|| (Status::InvalidHandle, "PowerShell handle is invalid".to_owned()))?;
+        let channel = state
+            .broker_channels
+            .get(&channel_handle)
+            .cloned()
+            .ok_or_else(|| (Status::InvalidHandle, "broker channel handle is invalid".to_owned()))?;
+        (session, channel)
+    };
+    if channel.max_body_bytes < required_request_bytes || channel.max_body_bytes < required_reply_bytes {
+        return Err((
+            Status::InvalidArgument,
+            "broker channel body bound cannot carry the generated bridge frames".to_owned(),
+        ));
+    }
+    if session_has_active_operation(&session)
+        || session
+            .runspace_session
+            .as_ref()
+            .is_some_and(|runspace| runspace_session_has_active_operation(runspace))
+    {
+        return Err((
+            Status::Backpressure,
+            "a bridge channel cannot be attached while its session has an active invocation".to_owned(),
+        ));
+    }
+    let mut attached = session
+        .broker_channel
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if attached.is_some() {
+        return Err((
+            Status::Backpressure,
+            "a broker or bridge channel is already attached; invoke or clear the builder first".to_owned(),
+        ));
+    }
+    *attached = Some(BrokerConfiguration {
+        channel_handle,
+        channel,
+        bridge: Some(bridge),
+    });
+    Ok(Status::Success)
+}
+
+fn is_valid_bridge_variable_name(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_BRIDGE_VARIABLE_NAME_BYTES {
+        return false;
+    }
+
+    let mut characters = value.bytes();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    if !matches!(first, b'A'..=b'Z' | b'a'..=b'z' | b'_') {
+        return false;
+    }
+    characters.all(|character| matches!(character, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'))
 }
 
 fn session_has_broker(session: &Session) -> bool {
@@ -4547,12 +5014,14 @@ fn take_session_broker(session: &Session) -> Option<Arc<BrokerAttachment>> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .take();
-    let (channel_handle, channel) = taken?;
+    let configuration = taken?;
     Some(Arc::new(BrokerAttachment {
-        channel_handle,
-        channel,
+        channel_handle: configuration.channel_handle,
+        channel: configuration.channel,
         generation: NEXT_BROKER_GENERATION.fetch_add(1, Ordering::AcqRel),
         active: AtomicBool::new(true),
+        cancelled: AtomicBool::new(false),
+        bridge: configuration.bridge,
     }))
 }
 
@@ -4561,6 +5030,16 @@ fn set_active_broker(session: &Session, attachment: Option<Arc<BrokerAttachment>
         .active_broker
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = attachment;
+}
+
+fn clear_broker_context(session: &Session) {
+    // Bridge setup can fail after the broker context is installed but before an
+    // invocation consumes it. Clear the managed slot before deactivating Rust state.
+    let _ = unsafe {
+        session
+            .power_shell
+            .set_broker_context(0, 0, std::ptr::null(), std::ptr::null(), 0)
+    };
 }
 
 fn finish_broker(session: &Session, attachment: Option<&Arc<BrokerAttachment>>) {
@@ -4594,8 +5073,50 @@ fn broker_register_attachment(attachment: &Arc<BrokerAttachment>) {
 /// Revokes one broker attachment: no later trampoline call with its generation
 /// can resolve, and its registry entry is dropped.
 fn broker_deactivate_attachment(attachment: &Arc<BrokerAttachment>) {
+    // Close admission before terminating queued frames. A trampoline that
+    // resolved the attachment before unregistering rechecks this flag while
+    // holding the channel lock, so it cannot enqueue behind cleanup.
     attachment.active.store(false, Ordering::Release);
+    broker_finish_attachment_frames(attachment, BROKER_FRAME_STATE_ABORTED);
     broker_unregister_attachment(attachment.generation);
+}
+
+fn broker_cancel_attachment(attachment: &BrokerAttachment) {
+    // Cancellation is terminal for this invocation's attachment. The channel
+    // lock recheck in each trampoline closes the lookup-to-enqueue race. Set
+    // the flag and terminalize the already admitted frames under the same lock:
+    // the subsequent fixed cleanup Close frame is therefore not swept.
+    let mut inner = attachment.channel.lock();
+    attachment.cancelled.store(true, Ordering::Release);
+    broker_finish_attachment_frames_locked(attachment, &mut inner, BROKER_FRAME_STATE_CANCELLED);
+    drop(inner);
+    attachment.channel.payload_signal.notify_all();
+    attachment.channel.consumer_signal.notify_all();
+}
+
+/// The payload sink has already structurally validated this one fixed cleanup
+/// frame before it reaches the native broker. Cancellation admits it as the
+/// sole exception so the host observes lease closure and drops retained events;
+/// no application request or event can use this path.
+fn is_bridge_close_request(kind: u32, body: &[u8]) -> bool {
+    kind == BRIDGE_BROKER_REQUEST_KIND
+        && body.len() == BRIDGE_ROUTE_HEADER_SIZE + BRIDGE_REQUEST_HEADER_SIZE
+        && body[..BRIDGE_ROUTE_HEADER_SIZE].iter().any(|byte| *byte != 0)
+        && body[BRIDGE_ROUTE_HEADER_SIZE] == BRIDGE_PROTOCOL_VERSION
+        && body[BRIDGE_ROUTE_HEADER_SIZE + 1] == BRIDGE_CLOSE_FRAME_KIND
+        && body[BRIDGE_ROUTE_HEADER_SIZE + 2..BRIDGE_ROUTE_HEADER_SIZE + 8]
+            .iter()
+            .all(|byte| *byte == 0)
+        && body[BRIDGE_ROUTE_HEADER_SIZE + 8..BRIDGE_ROUTE_HEADER_SIZE + 16]
+            .iter()
+            .all(|byte| *byte == 0)
+        && body[BRIDGE_ROUTE_HEADER_SIZE + 16..BRIDGE_ROUTE_HEADER_SIZE + 24]
+            .iter()
+            .any(|byte| *byte != 0)
+        && body[BRIDGE_ROUTE_HEADER_SIZE + 24..BRIDGE_ROUTE_HEADER_SIZE + 28]
+            .iter()
+            .any(|byte| *byte != 0)
+        && body[BRIDGE_ROUTE_HEADER_SIZE + 28..].iter().all(|byte| *byte == 0)
 }
 
 fn broker_unregister_attachment(generation: u64) {
@@ -4653,6 +5174,7 @@ unsafe extern "C" fn broker_enqueue_and_wait(
         })?;
         let channel = Arc::clone(&attachment.channel);
         let body = read_broker_body(body, body_len, channel.max_body_bytes)?;
+        let teardown_close = is_bridge_close_request(kind, &body);
         let flags = (flags & BROKER_FRAME_FLAG_MASK) | BROKER_FRAME_FLAG_MUTATING;
         let deadline_ms = if deadline_ms == 0 {
             channel.default_deadline_ms
@@ -4662,6 +5184,18 @@ unsafe extern "C" fn broker_enqueue_and_wait(
 
         let correlation = {
             let mut inner = channel.lock();
+            if attachment.cancelled.load(Ordering::Acquire) && !teardown_close {
+                return Err((
+                    Status::OperationCancelled,
+                    "the broker context was cancelled before the request was admitted".to_owned(),
+                ));
+            }
+            if !attachment.active.load(Ordering::Acquire) {
+                return Err((
+                    Status::InvalidHandle,
+                    "the broker context is no longer active for this invocation".to_owned(),
+                ));
+            }
             if inner.closed {
                 return Err((Status::BrokerClosed, "broker channel is closed".to_owned()));
             }
@@ -4694,6 +5228,7 @@ unsafe extern "C" fn broker_enqueue_and_wait(
                 correlation,
                 BrokerFrame {
                     correlation_id: correlation,
+                    generation: attachment.generation,
                     ordering_key,
                     kind,
                     flags,
@@ -4704,6 +5239,7 @@ unsafe extern "C" fn broker_enqueue_and_wait(
                     reply: Vec::new(),
                     error_message: String::new(),
                     owner_token: 0,
+                    terminal_observation: Arc::new(BrokerTerminalObservation::new()),
                 },
             );
             inner.queue.push_back(correlation);
@@ -4741,7 +5277,7 @@ unsafe extern "C" fn broker_enqueue_and_wait(
                 return finish_broker_wait(frame, state, reply, reply_capacity, reply_len);
             }
             if deadline_epoch_ms <= now_ms {
-                broker_finish_frame(&mut inner, correlation, BROKER_FRAME_STATE_TIMED_OUT);
+                broker_finish_frame(&mut inner, correlation, BROKER_FRAME_STATE_TIMED_OUT, now_ms);
                 continue;
             }
             let remaining = Duration::from_millis(deadline_epoch_ms - now_ms);
@@ -4827,6 +5363,18 @@ unsafe extern "C" fn broker_post(
         let body = read_broker_body(body, body_len, channel.max_body_bytes)?;
 
         let mut inner = channel.lock();
+        if attachment.cancelled.load(Ordering::Acquire) {
+            return Err((
+                Status::OperationCancelled,
+                "the broker context was cancelled before the event was admitted".to_owned(),
+            ));
+        }
+        if !attachment.active.load(Ordering::Acquire) {
+            return Err((
+                Status::InvalidHandle,
+                "the broker context is no longer active for this invocation".to_owned(),
+            ));
+        }
         if inner.closed {
             return Err((Status::BrokerClosed, "broker channel is closed".to_owned()));
         }
@@ -4874,6 +5422,7 @@ unsafe extern "C" fn broker_post(
             correlation,
             BrokerFrame {
                 correlation_id: correlation,
+                generation: attachment.generation,
                 ordering_key,
                 kind,
                 flags: BROKER_FRAME_FLAG_ONE_WAY,
@@ -4884,6 +5433,7 @@ unsafe extern "C" fn broker_post(
                 reply: Vec::new(),
                 error_message: String::new(),
                 owner_token: 0,
+                terminal_observation: Arc::new(BrokerTerminalObservation::new()),
             },
         );
         inner.queue.push_back(correlation);
@@ -5698,6 +6248,10 @@ fn feature_flags() -> u64 {
         | FEATURE_SESSION_PREFLIGHT
         | FEATURE_RUNTIME_DIAGNOSTICS
         | FEATURE_DUPLEX_BROKER_CHANNEL
+        | FEATURE_GENERATED_BRIDGE_ATTACHMENT
+        | FEATURE_BROKER_TERMINAL_OBSERVATION
+        | FEATURE_RELIABLE_BRIDGE_EVENTS
+        | FEATURE_OBSERVED_PRESENTATION
 }
 
 fn create_live_object_probe(initial_count: i64) -> Result<*mut std::ffi::c_void, (Status, String)> {
@@ -6429,6 +6983,45 @@ pub unsafe extern "C" fn multi_pwsh_broker_frame_release(frame_handle: u64, resu
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_broker_observe(
+    channel_handle: u64,
+    correlation_id: u64,
+    observation_handle: *mut u64,
+    result: *mut CallResult,
+) -> i32 {
+    v2_broker_call(result, || {
+        broker_observe(channel_handle, correlation_id, observation_handle)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_broker_observation_get_info(
+    observation_handle: u64,
+    info: *mut BrokerTerminalInfo,
+    result: *mut CallResult,
+) -> i32 {
+    v2_broker_call(result, || broker_observation_get_info(observation_handle, info))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_broker_observation_wait(
+    observation_handle: u64,
+    timeout_ms: u32,
+    info: *mut BrokerTerminalInfo,
+    result: *mut CallResult,
+) -> i32 {
+    v2_broker_call(result, || broker_observation_wait(observation_handle, timeout_ms, info))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_broker_observation_release(
+    observation_handle: u64,
+    result: *mut CallResult,
+) -> i32 {
+    v2_broker_call(result, || broker_observation_release(observation_handle))
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_broker_reply(
     channel_handle: u64,
     correlation_id: u64,
@@ -6510,6 +7103,58 @@ pub unsafe extern "C" fn multi_pwsh_broker_cancel(
 #[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_set_broker(handle: u64, channel_handle: u64, result: *mut CallResult) -> i32 {
     v2_call(result, || set_broker(handle, channel_handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_set_bridge(
+    handle: u64,
+    channel_handle: u64,
+    binding_id: u64,
+    contract_id_low: u64,
+    contract_id_high: u64,
+    contract_major_version: u16,
+    contract_minor_version: u16,
+    maximum_request_bytes: u32,
+    maximum_reply_bytes: u32,
+    variable_name: Utf8Span,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        let variable_name = bridge_variable_name_input(variable_name)?;
+        set_bridge(
+            handle,
+            channel_handle,
+            BridgeAttachment {
+                binding_id,
+                contract_id_low,
+                contract_id_high,
+                contract_major_version,
+                contract_minor_version,
+                maximum_request_bytes,
+                maximum_reply_bytes,
+                variable_name: variable_name.to_owned(),
+            },
+        )
+    })
+}
+
+unsafe fn bridge_variable_name_input<'a>(value: Utf8Span) -> Result<&'a str, (Status, String)> {
+    if value.len > MAX_BRIDGE_VARIABLE_NAME_BYTES {
+        return Err((
+            Status::InvalidArgument,
+            "bridge variable name exceeds 64 UTF-8 bytes".to_owned(),
+        ));
+    }
+
+    let value = utf8_span(value).map_err(|status| (status, "bridge variable name is not valid UTF-8".to_owned()))?;
+    if !is_valid_bridge_variable_name(value) {
+        return Err((
+            Status::InvalidArgument,
+            "bridge variable name must be a bounded ASCII identifier".to_owned(),
+        ));
+    }
+
+    Ok(value)
 }
 
 #[no_mangle]
@@ -7409,6 +8054,56 @@ pub unsafe extern "C" fn multi_pwsh_observed_diagnostic_page_copy_record_text_ut
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_observed_diagnostic_page_copy_record_value(
+    page_handle: u64,
+    record_index: u32,
+    kind: *mut u32,
+    buffer: *mut u8,
+    buffer_len: usize,
+    required_len: *mut usize,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call_allow_active_pipeline(result, || {
+        if kind.is_null() {
+            return Err((
+                Status::InvalidArgument,
+                "observed diagnostic value kind output pointer is null".to_owned(),
+            ));
+        }
+        with_observed_diagnostic_page(page_handle, |page| {
+            let record = page.records.get(record_index as usize).ok_or_else(|| {
+                (
+                    Status::InvalidArgument,
+                    "observed diagnostic page record index is invalid".to_owned(),
+                )
+            })?;
+            let value = record.value.as_ref().ok_or_else(|| {
+                (
+                    Status::UnsupportedValue,
+                    "observed diagnostic record has no copied value".to_owned(),
+                )
+            })?;
+            if value.kind != VALUE_KIND_PROPERTY_BAG || value.payload.len() > MAX_TYPED_RESULT_PAYLOAD_BYTES {
+                return Err((
+                    Status::ManagedFailure,
+                    "observed progress value exceeds its fixed bounds".to_owned(),
+                ));
+            }
+            *kind = value.kind;
+            match write_bytes(buffer, buffer_len, required_len, &value.payload) {
+                Status::Success => Ok(Status::Success),
+                Status::BufferTooSmall => Ok(Status::BufferTooSmall),
+                Status::InvalidArgument => Err((
+                    Status::InvalidArgument,
+                    "observed progress value buffer arguments are invalid".to_owned(),
+                )),
+                _ => unreachable!(),
+            }
+        })
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn multi_pwsh_observed_diagnostic_page_release(page_handle: u64, result: *mut CallResult) -> i32 {
     v2_call_allow_active_pipeline(result, || release_observed_diagnostic_page(page_handle))
 }
@@ -8136,6 +8831,16 @@ mod tests {
         }
     }
 
+    fn bridge_close_body() -> Vec<u8> {
+        let mut close = vec![0_u8; BRIDGE_ROUTE_HEADER_SIZE + BRIDGE_REQUEST_HEADER_SIZE];
+        close[0] = 1;
+        close[BRIDGE_ROUTE_HEADER_SIZE] = BRIDGE_PROTOCOL_VERSION;
+        close[BRIDGE_ROUTE_HEADER_SIZE + 1] = BRIDGE_CLOSE_FRAME_KIND;
+        close[BRIDGE_ROUTE_HEADER_SIZE + 16..BRIDGE_ROUTE_HEADER_SIZE + 24].copy_from_slice(&1_u64.to_le_bytes());
+        close[BRIDGE_ROUTE_HEADER_SIZE + 24..BRIDGE_ROUTE_HEADER_SIZE + 28].copy_from_slice(&1_u32.to_le_bytes());
+        close
+    }
+
     fn open_broker_channel(options: &BrokerChannelOptions) -> u64 {
         let mut diagnostic = [0_u8; 256];
         let mut result = broker_call_result(&mut diagnostic);
@@ -8185,6 +8890,8 @@ mod tests {
             channel,
             generation: NEXT_BROKER_GENERATION.fetch_add(1, Ordering::AcqRel),
             active: AtomicBool::new(true),
+            cancelled: AtomicBool::new(false),
+            bridge: None,
         });
         broker_register_attachment(&attachment);
         attachment
@@ -8346,6 +9053,154 @@ mod tests {
         assert_eq!(reply, b"pong");
 
         broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_terminal_observation_survives_delivery_release_and_reports_cancellation() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 1, b"observe"));
+
+        let frame = broker_wait_for_frame(channel, 5_000);
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        let mut frame_info = BrokerFrameInfo {
+            size: mem::size_of::<BrokerFrameInfo>() as u32,
+            abi_version: BROKER_ABI_V1,
+            ..BrokerFrameInfo::default()
+        };
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_get_info(frame, &mut frame_info, &mut result) },
+            Status::Success.value()
+        );
+
+        let mut observation = 0_u64;
+        assert_eq!(
+            unsafe { multi_pwsh_broker_observe(channel, frame_info.correlation_id, &mut observation, &mut result,) },
+            Status::Success.value()
+        );
+        assert_ne!(observation, 0);
+
+        let mut terminal = BrokerTerminalInfo {
+            size: mem::size_of::<BrokerTerminalInfo>() as u32,
+            abi_version: BROKER_ABI_V1,
+            ..BrokerTerminalInfo::default()
+        };
+        assert_eq!(
+            unsafe { multi_pwsh_broker_observation_get_info(observation, &mut terminal, &mut result) },
+            Status::Success.value()
+        );
+        assert_eq!(terminal.state, BROKER_FRAME_STATE_DISPATCHED);
+        assert_eq!(terminal.terminal_status, Status::OperationNotTerminal.value());
+        assert_eq!(terminal.terminal_epoch_ms, 0);
+
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+            Status::Success.value()
+        );
+        assert_eq!(
+            unsafe { multi_pwsh_broker_cancel(channel, frame_info.correlation_id, &mut result) },
+            Status::Success.value()
+        );
+
+        let observed_from_worker = std::thread::spawn(move || {
+            let mut diagnostic = [0_u8; 256];
+            let mut result = broker_call_result(&mut diagnostic);
+            let mut terminal = BrokerTerminalInfo {
+                size: mem::size_of::<BrokerTerminalInfo>() as u32,
+                abi_version: BROKER_ABI_V1,
+                ..BrokerTerminalInfo::default()
+            };
+            let status = unsafe { multi_pwsh_broker_observation_wait(observation, 1_000, &mut terminal, &mut result) };
+            (status, terminal)
+        })
+        .join()
+        .expect("observation worker");
+        assert_eq!(observed_from_worker.0, Status::Success.value());
+        assert_eq!(observed_from_worker.1.state, BROKER_FRAME_STATE_CANCELLED);
+        assert_eq!(
+            observed_from_worker.1.terminal_status,
+            Status::OperationCancelled.value()
+        );
+
+        assert_eq!(
+            unsafe { multi_pwsh_broker_observation_release(observation, &mut result) },
+            Status::Success.value()
+        );
+        assert_eq!(
+            unsafe { multi_pwsh_broker_observation_release(observation, &mut result) },
+            Status::InvalidHandle.value()
+        );
+        let (status, _, _) = payload.join().expect("payload thread");
+        assert_eq!(status, Status::OperationCancelled.value());
+
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_terminal_observation_is_bounded_and_remains_readable_after_close() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        let payload = std::thread::spawn(move || broker_enqueue(channel, generation, 1, b"close"));
+
+        let frame = broker_wait_for_frame(channel, 5_000);
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        let mut frame_info = BrokerFrameInfo {
+            size: mem::size_of::<BrokerFrameInfo>() as u32,
+            abi_version: BROKER_ABI_V1,
+            ..BrokerFrameInfo::default()
+        };
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_get_info(frame, &mut frame_info, &mut result) },
+            Status::Success.value()
+        );
+
+        let mut observations = Vec::new();
+        for _ in 0..BROKER_MAX_OBSERVERS_PER_FRAME {
+            let mut observation = 0_u64;
+            assert_eq!(
+                unsafe { multi_pwsh_broker_observe(channel, frame_info.correlation_id, &mut observation, &mut result) },
+                Status::Success.value()
+            );
+            observations.push(observation);
+        }
+        let mut overflow = 0_u64;
+        assert_eq!(
+            unsafe { multi_pwsh_broker_observe(channel, frame_info.correlation_id, &mut overflow, &mut result) },
+            Status::Backpressure.value()
+        );
+        assert_eq!(overflow, 0);
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+            Status::Success.value()
+        );
+
+        broker_close_channel(channel);
+        for observation in observations {
+            let mut terminal = BrokerTerminalInfo {
+                size: mem::size_of::<BrokerTerminalInfo>() as u32,
+                abi_version: BROKER_ABI_V1,
+                ..BrokerTerminalInfo::default()
+            };
+            assert_eq!(
+                unsafe { multi_pwsh_broker_observation_get_info(observation, &mut terminal, &mut result) },
+                Status::Success.value()
+            );
+            assert_eq!(terminal.state, BROKER_FRAME_STATE_ABORTED);
+            assert_eq!(terminal.terminal_status, Status::BrokerClosed.value());
+            assert_eq!(
+                unsafe { multi_pwsh_broker_observation_release(observation, &mut result) },
+                Status::Success.value()
+            );
+        }
+
+        let (status, _, _) = payload.join().expect("payload thread");
+        assert_eq!(status, Status::BrokerClosed.value());
         broker_release_test_attachment(&attachment);
     }
 
@@ -8692,6 +9547,129 @@ mod tests {
         assert!(info.flags & BROKER_FRAME_FLAG_ONE_WAY != 0);
         assert!(info.dropped_before > 0, "coalesced events were not reported");
         unsafe { multi_pwsh_broker_frame_release(frame, &mut result) };
+
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_cancellation_closes_payload_admission_before_queued_frames_finish() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        broker_cancel_attachment(&attachment);
+
+        let (status, _, diagnostic) = broker_enqueue(channel, generation, 31, b"request");
+        assert_eq!(status, Status::OperationCancelled.value());
+        assert!(diagnostic.contains("cancelled"));
+
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        let status = unsafe {
+            broker_post(
+                channel,
+                generation,
+                32,
+                0,
+                b"event".as_ptr(),
+                b"event".len() as u32,
+                &mut result,
+            )
+        };
+        assert_eq!(status, Status::OperationCancelled.value());
+        assert!(String::from_utf8_lossy(&diagnostic[..result.diagnostic_written]).contains("cancelled"));
+        assert_eq!(broker_wait_for_frame(channel, 50), 0);
+
+        broker_close_channel(channel);
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_cancellation_preserves_an_admitted_bridge_close_frame() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        assert_eq!(broker_wait_for_frame(channel, 50), 0);
+
+        let close = bridge_close_body();
+        let payload = std::thread::spawn({
+            let close = close.clone();
+            move || broker_enqueue(channel, generation, BRIDGE_BROKER_REQUEST_KIND, &close)
+        });
+
+        for _ in 0..100 {
+            if attachment
+                .channel
+                .lock()
+                .frames
+                .values()
+                .any(|frame| frame.generation == generation)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(attachment
+            .channel
+            .lock()
+            .frames
+            .values()
+            .any(|frame| frame.generation == generation));
+
+        broker_cancel_attachment(&attachment);
+        let frame = broker_wait_for_frame(channel, 5_000);
+        assert_ne!(frame, 0, "cancellation must preserve generated bridge Close");
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+            Status::Success.value()
+        );
+
+        broker_close_channel(channel);
+        let (status, _, _) = payload.join().expect("payload");
+        assert_eq!(status, Status::BrokerClosed.value());
+        broker_release_test_attachment(&attachment);
+    }
+
+    #[test]
+    fn broker_cancellation_admits_a_fixed_cleanup_close_frame() {
+        let channel = open_broker_channel(&broker_default_options());
+        let attachment = broker_test_attachment(channel);
+        let generation = attachment.generation;
+        assert_eq!(broker_wait_for_frame(channel, 50), 0);
+        broker_cancel_attachment(&attachment);
+
+        let payload = std::thread::spawn({
+            let close = bridge_close_body();
+            move || broker_enqueue(channel, generation, BRIDGE_BROKER_REQUEST_KIND, &close)
+        });
+        let frame = broker_wait_for_frame(channel, 5_000);
+        assert_ne!(frame, 0, "cancellation must admit generated bridge Close");
+
+        let mut diagnostic = [0_u8; 256];
+        let mut result = broker_call_result(&mut diagnostic);
+        let mut info = BrokerFrameInfo {
+            size: mem::size_of::<BrokerFrameInfo>() as u32,
+            abi_version: BROKER_ABI_V1,
+            ..BrokerFrameInfo::default()
+        };
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_get_info(frame, &mut info, &mut result) },
+            Status::Success.value()
+        );
+        assert_eq!(info.kind, BRIDGE_BROKER_REQUEST_KIND);
+        assert_eq!(
+            unsafe { multi_pwsh_broker_frame_release(frame, &mut result) },
+            Status::Success.value()
+        );
+        assert_eq!(
+            unsafe { multi_pwsh_broker_reply(channel, info.correlation_id, std::ptr::null(), 0, &mut result) },
+            Status::Success.value()
+        );
+        let (status, reply, _) = payload.join().expect("payload");
+        assert_eq!(status, Status::Success.value());
+        assert!(reply.is_empty());
 
         broker_close_channel(channel);
         broker_release_test_attachment(&attachment);
@@ -9216,7 +10194,11 @@ mod tests {
             | FEATURE_OBSERVED_INVOCATION
             | FEATURE_SESSION_PREFLIGHT
             | FEATURE_RUNTIME_DIAGNOSTICS
-            | FEATURE_DUPLEX_BROKER_CHANNEL;
+            | FEATURE_DUPLEX_BROKER_CHANNEL
+            | FEATURE_GENERATED_BRIDGE_ATTACHMENT
+            | FEATURE_BROKER_TERMINAL_OBSERVATION
+            | FEATURE_RELIABLE_BRIDGE_EVENTS
+            | FEATURE_OBSERVED_PRESENTATION;
 
         assert_eq!(ABI_VERSION, 2);
         assert_eq!(MINIMUM_COMPATIBLE_ABI_VERSION, 2);
@@ -10959,6 +11941,52 @@ mod tests {
             unsafe { data_value_input(&malformed) },
             Err((Status::InvalidArgument, _))
         ));
+    }
+
+    #[test]
+    fn bridge_variable_name_is_validated_before_attachment_copy() {
+        let oversized = [b'R'; MAX_BRIDGE_VARIABLE_NAME_BYTES + 1];
+        assert!(matches!(
+            unsafe {
+                bridge_variable_name_input(Utf8Span {
+                    data: oversized.as_ptr(),
+                    len: oversized.len(),
+                })
+            },
+            Err((Status::InvalidArgument, _))
+        ));
+
+        let maximum = [b'R'; MAX_BRIDGE_VARIABLE_NAME_BYTES];
+        assert!(unsafe {
+            bridge_variable_name_input(Utf8Span {
+                data: maximum.as_ptr(),
+                len: maximum.len(),
+            })
+        }
+        .is_ok());
+
+        let malformed = b"R-DM";
+        assert!(matches!(
+            unsafe {
+                bridge_variable_name_input(Utf8Span {
+                    data: malformed.as_ptr(),
+                    len: malformed.len(),
+                })
+            },
+            Err((Status::InvalidArgument, _))
+        ));
+
+        let valid = b"RDM";
+        assert_eq!(
+            unsafe {
+                bridge_variable_name_input(Utf8Span {
+                    data: valid.as_ptr(),
+                    len: valid.len(),
+                })
+            }
+            .unwrap(),
+            "RDM"
+        );
     }
 
     #[test]

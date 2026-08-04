@@ -145,6 +145,23 @@ internal static class BridgeContractPayloadEmitter
             .Append(BridgeTypeNames.Wire).AppendLine(".RequestHeaderSize + bodyLength));");
         source.AppendLine("    }");
         source.AppendLine();
+        source.AppendLine("    internal void PostReliableEvent(ulong objectId, uint memberId, ulong orderingKey, byte[] request, int argumentCount, int bodyLength)");
+        source.AppendLine("    {");
+        source.AppendLine("        if (global::System.Threading.Volatile.Read(ref closed) != 0)");
+        source.AppendLine("        {");
+        source.Append("            throw new ").Append(BridgeTypeNames.BridgeException).Append('(').Append(BridgeTypeNames.Status)
+            .Append(".AccessDenied, \"Bridge contract '").Append(BridgeNames.Escape(contract.ContractId)).AppendLine("' lease has been released.\");");
+        source.AppendLine("        }");
+        source.AppendLine();
+        source.Append("        var header = new ").Append(BridgeTypeNames.RequestHeader).Append('(').Append(BridgeTypeNames.FrameKind)
+            .AppendLine(".ReliableEvent, checked((ushort)argumentCount), memberId, objectId, leaseId, generation, bodyLength);");
+        source.Append("        if (!header.TryWrite(request)) { throw new ").Append(BridgeTypeNames.BridgeException).Append('(')
+            .Append(BridgeTypeNames.Status).Append(".InvalidArgument, \"Bridge contract '")
+            .Append(BridgeNames.Escape(contract.ContractId)).AppendLine("' could not encode a reliable event frame.\"); }");
+        source.Append("        transport.PostEvent(0x42520000U | memberId, orderingKey, request.AsSpan(0, ")
+            .Append(BridgeTypeNames.Wire).AppendLine(".RequestHeaderSize + bodyLength));");
+        source.AppendLine("    }");
+        source.AppendLine();
         source.AppendLine("    /// <summary>Sends an explicit release frame for one object handle.</summary>");
         source.AppendLine("    internal void Release(ulong objectId, uint releaseId)");
         source.AppendLine("    {");
@@ -168,6 +185,24 @@ internal static class BridgeContractPayloadEmitter
         source.AppendLine("    {");
         source.AppendLine("        if (global::System.Threading.Interlocked.Exchange(ref closed, 1) != 0) { return; }");
         source.AppendLine("        lock (gate) { handles.Clear(); }");
+        source.AppendLine("    }");
+        source.AppendLine();
+        source.AppendLine("    /// <summary>Tombstones local wrappers and closes the remote lease through the attached carrier.</summary>");
+        source.AppendLine("    internal void CloseTransport()");
+        source.AppendLine("    {");
+        source.AppendLine("        if (global::System.Threading.Interlocked.Exchange(ref closed, 1) != 0) { return; }");
+        source.AppendLine("        lock (gate) { handles.Clear(); }");
+        source.Append("        byte[] request = new byte[").Append(BridgeTypeNames.Wire).AppendLine(".RequestHeaderSize];");
+        source.Append("        var header = new ").Append(BridgeTypeNames.RequestHeader).Append('(').Append(BridgeTypeNames.FrameKind)
+            .AppendLine(".Close, 0, 0U, 0UL, leaseId, generation, 0);");
+        source.Append("        if (!header.TryWrite(request)) { throw new ").Append(BridgeTypeNames.BridgeException).Append('(')
+            .Append(BridgeTypeNames.Status).Append(".InvalidArgument, \"Bridge contract '")
+            .Append(BridgeNames.Escape(contract.ContractId)).AppendLine("' could not encode a close frame.\"); }");
+        source.Append("        byte[] reply = new byte[").Append(BridgeTypeNames.Wire).Append(".ReplyHeaderSize + ")
+            .Append(BridgeTypeNames.Wire).AppendLine(".ValueHeaderSize];");
+        source.AppendLine("        int status = transport.Invoke(leaseId, generation, 0UL, 0U, request, reply, out _);");
+        source.Append("        if (status != 0) { throw ").Append(BridgeTypeNames.BridgeException).Append(".FromStatus(status, \"")
+            .Append(BridgeNames.Escape(contract.ContractId)).AppendLine("\"); }");
         source.AppendLine("    }");
         source.AppendLine();
         foreach (BridgeObjectModel model in contract.Objects)
@@ -212,11 +247,14 @@ internal static class BridgeContractPayloadEmitter
         string root = BridgeNames.Wrapper(contract.RootObject);
         string constants = BridgeNames.Contract(contract);
         string transport = contract.TransportInterfaceType;
+        int maximumRequest = MaximumRequest(contract);
+        int maximumReply = MaximumReply(contract);
         source.Append("internal sealed class ").Append(binding).AppendLine();
         source.AppendLine("{");
         source.AppendLine("    private static readonly global::System.Runtime.InteropServices.Marshalling.StrategyBasedComWrappers ComWrappers = new();");
         source.AppendLine("    private readonly object gate = new();");
         source.AppendLine("    private readonly global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeContractSink sink;");
+        source.AppendLine("    private readonly global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeBrokerSink? brokerSink;");
         source.AppendLine("    private global::System.Runtime.InteropServices.Marshalling.ComObject? sinkComObject;");
         source.Append("    private ").Append(client).AppendLine("? client;");
         source.Append("    private ").Append(transport).AppendLine("? contract;");
@@ -229,6 +267,15 @@ internal static class BridgeContractPayloadEmitter
             .AppendLine("global::System.Runtime.InteropServices.Marshalling.ComObject sinkComObject)");
         source.AppendLine("    {");
         source.AppendLine("        this.sink = sink;");
+        source.AppendLine("        this.sinkComObject = sinkComObject;");
+        source.AppendLine("    }");
+        source.AppendLine();
+        source.Append("    private ").Append(binding).Append("(")
+            .Append("global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeBrokerSink sink, ")
+            .AppendLine("global::System.Runtime.InteropServices.Marshalling.ComObject sinkComObject)");
+        source.AppendLine("    {");
+        source.AppendLine("        this.sink = null!;");
+        source.AppendLine("        brokerSink = sink;");
         source.AppendLine("        this.sinkComObject = sinkComObject;");
         source.AppendLine("    }");
         source.AppendLine();
@@ -267,6 +314,33 @@ internal static class BridgeContractPayloadEmitter
         source.AppendLine("        }");
         source.AppendLine("    }");
         source.AppendLine();
+        source.Append("    internal static ").Append(binding).Append(" Create(")
+            .Append("global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeBrokerSink sink, ")
+            .AppendLine("global::System.Runtime.InteropServices.Marshalling.ComObject sinkComObject)");
+        source.AppendLine("    {");
+        source.AppendLine("        global::System.ArgumentNullException.ThrowIfNull(sink);");
+        source.AppendLine("        global::System.ArgumentNullException.ThrowIfNull(sinkComObject);");
+        source.AppendLine("        global::System.Guid expected = global::System.Guid.Parse(" + constants + ".TransportInterfaceId);");
+        source.AppendLine("        byte[] identity = expected.ToByteArray();");
+        source.AppendLine("        ulong expectedLow = global::System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(identity);");
+        source.AppendLine("        ulong expectedHigh = global::System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(identity.AsSpan(8));");
+        source.AppendLine("        int status = sink.GetRequestedContract(out ulong requestedLow, out ulong requestedHigh, out ushort requestedMajor, out ushort requestedMinor, out uint requestedRequest, out uint requestedReply);");
+        source.AppendLine("        if (status != global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeStatus.Success)");
+        source.AppendLine("        {");
+        source.AppendLine("            throw global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeException.FromStatus(status, " + constants + ".ContractId);");
+        source.AppendLine("        }");
+        source.Append("        if (requestedLow != expectedLow || requestedHigh != expectedHigh || requestedMajor != ")
+            .Append(constants).Append(".MajorVersion || requestedMinor != ").Append(constants)
+            .Append(".MinorVersion || requestedRequest != ").Append(BridgeTypeNames.Number(maximumRequest))
+            .Append("U || requestedReply != ").Append(BridgeTypeNames.Number(maximumReply)).AppendLine("U)");
+        source.AppendLine("        {");
+        source.AppendLine("            throw new global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeException(");
+        source.AppendLine("                global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeStatus.ContractMismatch,");
+        source.AppendLine("                \"The generated bridge contract identity or bounds do not match the attached host binding.\");");
+        source.AppendLine("        }");
+        source.AppendLine("        return new " + binding + "(sink, sinkComObject);");
+        source.AppendLine("    }");
+        source.AppendLine();
         source.Append("    internal static void Declare(")
             .Append("global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeContractSink sink, nint callback)").AppendLine();
         source.AppendLine("    {");
@@ -287,6 +361,25 @@ internal static class BridgeContractPayloadEmitter
         source.AppendLine("        }");
         source.AppendLine("    }");
         source.AppendLine();
+        source.Append("    internal static void Declare(")
+            .Append("global::Devolutions.PowerShell.Ffi.LiveObjects.IPowerShellBridgeBrokerSink sink, nint callback)").AppendLine();
+        source.AppendLine("    {");
+        source.AppendLine("        global::System.ArgumentNullException.ThrowIfNull(sink);");
+        source.AppendLine("        if (callback == 0) { throw new global::System.ArgumentException(\"The bridge callback pointer is null.\", nameof(callback)); }");
+        source.AppendLine("        global::System.Guid expected = global::System.Guid.Parse(" + constants + ".TransportInterfaceId);");
+        source.AppendLine("        byte[] identity = expected.ToByteArray();");
+        source.AppendLine("        int status = sink.Declare(");
+        source.AppendLine("            global::System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(identity),");
+        source.AppendLine("            global::System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(identity.AsSpan(8)),");
+        source.Append("            checked((ushort)").Append(constants).Append(".MajorVersion), checked((ushort)")
+            .Append(constants).Append(".MinorVersion), callback, ").Append(BridgeTypeNames.Number(maximumRequest))
+            .Append("U, ").Append(BridgeTypeNames.Number(maximumReply)).AppendLine("U);");
+        source.AppendLine("        if (status != global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeStatus.Success)");
+        source.AppendLine("        {");
+        source.AppendLine("            throw global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeException.FromStatus(status, " + constants + ".ContractId);");
+        source.AppendLine("        }");
+        source.AppendLine("    }");
+        source.AppendLine();
         source.AppendLine("    public object Bind()");
         source.AppendLine("    {");
         source.AppendLine("        if (global::System.Threading.Volatile.Read(ref disposed) != 0)");
@@ -301,6 +394,15 @@ internal static class BridgeContractPayloadEmitter
         source.AppendLine("            if (bound != 0)");
         source.AppendLine("            {");
         source.AppendLine("                return client!.Root;");
+        source.AppendLine("            }");
+        source.AppendLine();
+        source.AppendLine("            if (brokerSink is not null)");
+        source.AppendLine("            {");
+        source.Append("                ").Append(client).Append(" opened = ").Append(client)
+            .AppendLine(".Open(new global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeBrokerTransport(brokerSink));");
+        source.AppendLine("                client = opened;");
+        source.AppendLine("                bound = 1;");
+        source.AppendLine("                return opened.Root;");
         source.AppendLine("            }");
         source.AppendLine();
         source.AppendLine("            nint pointer = 0;");
@@ -365,9 +467,13 @@ internal static class BridgeContractPayloadEmitter
         source.AppendLine("        global::System.Exception? failure = null;");
         source.AppendLine("        try");
         source.AppendLine("        {");
-        source.AppendLine("            previousClient?.Close();");
-        source.AppendLine("            if (previousContract is not null && previousClient is not null)");
+        source.AppendLine("            if (brokerSink is not null)");
         source.AppendLine("            {");
+        source.AppendLine("                previousClient?.CloseTransport();");
+        source.AppendLine("            }");
+        source.AppendLine("            else if (previousContract is not null && previousClient is not null)");
+        source.AppendLine("            {");
+        source.AppendLine("                previousClient.Close();");
         source.AppendLine("                int status = previousContract.CloseLease(previousClient.LeaseId, previousClient.Generation);");
         source.AppendLine("                if (status != global::Devolutions.PowerShell.Ffi.LiveObjects.PowerShellBridgeStatus.Success)");
         source.AppendLine("                {");
@@ -470,6 +576,7 @@ internal static class BridgeContractPayloadEmitter
                     EmitMethod(source, contract, member);
                     break;
                 case BridgeRecordKind.Event:
+                case BridgeRecordKind.ReliableEvent:
                     EmitEvent(source, contract, member);
                     break;
                 default:
@@ -580,7 +687,8 @@ internal static class BridgeContractPayloadEmitter
         }
 
         BridgeCodecEmitter.Guard(source, "        ", "__bridgeWriter.IsComplete", onFail);
-        source.Append("        client.PostEvent(ObjectId, ").Append(constants).Append(".Member").Append(BridgeTypeNames.Number(member.Ordinal))
+        source.Append("        client.").Append(member.Kind == BridgeRecordKind.ReliableEvent ? "PostReliableEvent" : "PostEvent")
+            .Append("(ObjectId, ").Append(constants).Append(".Member").Append(BridgeTypeNames.Number(member.Ordinal))
             .Append(", ").Append(BridgeTypeNames.Number(member.OrderingKey)).Append("UL, __bridgeRequest, ")
             .Append(BridgeTypeNames.Number(member.Parameters.Count)).AppendLine(", __bridgeWriter.Length);");
         source.AppendLine("    }");
@@ -642,4 +750,40 @@ internal static class BridgeContractPayloadEmitter
 
     private static string MethodName(BridgeMemberModel member) =>
         member.Name == "get_Item" ? "GetAt" : member.Name;
+
+    private static int MaximumRequest(BridgeContractModel contract)
+    {
+        int maximum = BridgeLimits.RequestHeaderSize + BridgeLimits.ValueHeaderSize + 32;
+        foreach (BridgeObjectModel model in contract.Objects)
+        {
+            foreach (BridgeMemberModel member in model.Members)
+            {
+                int value = member.MaximumRequestBytes(contract.DataById);
+                if (value > maximum)
+                {
+                    maximum = value;
+                }
+            }
+        }
+
+        return maximum;
+    }
+
+    private static int MaximumReply(BridgeContractModel contract)
+    {
+        int maximum = BridgeLimits.ReplyHeaderSize + BridgeLimits.ValueHeaderSize + 52;
+        foreach (BridgeObjectModel model in contract.Objects)
+        {
+            foreach (BridgeMemberModel member in model.Members)
+            {
+                int value = member.MaximumReplyBytes(contract.DataById);
+                if (value > maximum)
+                {
+                    maximum = value;
+                }
+            }
+        }
+
+        return maximum;
+    }
 }

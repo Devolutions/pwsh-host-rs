@@ -190,9 +190,19 @@ A session-affine dispatcher is required before supporting that category.
 - The public native ABI remains v2. `ReadStreamBatch` is enabled only when the
   `LIVE_STREAM_POLLING` feature bit is present, so consumers can reject a native
   asset that lacks polling before calling its additive export.
+- Generated Bridge Contract v2 attachment requires feature bit 26, bounded
+  broker terminal observation requires bit 27, and retained generated bridge
+  events require bit 28. Structured observed presentation requires bit 29.
+  Bit 28 adds no payload callback slot; bit 29 appends the one
+  `ObservedDiagnosticPage_CopyRecordValue` slot. Both make the V1 payload
+  table fail closed unless the payload and native host recognize the current
+  shape. A current facade therefore rejects an old payload before it creates a
+  bridge channel or reads a typed progress presentation record; ABI v2 field
+  ordering and existing exports remain unchanged.
 - The managed payload and Rust host use one jointly shipped **V1 payload binding
   table**. It includes the core, live-stream, typed-result, and bounded runtime
-  diagnostics slots. This is
+  diagnostics slots, including the appended observed-progress value-copy slot.
+  This is
   separate from the public native ABI, which remains v2. Rust validates the
   fixed V1 header (size, version, features) before reading an extended table
   field, then requires the full current table size.
@@ -333,6 +343,44 @@ acknowledgement of every produced record. This remains copied data only:
 arrays and property bags are bounded `PowerShellValue` values, never `PSObject`
 or arbitrary CLR-object transfer.
 
+### Observed presentation paging
+
+`PowerShell.BeginObservedInvocation(options)` has independent result and
+diagnostic acknowledgement cursors. `ReadResults` returns copied tagged output
+values. For presentation, a host chooses exactly one reader for the diagnostic
+cursor sequence:
+
+- `ReadDiagnostics` returns the existing copied stream kind, sequence, and
+  bounded display text.
+- `ReadPresentation` returns the same cursor/page metadata and display text,
+  plus a fixed `PowerShellProgressUpdate` for a `Progress` record.
+
+The readers cannot be interleaved for one cursor: passing a later cursor
+acknowledges and releases the previous page regardless of which representation
+read it. A page can be retried before acknowledgement. `IsComplete` remains
+true only after both channels have successfully terminated and all their
+records were acknowledged.
+
+`CreateTranscript()` provides a commit-acknowledged pull wrapper for consumers
+that persist or render records incrementally. `ReadResults()` and
+`ReadPresentation()` retain the same immutable page until
+`CommitResults(page)` or `CommitPresentation(page)` succeeds. The two commits
+advance independent result and presentation cursors, so a consumer can commit
+only after its own durable/UI-model update completes. Each returned page
+retains total/dropped/truncated counts and terminal status; transcript callers
+must not issue direct observed reads for that invocation.
+
+The progress projection is a closed copied property bag with only
+`ActivityId`, `ParentActivityId`, `Activity`, optional `StatusDescription` and
+`CurrentOperation`, `PercentComplete`, `SecondsRemaining`, and `IsCompleted`.
+It rejects non-progress values, unsupported fields, invalid ranges, text over
+512/1024 characters, malformed tagged values, and payloads over 64 KiB rather
+than parsing `ProgressRecord.ToString()` or falling back to a dynamic object.
+All other stream kinds remain bounded display text. This is a pull-only
+presentation path for `Write-Information`/stream output and `Write-Progress`;
+it is not a `PSHost`, RawUI, prompt-response API, arbitrary callback, or
+secret transport.
+
 ### Sessions, bounded settings, and polling
 
 `PowerShellRuntime.CreateSession(PowerShellSessionOptions)` creates a reusable
@@ -387,6 +435,23 @@ maximum of 1–64 sessions (with a minimum no greater than that) then always ret
 `MULTI_PWSH_UNSUPPORTED_CAPABILITY`: the current single CoreCLR, local-runspace
 model has no safe pool lifecycle/concurrency implementation. It does not
 pretend that serializing one runspace is a pool.
+
+#### Session snapshots are not durable restores
+
+`PowerShellSessionSnapshot` and session events are copied telemetry, not a
+serialized runspace image. The SDK intentionally exposes no variable
+enumeration, module inventory, restore operation, or general runspace
+serialization. A preflight report validates the caller's current roots and
+static import declarations, but it does not seal module identity, hash content,
+or atomically bind preflight to a later session creation. Treating it as a
+durable approved-import manifest would create a filesystem TOCTOU and module
+provenance policy that the generic SDK cannot own.
+
+An application that needs continuity must explicitly rehydrate its own
+reviewed, non-secret DTOs into a new `PowerShellSessionConfiguration` and
+copied session variables, then make its own authorization and module-integrity
+decision. This SDK provides neither persistence nor a claim that a local
+module is trusted across process lifetimes.
 
 The proxy surface is `Create`, `AddCommand`/`AddScript` (including
 `useLocalScope`), `AddArgument`, typed and switch parameters, `AddStatement`,
@@ -512,9 +577,9 @@ below defines the generic managed facade boundary.
 | Explicit payload activation, hostfxr startup, one runtime per process | Implemented | Direct payload or `PATH` activation and an opaque `PowerShellRuntime`; only `win-x64` has NativeAOT smoke evidence. |
 | Script or named-command execution with scalar parameters | Implemented | `AddScript`, `AddCommand`, `AddParameter`, and bounded `PowerShellValue` inputs. No raw `object`, `PSObject`, or `SecureString` overload exists. |
 | Script parameter declarations and syntax errors | Implemented, copied-only | `PowerShellRuntime.ParseScriptParameters` passes the input to payload-local `Parser.ParseInput` as data, never executable pipeline text. It returns bounded parameter/parse-error DTOs, not SMA AST or token objects. |
-| Output, errors, diagnostics, warning/progress streams | Implemented | Immutable bounded `PowerShellInvocationResult` snapshots. Safe scalar and property-bag projections are read through typed copied-value readers, never live SMA collections. |
+| Output, errors, diagnostics, warning/progress streams | Implemented | Immutable bounded snapshots, typed result pages, and observed result/diagnostic cursors. `ReadPresentation` adds fixed copied progress fields for pull-based text/progress rendering; it never returns SMA records or objects. |
 | Timeout, cancellation, async completion, deterministic disposal | Implemented | `InvokeAsync(CancellationToken)`, `BeginInvoke`, `Wait`, `Stop`, and `SafeHandle` ownership. Cancellation wins and never returns a partial success result. |
-| Long-lived local state | Implemented | Opaque local `PowerShellSession` plus serialized builders. It is not a pool or a remoting session. |
+| Long-lived local state | Implemented, local-only | Opaque local `PowerShellSession` plus serialized builders. Snapshots are telemetry only; generic durable restore, module provenance sealing, pools, and remoting are excluded. |
 | `SessionStateProxy.SetVariable` for value data | Implemented, copied-only | `SetVariable`, `TryGetVariable`, and `RemoveVariable` transfer bounded tagged values only. No methods, proxies, handles, or CLR identity survive the boundary. |
 | Application-selected local modules | Implemented, local-only | Each requested import is resolved by name beneath a caller-supplied module root. This does not validate PowerCLI or remoting dependencies. |
 | `PSCredential` parameter | Intentionally unsupported | Arbitrary scripts can emit or transform a supplied credential. The DTO result model cannot guarantee redaction or a zeroable managed lifetime. |
@@ -961,7 +1026,7 @@ and never reaches a queue.
 
 #### Consumer half — NativeAOT calls into Rust
 
-Ten additive `multi_pwsh_broker_*` exports. The public native ABI stays **v2**;
+Fourteen additive `multi_pwsh_broker_*` exports. The public native ABI stays **v2**;
 availability is advertised through a new public feature bit so a consumer can
 reject an older native asset before calling an additive export.
 
@@ -975,6 +1040,12 @@ int multi_pwsh_broker_wait (uint64_t channel, uint32_t timeout_ms, uint64_t* fra
 int multi_pwsh_broker_frame_get_info(uint64_t frame, multi_pwsh_broker_frame_info*, multi_pwsh_call_result*);
 int multi_pwsh_broker_frame_read    (uint64_t frame, uint8_t* buffer, uint32_t capacity, uint32_t* required, multi_pwsh_call_result*);
 int multi_pwsh_broker_frame_release (uint64_t frame, multi_pwsh_call_result*);
+
+/* worker-safe terminal observation; never holds a delivery handle */
+int multi_pwsh_broker_observe(uint64_t channel, uint64_t correlation, uint64_t* observation, multi_pwsh_call_result*);
+int multi_pwsh_broker_observation_get_info(uint64_t observation, multi_pwsh_broker_terminal_info*, multi_pwsh_call_result*);
+int multi_pwsh_broker_observation_wait(uint64_t observation, uint32_t timeout_ms, multi_pwsh_broker_terminal_info*, multi_pwsh_call_result*);
+int multi_pwsh_broker_observation_release(uint64_t observation, multi_pwsh_call_result*);
 
 int multi_pwsh_broker_reply      (uint64_t channel, uint64_t correlation, const uint8_t* body, uint32_t len, multi_pwsh_call_result*);
 int multi_pwsh_broker_reply_error(uint64_t channel, uint64_t correlation, int32_t code, multi_pwsh_utf8_span message, multi_pwsh_call_result*);
@@ -1006,6 +1077,7 @@ bounded by the deadline.
 | Delivery (frame) handle | The **pump thread that received it** | Returned by `multi_pwsh_broker_wait`. Read and released on that same thread. Releasing from another thread fails with `MULTI_PWSH_BROKER_DISPATCH_VIOLATION`. Releasing is not abandonment. |
 | Frame body | Rust | Copied out by `multi_pwsh_broker_frame_read`. Rust never retains a consumer buffer and the consumer never receives a Rust pointer. |
 | Correlation ID | Channel | Channel-scoped, monotonic, never reused. Valid for reply/cancel from **any** thread until the frame is terminal. |
+| Terminal observation | Worker that acquired it | Bounded explicit lease over copied state only. It is not a delivery handle and may be queried or waited from any thread. |
 
 Handle non-reuse is by monotonic allocation, matching every other handle table
 in this ABI: a released or stale handle is simply absent and deterministically
@@ -1057,6 +1129,14 @@ typedef struct {                 /* 56 bytes: 0,4,8,16,24,32,36,40,44,48,52 */
     uint32_t state;              /* observational frame state, see table       */
     uint32_t dropped_before;     /* one-way frames coalesced before this one   */
 } multi_pwsh_broker_frame_info;
+
+typedef struct {                 /* 24 bytes: 0,4,8,12,16 */
+    uint32_t size;               /* = sizeof(struct); validated first          */
+    uint32_t abi_version;        /* = MULTI_PWSH_BROKER_ABI_V1                 */
+    uint32_t state;              /* Queued through Aborted, see table           */
+    int32_t terminal_status;     /* OPERATION_NOT_TERMINAL until terminal       */
+    uint64_t terminal_epoch_ms;  /* channel epoch; zero while non-terminal      */
+} multi_pwsh_broker_terminal_info;
 ```
 
 | Flag | Value | Meaning |
@@ -1087,6 +1167,26 @@ and the bound is a real concurrency and memory limit.
 
 `multi_pwsh_broker_wait` permits multiple simultaneous waiters on one channel.
 Each queued frame is delivered to exactly one waiter.
+
+### Terminal observation
+
+`multi_pwsh_broker_observe` acquires a read-only, worker-safe lease for one
+non-one-way correlation before or after its delivery handle is released. It
+does not transfer a `CancellationToken`, payload callback, frame pointer, or
+right to reply. `get_info` and `wait` copy the current `state`,
+`terminal_status`, and channel-relative terminal epoch; waiting touches only
+the completion cell and never calls PowerShell or acquires session-operation
+locks.
+
+The terminal transition is first-wins. `Queued` and `Dispatched` report
+`MULTI_PWSH_OPERATION_NOT_TERMINAL` and epoch zero. `Completed`, `Failed`,
+`Cancelled`, `TimedOut`, and `Aborted` report their defined terminal status.
+Channel close publishes `Aborted` into every previously acquired observation
+and leaves it readable until `observation_release`. Unknown correlations,
+one-way frames, observations on another channel, and released handles fail
+closed. Native retention is bounded to four observation leases per correlation
+and `max_inflight * 4` leases per channel; exhaustion is
+`MULTI_PWSH_BACKPRESSURE`.
 
 ### Deadline epoch
 
@@ -1182,7 +1282,7 @@ inside a pipeline execution scope.
 | Entry point | Guard | Reason |
 | --- | --- | --- |
 | `multi_pwsh_broker_open`, `multi_pwsh_set_broker` | `v2_call` | Called before invocation; must not race a running pipeline. |
-| `broker_close`, `wait`, `frame_get_info`, `frame_read`, `frame_release`, `reply`, `reply_error`, `cancel` | `v2_call_allow_active_pipeline` | The pump runs **while** a pipeline is active. Plain `v2_call` would return `MULTI_PWSH_BACKPRESSURE` and make the channel useless. |
+| `broker_close`, `wait`, `frame_get_info`, `frame_read`, `frame_release`, `observe`, `observation_get_info`, `observation_wait`, `observation_release`, `reply`, `reply_error`, `cancel` | `v2_call_allow_active_pipeline` | The pump and worker run **while** a pipeline is active. Plain `v2_call` would return `MULTI_PWSH_BACKPRESSURE` and make the channel useless. |
 | `broker_enqueue_and_wait`, `broker_post` | **neither** | These are payload trampolines called from a pipeline thread whose thread-local execution depth is nonzero, so even the permissive helper would reject them. They use `prepare_call_result` plus panic containment directly, exactly like `capability_dispatch`. |
 
 Using different guards for open and wait is correct, not an inconsistency.
@@ -1338,6 +1438,13 @@ Both the sample and the packaged consumer assert an explicit success line, so
 silently dropping the broker smoke fails CI rather than passing quietly.
 
 ## Bridge Contract v2
+
+> **Current carrier:** generated Bridge Contract v2 attachment uses the
+> DBC-only protocol in [Generated Bridge Contract v2 over
+> DBC](bridge-contract-v2-dbc.md). That document is normative for attachment,
+> routing, lifecycle, authorization, mutation, and error semantics. The
+> historical COM-carrier design notes below remain implementation history only;
+> they do not describe an attached bridge invocation.
 
 Bridge Contract v2 is a **closed generated IDL** for a finite local application
 object surface. It exists so a trusted payload pack can offer ordinary
@@ -1762,7 +1869,12 @@ variable, and each assignment creates a payload proxy. Those proxies share one
 lease and one `Close`; that is the intended model, and it is why closure is
 first-caller-wins rather than reference-counted.
 
-### Transport binding, and what is not yet wired
+### Historical pre-DBC transport design (superseded)
+
+> This section records the discarded COM-carrier design. Generated Bridge
+> Contract v2 attachment is fully DBC-routed; see
+> [Generated Bridge Contract v2 over DBC](bridge-contract-v2-dbc.md). The
+> carrier/status statements below are not current behavior.
 
 | Direction | Carrier | Status |
 | --- | --- | --- |

@@ -110,6 +110,7 @@ internal static class BridgeContractHostEmitter
                 }
 
                 case BridgeRecordKind.Event:
+                case BridgeRecordKind.ReliableEvent:
                     source.Append("    void On").Append(BridgeNames.Identifier(member.Name)).Append("(in ").Append(context)
                         .Append(" context");
                     EmitParameters(source, contract, member);

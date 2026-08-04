@@ -44,6 +44,7 @@ public enum BridgeMemberKind
     Setter = 2,
     Method = 3,
     Event = 4,
+    ReliableEvent = 5,
 }
 
 /// <summary>
@@ -95,6 +96,38 @@ public sealed class BridgeObjectAttribute : Attribute
     /// an implicit finalizer, and shares the contract's single ordinal space.
     /// </summary>
     public uint ReleaseId { get; set; }
+}
+
+/// <summary>
+/// Marks a closed child object as a finite operation with one static status,
+/// cancellation, and snapshot-page shape.
+/// </summary>
+/// <remarks>
+/// The generator validates the referenced member ordinals, allocates the child
+/// handle as an owner-bound opaque operation identity, and bounds later
+/// admission by <see cref="MaximumLifetimeMilliseconds"/>. It does not infer
+/// product snapshot, authorization-revision, or external-work semantics.
+/// </remarks>
+[AttributeUsage(AttributeTargets.Interface)]
+public sealed class BridgeFiniteOperationAttribute : Attribute
+{
+    /// <summary>Gets or sets the read-only status member ordinal.</summary>
+    public uint StatusMemberId { get; set; }
+
+    /// <summary>Gets or sets the terminal-status Boolean field ordinal.</summary>
+    public uint StatusTerminalFieldId { get; set; }
+
+    /// <summary>Gets or sets the direct execute-only cancellation member ordinal.</summary>
+    public uint CancelMemberId { get; set; }
+
+    /// <summary>Gets or sets the read-only snapshot-page member ordinal.</summary>
+    public uint PageMemberId { get; set; }
+
+    /// <summary>
+    /// Gets or sets the maximum time in milliseconds for which new operation
+    /// requests may be admitted. It must be between 1 and 3,600,000.
+    /// </summary>
+    public int MaximumLifetimeMilliseconds { get; set; }
 }
 
 /// <summary>Declares one property or method on a bridge object.</summary>
@@ -163,6 +196,41 @@ public sealed class BridgeEventAttribute : Attribute
 }
 
 /// <summary>
+/// Declares a retained, pull-pumped event ordinal. The generated payload emits
+/// a bounded copied frame; the host assigns its sequence and retains it until
+/// acknowledgment or an explicit overflow terminal state.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class BridgeReliableEventAttribute : Attribute
+{
+    public BridgeReliableEventAttribute(uint id) => Id = id;
+
+    /// <summary>Gets the event ordinal, unique across the closed contract.</summary>
+    public uint Id { get; }
+
+    /// <summary>Gets or sets the static ordering key passed out of band to the broker.</summary>
+    public ulong OrderingKey { get; set; }
+
+    /// <summary>
+    /// Gets or sets the declared permission supplied to the generated per-member
+    /// authorizer when a host worker dispatches a retained event.
+    /// </summary>
+    public BridgePermission Permission { get; set; }
+
+    /// <summary>Gets or sets the maximum retained unacknowledged events for one invocation.</summary>
+    public int MaximumRetainedEvents { get; set; }
+
+    /// <summary>Gets or sets the bound for a UTF-8 string parameter position, in bytes.</summary>
+    public int MaximumUtf8Bytes { get; set; }
+
+    /// <summary>Gets or sets the bound for an opaque byte parameter position, in bytes.</summary>
+    public int MaximumByteCount { get; set; }
+
+    /// <summary>Gets or sets the element bound for a collection parameter position.</summary>
+    public int MaximumCollectionCount { get; set; }
+}
+
+/// <summary>
 /// Declares the bound for one parameter or return position. Member-level bounds
 /// apply to a property or method result only; a bounded parameter position
 /// declares its own, so no bound is ever inherited across positions.
@@ -191,6 +259,52 @@ public sealed class BridgeDataAttribute : Attribute
 
     /// <summary>Gets the data type identifier, unique within the contract.</summary>
     public ulong Id { get; }
+}
+
+/// <summary>
+/// Marks one copied data contract as the statically validated page of a
+/// <see cref="BridgeFiniteOperationAttribute"/>.
+/// </summary>
+/// <remarks>
+/// Every named ordinal is validated against its exact fixed type. The handler
+/// remains responsible for issuing and revalidating opaque cursors and product
+/// revisions; this marker does not create a durable cursor store.
+/// </remarks>
+[AttributeUsage(AttributeTargets.Interface)]
+public sealed class BridgeSnapshotPageAttribute : Attribute
+{
+    /// <summary>Gets or sets the bounded static column-list field ordinal.</summary>
+    public uint ColumnsFieldId { get; set; }
+
+    /// <summary>Gets or sets the bounded static row-list field ordinal.</summary>
+    public uint RowsFieldId { get; set; }
+
+    /// <summary>Gets or sets the opaque next-cursor <see cref="Guid"/> field ordinal.</summary>
+    public uint NextCursorFieldId { get; set; }
+
+    /// <summary>Gets or sets the snapshot revision <see cref="long"/> field ordinal.</summary>
+    public uint SnapshotRevisionFieldId { get; set; }
+
+    /// <summary>Gets or sets the permission revision <see cref="long"/> field ordinal.</summary>
+    public uint PermissionRevisionFieldId { get; set; }
+
+    /// <summary>Gets or sets the cursor lease expiry <see cref="long"/> field ordinal.</summary>
+    public uint CursorLeaseExpiresAtFieldId { get; set; }
+
+    /// <summary>Gets or sets the terminal-state <see cref="bool"/> field ordinal.</summary>
+    public uint IsTerminalFieldId { get; set; }
+
+    /// <summary>Gets or sets the deterministic gap <see cref="bool"/> field ordinal.</summary>
+    public uint IsGapFieldId { get; set; }
+
+    /// <summary>Gets or sets the deterministic overflow <see cref="bool"/> field ordinal.</summary>
+    public uint IsOverflowFieldId { get; set; }
+
+    /// <summary>Gets or sets the truncation <see cref="bool"/> field ordinal.</summary>
+    public uint IsTruncatedFieldId { get; set; }
+
+    /// <summary>Gets or sets the total-count <see cref="long"/> field ordinal.</summary>
+    public uint TotalCountFieldId { get; set; }
 }
 
 /// <summary>Declares one field of a bridge data contract.</summary>

@@ -28,3 +28,4 @@ MPWLC021 | LiveContract | Error | Validates bridge events
 MPWLC022 | LiveContract | Error | Enforces bridge structural and frame-size limits
 MPWLC023 | LiveContract | Error | Validates bridge mutation and authorization metadata
 MPWLC024 | LiveContract | Error | Validates bridge release ordinals
+MPWLC025 | LiveContract | Error | Validates finite-operation and snapshot-page declarations

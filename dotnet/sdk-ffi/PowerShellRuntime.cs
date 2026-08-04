@@ -181,6 +181,9 @@ public sealed class PowerShellRuntime
     /// </summary>
     public PowerShellBridgeChannel CreateBridgeChannel(PowerShellBrokerChannelOptions? options = null)
     {
+        PowerShell.EnsureGeneratedBridgeAttachmentSupported();
+        PowerShell.EnsureBrokerTerminalObservationSupported();
+        PowerShell.EnsureReliableBridgeEventsSupported();
         return new PowerShellBridgeChannel(CreateBrokerChannel(options));
     }
 

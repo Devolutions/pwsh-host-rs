@@ -10,6 +10,8 @@ param(
 
     [string[]]$ExpectedRuntimeIdentifiers = @('win-x64'),
 
+    [switch]$AllowPreviewVersionMismatch,
+
     [switch]$KeepWorkspace
 )
 
@@ -144,8 +146,11 @@ if ($null -eq $package) {
 if ([string]::IsNullOrWhiteSpace($PackageVersion)) {
     $PackageVersion = $package.BaseName.Substring("$packageId.".Length)
 }
-if ($PackageVersion -ne $multiPwshVersion) {
+if ($PackageVersion -ne $multiPwshVersion -and -not $AllowPreviewVersionMismatch) {
     throw "$packageId version $PackageVersion must match multi-pwsh version $multiPwshVersion"
+}
+if ($PackageVersion -ne $multiPwshVersion) {
+    Write-Warning "Testing explicit preview package version $PackageVersion against multi-pwsh version $multiPwshVersion."
 }
 
 $archive = [System.IO.Compression.ZipFile]::OpenRead($package.FullName)
@@ -681,6 +686,109 @@ void VerifyCompleteResultProjection(PowerShellRuntime runtime)
             observedDto.Name == "generated-projection" &&
             observedDto.Count == 7,
             "The complete observed result sequence was not projected through the explicit generated DTO mapper.");
+    }
+
+    using (PowerShell presentationBuilder = CreatePowerShellWhenAvailable(runtime, "the observed presentation builder"))
+    using (PowerShellObservedInvocation presentation = presentationBuilder
+        .AddScript(@"
+            Write-Output 'package-presentation-result'
+            Write-Information 'package-presentation-text' -InformationAction Continue
+            Write-Progress -Id 17 -ParentId 5 -Activity 'package-progress' -Status 'running' -CurrentOperation 'packaging' -PercentComplete 58 -SecondsRemaining 12
+        ")
+        .BeginObservedInvocation(new PowerShellObservedInvocationOptions(
+            maximumBufferedResultRecords: 4,
+            maximumResultPageRecords: 2,
+            maximumBufferedDiagnosticRecords: 4,
+            maximumDiagnosticPageRecords: 2)))
+    {
+        PowerShellObservedTranscript transcript = presentation.CreateTranscript();
+        var records = new List<PowerShellObservedPresentationRecord>();
+        PowerShellValuePage resultPage = null!;
+        PowerShellObservedPresentationPage presentationPage = null!;
+        DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            resultPage = transcript.ReadResults();
+            Require(
+                ReferenceEquals(resultPage, transcript.ReadResults()),
+                "The observed transcript did not retain an uncommitted result page.");
+            presentationPage = transcript.ReadPresentation();
+            Require(
+                ReferenceEquals(presentationPage, transcript.ReadPresentation()),
+                "The observed transcript did not retain an uncommitted presentation page.");
+            records.AddRange(presentationPage.Records);
+            ulong presentationAcknowledgement = transcript.PresentationAcknowledgedThrough;
+            transcript.CommitResults(resultPage);
+            Require(
+                transcript.ResultAcknowledgedThrough == resultPage.NextSequence &&
+                transcript.PresentationAcknowledgedThrough == presentationAcknowledgement,
+                "The observed transcript did not commit result and presentation cursors independently.");
+            bool rejectedStaleResultPage = false;
+            try
+            {
+                transcript.CommitResults(resultPage);
+            }
+            catch (InvalidOperationException)
+            {
+                rejectedStaleResultPage = true;
+            }
+
+            Require(rejectedStaleResultPage, "The observed transcript accepted a stale result page.");
+            transcript.CommitPresentation(presentationPage);
+            bool rejectedStalePresentationPage = false;
+            try
+            {
+                transcript.CommitPresentation(presentationPage);
+            }
+            catch (InvalidOperationException)
+            {
+                rejectedStalePresentationPage = true;
+            }
+
+            Require(rejectedStalePresentationPage, "The observed transcript accepted a stale presentation page.");
+            if (resultPage.IsComplete && presentationPage.IsComplete)
+            {
+                break;
+            }
+
+            Thread.Sleep(10);
+        }
+
+        PowerShellObservedPresentationRecord? progress = records.FirstOrDefault(
+            static record => record.Progress is { ActivityId: 17, IsCompleted: false });
+        bool hasInformation = records.Any(static record =>
+            record.Stream == PowerShellStreamKind.Information &&
+            record.Text.Contains("package-presentation-text", StringComparison.Ordinal));
+        bool hasProgress = progress?.Progress is
+        {
+            ActivityId: 17,
+            ParentActivityId: 5,
+            Activity: "package-progress",
+            StatusDescription: "running",
+            CurrentOperation: "packaging",
+            PercentComplete: 58,
+            SecondsRemaining: 12,
+            IsCompleted: false,
+        };
+        Require(
+            resultPage is not null &&
+            presentationPage is not null &&
+            resultPage.IsComplete &&
+            presentationPage.IsComplete &&
+            resultPage.TotalRecordCount == 1 &&
+            resultPage.DroppedRecordCount == 0 &&
+            !resultPage.IsTruncated &&
+            presentationPage.DroppedRecordCount == 0 &&
+            !presentationPage.IsTruncated &&
+            transcript.ResultAcknowledgedThrough == resultPage.NextSequence &&
+            transcript.PresentationAcknowledgedThrough == presentationPage.NextSequence &&
+            hasInformation &&
+            hasProgress,
+            string.Format(
+                "The package-only NativeAOT consumer did not preserve bounded text and typed progress presentation (information: {0}; progress: {1}; records: {2}).",
+                hasInformation,
+                hasProgress,
+                records.Count));
     }
 }
 
@@ -2933,6 +3041,302 @@ sealed class HostInteractionCapability : IPowerShellCapabilityHandler
     # facade and staged native asset, not through a source project reference.
     if (-not ($consumerOutput | Where-Object { $_ -eq 'FFI package consumer duplex broker channel: Success' })) {
         throw 'The package consumer did not exercise the duplex broker channel through the packed SDK.'
+    }
+
+    $bridgeConsumerDirectory = Join-Path $workspace 'bridge-consumer'
+    $bridgePackDirectory = Join-Path $workspace 'bridge-pack'
+    New-Item -Path $bridgeConsumerDirectory -ItemType Directory -Force | Out-Null
+    New-Item -Path $bridgePackDirectory -ItemType Directory -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'dotnet\interop\BridgeTestContract.cs') `
+        -Destination (Join-Path $bridgeConsumerDirectory 'BridgeTestContract.cs')
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'dotnet\bridge-contract-test-host\BridgeTestCountHost.cs') `
+        -Destination (Join-Path $bridgeConsumerDirectory 'BridgeTestCountHost.cs')
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'dotnet\interop\BridgeTestContract.cs') `
+        -Destination (Join-Path $bridgePackDirectory 'BridgeTestContract.cs')
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'dotnet\bridge-contract-test-pack\BridgeContractTestPack.cs') `
+        -Destination (Join-Path $bridgePackDirectory 'BridgeContractTestPack.cs')
+
+    $bridgePackProject = Join-Path $bridgePackDirectory 'FfiPackageBridgePack.csproj'
+    @"
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LiveContractMode>Payload</LiveContractMode>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="$packageId" Version="$PackageVersion" />
+  </ItemGroup>
+</Project>
+"@ | Set-Content -Path $bridgePackProject -Encoding utf8
+
+    $bridgeConsumerProject = Join-Path $bridgeConsumerDirectory 'FfiPackageBridgeConsumer.csproj'
+    @"
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <LiveContractMode>Host</LiveContractMode>
+    <DevolutionsMultiPwshSdkEnabled>true</DevolutionsMultiPwshSdkEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="$packageId" Version="$PackageVersion" />
+  </ItemGroup>
+</Project>
+"@ | Set-Content -Path $bridgeConsumerProject -Encoding utf8
+
+    @"
+#nullable enable
+using System;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Devolutions.MultiPwsh.BridgeTest;
+using Devolutions.PowerShell.Ffi;
+using Devolutions.PowerShell.Ffi.LiveObjects;
+
+static void Require(bool condition, string message)
+{
+    if (!condition)
+    {
+        throw new InvalidOperationException(message);
+    }
+}
+
+if (args.Length != 1)
+{
+    throw new ArgumentException("Expected exactly one PowerShell payload directory.");
+}
+
+string packPath = Path.Combine(AppContext.BaseDirectory, "FfiPackageBridgePack.dll");
+Require(File.Exists(packPath), "The package-only bridge payload pack was not published beside the consumer.");
+
+PowerShellRuntime runtime = PowerShellRuntime.Activate(
+    args[0],
+    [new PowerShellLiveObjectContractPack(
+        packPath,
+        "Devolutions.MultiPwsh.BridgeTest.BridgeContractTestPack, FfiPackageBridgePack")]);
+using PowerShellBridgeChannel channel = runtime.CreateBridgeChannel(
+    new PowerShellBrokerChannelOptions(
+        maximumInflightFrames: 8,
+        maximumBodyBytes: 4096,
+        defaultDeadline: TimeSpan.FromSeconds(20)));
+using var host = new BridgeTestCountHost(41);
+using PowerShellBridgeBinding binding = channel.CreateBinding(host.Dispatcher);
+using var stopping = new CancellationTokenSource();
+using var ready = new ManualResetEventSlim();
+Exception? pumpFailure = null;
+int requests = 0;
+int events = 0;
+
+var pump = new Thread(() =>
+{
+    try
+    {
+        if (!channel.TryReceive(TimeSpan.Zero, out _))
+        {
+            throw new InvalidOperationException("The package-only generated bridge channel closed before its pump attached.");
+        }
+
+        ready.Set();
+        while (!stopping.IsCancellationRequested &&
+            channel.TryReceive(TimeSpan.FromMilliseconds(100), out PowerShellBridgeDispatch? dispatch))
+        {
+            if (dispatch is null)
+            {
+                continue;
+            }
+
+            _ = Task.Run(() =>
+            {
+                bool replied = dispatch.Dispatch();
+                if (replied)
+                {
+                    Interlocked.Increment(ref requests);
+                }
+            });
+            Interlocked.Increment(ref events);
+        }
+    }
+    catch (Exception exception)
+    {
+        pumpFailure = exception;
+        ready.Set();
+    }
+})
+{
+    IsBackground = true,
+    Name = "package-generated-bridge-pump",
+};
+pump.Start();
+
+try
+{
+    Require(ready.Wait(TimeSpan.FromSeconds(5)) && pumpFailure is null,
+        "The package-only generated bridge pump did not attach.");
+
+    using (PowerShell synchronous = runtime.Create())
+    {
+        synchronous.AddScript("'unused'").WithBridge(binding, "RDM");
+        try
+        {
+            _ = synchronous.Invoke();
+            throw new InvalidOperationException("A synchronous invocation with a generated bridge attached was accepted.");
+        }
+        catch (PowerShellFfiException exception)
+            when (exception.Status == PowerShellFfiStatus.UnsupportedCapability)
+        {
+        }
+    }
+
+    using PowerShell command = runtime.Create();
+    PowerShellInvocationResult output = await command
+        .AddScript("`$RDM.Report(77); \"`$(`$RDM.Count)|`$(`$RDM.Add(5))\"")
+        .WithBridge(binding, "RDM")
+        .InvokeAsync(CancellationToken.None);
+
+    Require(
+        pumpFailure is null &&
+        output.Output.Records.Count == 1 &&
+        output.Output.Records[0].DisplayText == "41|46" &&
+        SpinWait.SpinUntil(() => host.LastReportedCount == 77, TimeSpan.FromSeconds(5)) &&
+        Volatile.Read(ref requests) >= 2 &&
+        Volatile.Read(ref events) >= 3,
+        "The package-only generated bridge did not complete its bounded deferred request and event dispatch.");
+
+    using (PowerShell finiteJob = runtime.Create())
+    {
+        PowerShellInvocationResult jobOutput = await finiteJob
+            .AddScript("`$job = `$RDM.StartJob(); `$before = `$job.Status; `$page = `$job.ReadResults([Guid]::Empty, 17, 29); `$terminal = `$job.ReadResults(`$page.NextCursor, 17, 29); `$gap = `$job.ReadResults([Guid]::Empty, 18, 29); `$job.Cancel(); `$job.Cancel(); \"`$(`$before.State)|`$(`$page.Columns[2].Name)|`$(`$page.Rows[0].Label)|`$(@(`$page.Rows).Count)|`$(`$page.SnapshotRevision)|`$(`$page.PermissionRevision)|`$(`$terminal.Rows[0].Label)|`$(`$terminal.IsTerminal)|`$(`$gap.IsGap)|`$(`$job.Status.IsTerminal)\"")
+            .WithBridge(binding, "RDM")
+            .InvokeAsync(CancellationToken.None);
+        Require(
+            jobOutput.Output.Records.Count == 1 &&
+            jobOutput.Output.Records[0].DisplayText == "Running|Label|result-10|2|17|29|result-30|True|True|True" &&
+            host.JobCancelDispatchCount == 1,
+            "The package-only generated bridge did not preserve its finite-operation page, revision gap, or first-wins cancellation.");
+    }
+
+    using PowerShell reliableEvent = runtime.Create();
+    Task<PowerShellInvocationResult> reliableEventInvocation = reliableEvent
+        .AddScript("`$RDM.ReportReliable(88); Start-Sleep -Milliseconds 500")
+        .WithBridge(binding, "RDM")
+        .InvokeAsync(CancellationToken.None);
+    PowerShellBridgeReliableEventStream? stream = null;
+    Require(
+        SpinWait.SpinUntil(
+            () => (stream = channel.GetReliableEventStreams(binding)
+                .SingleOrDefault(candidate => candidate.Identity.MemberId == 6U)) is not null,
+            TimeSpan.FromSeconds(5)) &&
+        stream is not null,
+        "The package-only generated bridge did not retain a reliable event stream.");
+    PowerShellBridgeReliableEventStream reliableStream = stream
+        ?? throw new InvalidOperationException("The package-only reliable event stream was lost after discovery.");
+    PowerShellBridgeReliableEventBatch reliableBatch = reliableStream.Read(0, 2);
+    Require(
+        reliableBatch.Events.Count == 1 &&
+        reliableBatch.Events[0].Sequence == 1 &&
+        !reliableBatch.Info.IsTerminal,
+        "The package-only generated bridge did not assign a reliable event cursor.");
+    await Task.Run(reliableBatch.Events[0].Dispatch);
+    reliableStream.Acknowledge(reliableBatch.Events[0].Sequence);
+    Require(
+        host.LastReliableReportedCount == 88 &&
+        host.ReliableReportCount == 1,
+        "The package-only generated bridge did not dispatch a retained reliable event.");
+    _ = await reliableEventInvocation;
+    Require(
+        reliableStream.GetInfo().TerminalState == PowerShellBridgeReliableEventTerminalState.LeaseClosed,
+        "The package-only generated bridge did not close the completed reliable-event lease.");
+
+    using var reliableCancellation = new CancellationTokenSource();
+    using PowerShell reliableCancelled = runtime.Create();
+    Task<PowerShellInvocationResult> reliableCancelledInvocation = reliableCancelled
+        .AddScript("`$RDM.ReportReliable(55); Start-Sleep -Seconds 20")
+        .WithBridge(binding, "RDM")
+        .InvokeAsync(reliableCancellation.Token);
+    PowerShellBridgeReliableEventStream? cancelledStream = null;
+    Require(
+        SpinWait.SpinUntil(
+            () =>
+            {
+                cancelledStream = channel.GetReliableEventStreams(binding)
+                    .SingleOrDefault(candidate =>
+                        candidate.Identity.MemberId == 6U &&
+                        candidate.Identity.LeaseId != reliableStream.Identity.LeaseId);
+                return cancelledStream is not null;
+            },
+            TimeSpan.FromSeconds(5)),
+        "The package-only generated bridge did not retain a cancellable reliable event.");
+    PowerShellBridgeReliableEventStream cancelledReliableStream = cancelledStream
+        ?? throw new InvalidOperationException("The package-only cancellable reliable event stream was lost after discovery.");
+    PowerShellBridgeReliableEventBatch cancelledBatch = cancelledReliableStream.Read(0, 1);
+    Require(
+        cancelledBatch.Events.Count == 1 &&
+        cancelledBatch.Events[0].Sequence == 1,
+        "The package-only generated bridge did not expose the cancellable reliable event before cleanup.");
+    reliableCancellation.Cancel();
+    try
+    {
+        _ = await reliableCancelledInvocation;
+        throw new InvalidOperationException("The package-only reliable event invocation completed after cancellation.");
+    }
+    catch (OperationCanceledException)
+    {
+    }
+
+    Require(
+        SpinWait.SpinUntil(
+            () => cancelledReliableStream.GetInfo().TerminalState == PowerShellBridgeReliableEventTerminalState.LeaseClosed,
+            TimeSpan.FromSeconds(5)) &&
+        cancelledReliableStream.GetInfo().DroppedEventCount == 1,
+        "The package-only generated bridge did not terminalize retained reliable events on cancellation.");
+    await Task.Run(cancelledBatch.Events[0].Dispatch);
+    Require(
+        host.ReliableReportCount == 1,
+        "The package-only generated bridge dispatched a reliable event after cancellation released it.");
+}
+finally
+{
+    stopping.Cancel();
+    channel.Dispose();
+    pump.Join(TimeSpan.FromSeconds(5));
+}
+
+Console.WriteLine("FFI package consumer generated bridge attachment: Success");
+"@ | Set-Content -Path (Join-Path $bridgeConsumerDirectory 'Program.cs') -Encoding utf8
+
+    Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $bridgePackProject, '--configfile', $nugetConfig)
+    Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('restore', $bridgeConsumerProject, '--configfile', $nugetConfig)
+    Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('build', $bridgePackProject, '--no-restore', '-c', $Configuration)
+    Invoke-CheckedCommand -FilePath dotnet -ArgumentList @('publish', $bridgeConsumerProject, '--no-restore', '-c', $Configuration)
+
+    $bridgePackAssembly = Join-Path $bridgePackDirectory "bin\$Configuration\net8.0\FfiPackageBridgePack.dll"
+    $bridgePublishDirectory = Join-Path $bridgeConsumerDirectory "bin\$Configuration\net10.0\win-x64\publish"
+    $bridgeConsumerExe = Join-Path $bridgePublishDirectory 'FfiPackageBridgeConsumer.exe'
+    if (-not (Test-Path $bridgePackAssembly -PathType Leaf) -or
+        -not (Test-Path $bridgeConsumerExe -PathType Leaf)) {
+        throw 'The package-only generated bridge consumer did not publish its pack or executable.'
+    }
+    Copy-Item -LiteralPath $bridgePackAssembly -Destination (Join-Path $bridgePublishDirectory 'FfiPackageBridgePack.dll')
+
+    Write-Host ">> $bridgeConsumerExe $payloadDirectory"
+    $bridgeConsumerOutput = & $bridgeConsumerExe $payloadDirectory
+    $bridgeConsumerOutput | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed with exit code $LASTEXITCODE`: $bridgeConsumerExe $payloadDirectory"
+    }
+    if (-not ($bridgeConsumerOutput | Where-Object { $_ -eq 'FFI package consumer generated bridge attachment: Success' })) {
+        throw 'The package-only consumer did not exercise the generated bridge attachment through the packed SDK.'
     }
 
     $reportedVersion = $reportedVersionLine.Substring('FFI package consumer PowerShell file version: '.Length).Trim()

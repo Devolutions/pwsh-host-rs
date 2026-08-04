@@ -28,14 +28,27 @@ public static unsafe partial class BridgeContractTestPack
         try
         {
             object projected = ComWrappers.GetOrCreateObjectForComInstance(comObject, CreateObjectFlags.UniqueInstance);
-            if (projected is not IPowerShellBridgeContractSink sink ||
-                projected is not ComObject sinkComObject)
+            if (projected is not ComObject sinkComObject)
             {
                 throw new InvalidOperationException("The bridge contract pack did not receive a bridge sink.");
             }
 
-            PowerShellBridgeTestCountBridgeBinding binding =
-                PowerShellBridgeTestCountBridgeBinding.Create(sink, sinkComObject);
+            PowerShellBridgeTestCountBridgeBinding binding;
+            IPowerShellBridgeContractSink? contractSink = projected as IPowerShellBridgeContractSink;
+            IPowerShellBridgeBrokerSink? brokerSink = projected as IPowerShellBridgeBrokerSink;
+            if (contractSink is not null)
+            {
+                binding = PowerShellBridgeTestCountBridgeBinding.Create(contractSink, sinkComObject);
+            }
+            else if (brokerSink is not null)
+            {
+                binding = PowerShellBridgeTestCountBridgeBinding.Create(brokerSink, sinkComObject);
+            }
+            else
+            {
+                throw new InvalidOperationException("The bridge contract pack received an unsupported bridge sink.");
+            }
+
             var callback = new BridgeTestCountCallback(binding);
             IntPtr callbackPointer = IntPtr.Zero;
             try
@@ -48,7 +61,15 @@ public static unsafe partial class BridgeContractTestPack
                     throw new InvalidOperationException("The bridge contract pack could not create its invocation callback.");
                 }
 
-                PowerShellBridgeTestCountBridgeBinding.Declare(sink, callbackPointer);
+                if (contractSink is not null)
+                {
+                    PowerShellBridgeTestCountBridgeBinding.Declare(contractSink, callbackPointer);
+                }
+                else
+                {
+                    PowerShellBridgeTestCountBridgeBinding.Declare(brokerSink!, callbackPointer);
+                }
+
                 *proxyHandle = GCHandle.ToIntPtr(GCHandle.Alloc(callback));
             }
             catch
@@ -106,7 +127,7 @@ public static unsafe partial class BridgeContractTestPack
         contract[0] = new PowerShellLiveObjectContract(
             typeof(IPowerShellBridgeTestCountTransport).GUID,
             majorVersion: 1,
-            minorVersion: 0,
+            minorVersion: 1,
             PowerShellLiveObjectDirection.ConsumerToSession | PowerShellLiveObjectDirection.BridgeContract).ToNative();
 
         NativeLiveObjectContractPackApi* api =

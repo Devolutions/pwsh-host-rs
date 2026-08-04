@@ -2,6 +2,8 @@
 
 using System;
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.Marshalling;
 using System.Text;
 
 namespace Devolutions.PowerShell.Ffi.LiveObjects;
@@ -39,8 +41,10 @@ public static class PowerShellBridgeFrameKind
     public const byte Release = 1;
     public const byte Event = 2;
     public const byte Open = 3;
+    public const byte Close = 4;
+    public const byte ReliableEvent = 5;
 
-    public static bool IsDefined(byte kind) => kind <= Open;
+    public static bool IsDefined(byte kind) => kind <= ReliableEvent;
 }
 
 /// <summary>
@@ -99,6 +103,77 @@ public static class PowerShellBridgeWire
 
     /// <summary>Returns whether a declared collection bound is in range.</summary>
     public static bool IsValidCollectionBound(int value) => value > 0 && value <= MaximumCollectionCount;
+}
+
+/// <summary>
+/// Fixed DBC routing and response-envelope constants for generated bridge
+/// frames. The binding ID is channel-scoped; it is never a CLR identity.
+/// </summary>
+public static class PowerShellBridgeBrokerWire
+{
+    public const uint RequestKind = 0x4252_0001;
+    public const uint EventKind = 0x4252_0002;
+    public const int RouteHeaderSize = sizeof(ulong);
+    public const int ReplyEnvelopeSize = sizeof(int) + sizeof(uint);
+
+    public static bool TryWriteRoute(ulong bindingId, Span<byte> destination)
+    {
+        if (bindingId == 0 || destination.Length < RouteHeaderSize)
+        {
+            return false;
+        }
+
+        BinaryPrimitives.WriteUInt64LittleEndian(destination, bindingId);
+        return true;
+    }
+
+    public static bool TryReadRoute(ReadOnlySpan<byte> source, out ulong bindingId)
+    {
+        bindingId = 0;
+        if (source.Length < RouteHeaderSize)
+        {
+            return false;
+        }
+
+        bindingId = BinaryPrimitives.ReadUInt64LittleEndian(source);
+        return bindingId != 0;
+    }
+}
+
+/// <summary>
+/// Fixed payload-owned COM handshake for a generated Bridge Contract v2 pack
+/// that uses a broker-backed attachment. The pack receives no application
+/// object or callback; every generated frame goes through this sink.
+/// </summary>
+[GeneratedComInterface]
+[Guid("10C88A62-041B-49FC-89AF-1B91BF5DA9A5")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public partial interface IPowerShellBridgeBrokerSink
+{
+    [PreserveSig]
+    int GetRequestedContract(
+        out ulong interfaceIdLow,
+        out ulong interfaceIdHigh,
+        out ushort majorVersion,
+        out ushort minorVersion,
+        out uint maximumRequestBytes,
+        out uint maximumReplyBytes);
+
+    [PreserveSig]
+    int Declare(
+        ulong interfaceIdLow,
+        ulong interfaceIdHigh,
+        ushort majorVersion,
+        ushort minorVersion,
+        nint callback,
+        uint maximumRequestBytes,
+        uint maximumReplyBytes);
+
+    [PreserveSig]
+    int Request(nint body, int bodyLength, nint reply, int replyCapacity, out int replyLength);
+
+    [PreserveSig]
+    int Post(nint body, int bodyLength);
 }
 
 /// <summary>

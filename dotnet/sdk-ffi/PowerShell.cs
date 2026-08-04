@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Devolutions.PowerShell.Ffi.LiveObjects;
 
 namespace Devolutions.PowerShell.Ffi;
 
@@ -28,6 +29,10 @@ public sealed unsafe class PowerShell : IDisposable
     private const ulong SessionVariablesFeature = 1UL << 15;
     private const ulong CapabilityRpcFeature = 1UL << 16;
     private const ulong DuplexBrokerChannelFeature = 1UL << 25;
+    private const ulong GeneratedBridgeAttachmentFeature = 1UL << 26;
+    private const ulong BrokerTerminalObservationFeature = 1UL << 27;
+    private const ulong ReliableBridgeEventsFeature = 1UL << 28;
+    private const ulong ObservedPresentationFeature = 1UL << 29;
     private const ulong LiveObjectProbeFeature = 1UL << 17;
     private const ulong LiveSessionObjectProbeFeature = 1UL << 18;
     private const ulong LiveObjectContractsFeature = 1UL << 19;
@@ -499,6 +504,59 @@ public sealed unsafe class PowerShell : IDisposable
         return this;
     }
 
+    /// <summary>
+    /// Attaches one generated, bounded bridge proxy to this builder for its next
+    /// asynchronous invocation. The payload exposes it only through
+    /// <paramref name="variableName"/>; raw <c>$DpsBroker</c> is not injected.
+    /// </summary>
+    public PowerShell WithBridge(PowerShellBridgeBinding binding, string variableName)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        ArgumentException.ThrowIfNullOrEmpty(variableName);
+        EnsureGeneratedBridgeAttachmentSupported();
+        if (!IsBridgeVariableName(variableName))
+        {
+            throw new ArgumentException("The bridge variable name must be an ASCII PowerShell identifier.", nameof(variableName));
+        }
+
+        IPowerShellBridgeDispatcher dispatcher = binding.GetDispatcher();
+        Guid interfaceId = dispatcher.ContractInterfaceId;
+        Span<byte> interfaceBytes = stackalloc byte[16];
+        interfaceId.TryWriteBytes(interfaceBytes);
+        ulong interfaceIdLow = BitConverter.ToUInt64(interfaceBytes);
+        ulong interfaceIdHigh = BitConverter.ToUInt64(interfaceBytes[8..]);
+        byte[] encodedName = EncodeUtf8(variableName);
+        using PowerShellHandle.HandleLease lease = handle.Borrow();
+        unsafe
+        {
+            byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+            NativeCallResult result = NativeCall.CreateResult(diagnostic);
+            fixed (byte* name = encodedName)
+            {
+                NativeUtf8Span nativeName = new()
+                {
+                    Data = name,
+                    Length = (nuint)encodedName.Length,
+                };
+                int status = NativeMethods.SetBridge(
+                    lease.Value,
+                    binding.Channel.Broker.Handle,
+                    binding.BindingId,
+                    interfaceIdLow,
+                    interfaceIdHigh,
+                    dispatcher.ContractMajorVersion,
+                    dispatcher.ContractMinorVersion,
+                    checked((uint)dispatcher.MaximumRequestBytes),
+                    checked((uint)dispatcher.MaximumReplyBytes),
+                    nativeName,
+                    &result);
+                NativeCall.ThrowIfFailed(status, result, diagnostic);
+            }
+        }
+
+        return this;
+    }
+
     public PowerShell Clear()
     {
         InvokeForHandle(static (nativeHandle, result) => NativeMethods.Clear(nativeHandle, result));
@@ -700,6 +758,39 @@ public sealed unsafe class PowerShell : IDisposable
         }
     }
 
+    internal static void EnsureGeneratedBridgeAttachmentSupported()
+    {
+        EnsureDuplexBrokerChannelSupported();
+        if ((FeatureFlags & GeneratedBridgeAttachmentFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The loaded native runtime does not support generated bridge attachment.");
+        }
+    }
+
+    internal static void EnsureBrokerTerminalObservationSupported()
+    {
+        EnsureDuplexBrokerChannelSupported();
+        if ((FeatureFlags & BrokerTerminalObservationFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The loaded native runtime does not support broker terminal observation.");
+        }
+    }
+
+    internal static void EnsureReliableBridgeEventsSupported()
+    {
+        EnsureGeneratedBridgeAttachmentSupported();
+        if ((FeatureFlags & ReliableBridgeEventsFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell payload does not support reliable generated bridge events.");
+        }
+    }
+
     internal static void EnsureLiveObjectProbeSupported()
     {
         EnsureSupportedAbi();
@@ -770,6 +861,17 @@ public sealed unsafe class PowerShell : IDisposable
             throw new PowerShellFfiException(
                 PowerShellFfiStatus.UnsupportedCapability,
                 "The selected PowerShell native asset does not support observed invocations.");
+        }
+    }
+
+    internal static void EnsureObservedPresentationSupported()
+    {
+        EnsureObservedInvocationSupported();
+        if ((FeatureFlags & ObservedPresentationFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell payload does not support structured observed presentation records.");
         }
     }
 
@@ -1334,6 +1436,31 @@ public sealed unsafe class PowerShell : IDisposable
         }
 
         return Encoding.UTF8.GetBytes(value);
+    }
+
+    private static bool IsBridgeVariableName(string value)
+    {
+        if (value.Length is < 1 or > 64 ||
+            !((value[0] >= 'A' && value[0] <= 'Z') ||
+              (value[0] >= 'a' && value[0] <= 'z') ||
+              value[0] == '_'))
+        {
+            return false;
+        }
+
+        for (int index = 1; index < value.Length; index++)
+        {
+            char current = value[index];
+            if (!((current >= 'A' && current <= 'Z') ||
+                  (current >= 'a' && current <= 'z') ||
+                  (current >= '0' && current <= '9') ||
+                  current == '_'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private unsafe delegate int NativeHandleOperation(ulong nativeHandle, NativeCallResult* result);
