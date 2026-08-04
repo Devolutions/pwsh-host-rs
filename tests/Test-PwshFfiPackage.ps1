@@ -10,6 +10,8 @@ param(
 
     [string[]]$ExpectedRuntimeIdentifiers = @('win-x64'),
 
+    [switch]$AllowPreviewVersionMismatch,
+
     [switch]$KeepWorkspace
 )
 
@@ -144,8 +146,11 @@ if ($null -eq $package) {
 if ([string]::IsNullOrWhiteSpace($PackageVersion)) {
     $PackageVersion = $package.BaseName.Substring("$packageId.".Length)
 }
-if ($PackageVersion -ne $multiPwshVersion) {
+if ($PackageVersion -ne $multiPwshVersion -and -not $AllowPreviewVersionMismatch) {
     throw "$packageId version $PackageVersion must match multi-pwsh version $multiPwshVersion"
+}
+if ($PackageVersion -ne $multiPwshVersion) {
+    Write-Warning "Testing explicit preview package version $PackageVersion against multi-pwsh version $multiPwshVersion."
 }
 
 $archive = [System.IO.Compression.ZipFile]::OpenRead($package.FullName)
