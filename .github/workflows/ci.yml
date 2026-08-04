@@ -325,7 +325,12 @@ jobs:
           if (-not ($sampleOutput | Where-Object { $_ -eq 'NativeAOT observed presentation: Success' })) {
             throw 'The NativeAOT SDK sample did not execute the observed presentation smoke.'
           }
-          if (-not ($sampleOutput | Where-Object { $_ -eq 'NativeAOT finite-operation bridge attachment: Success' })) {
+          $finiteOperationOutput = & dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe `
+            $payloadDirectory `
+            '--finite-operation-bridge-only'
+          $finiteOperationOutput | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) { throw "The finite-operation NativeAOT SDK sample failed with exit code $LASTEXITCODE." }
+          if (-not ($finiteOperationOutput | Where-Object { $_ -eq 'NativeAOT finite-operation bridge attachment: Success' })) {
             throw 'The NativeAOT SDK sample did not execute the finite-operation bridge attachment smoke.'
           }
           foreach ($contractPackFixture in @(
@@ -340,6 +345,10 @@ jobs:
               "--expect-rejected-contract-pack:$contractPackFixture"
             if ($LASTEXITCODE -ne 0) { throw "The '$contractPackFixture' contract-pack rejection sample failed with exit code $LASTEXITCODE." }
           }
+          & dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe `
+            $payloadDirectory `
+            '--expect-rejected-multiple-bridge-packs'
+          if ($LASTEXITCODE -ne 0) { throw "The multiple bridge contract packs rejection sample failed with exit code $LASTEXITCODE." }
           & dotnet/nativeaot-sample/bin/Release/net10.0/win-x64/publish/NativeAotFfiSample.exe `
             $payloadDirectory `
             '--expect-bridge-setup-failure-cleans-broker'

@@ -37,6 +37,12 @@ Only the async invocation paths are legal for an attached bridge. Synchronous
 invocation is rejected by the existing broker guard before a pipeline can
 block waiting for a host dispatcher.
 
+Each payload admits at most one independently compiled contract-pack API that
+declares a bridge contract. The shared generated COM handshake is payload-local,
+so registering a second bridge pack is rejected during activation rather than
+allowing incompatible projections to run. Add finite operations and typed pages
+as closed members or child objects of the existing bridge contract pack.
+
 ## Fixed DBC frames
 
 The DBC body for every generated bridge frame starts with this fixed
