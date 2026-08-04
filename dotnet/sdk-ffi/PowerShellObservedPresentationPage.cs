@@ -56,16 +56,20 @@ public sealed class PowerShellObservedPresentationPage
         ulong acknowledgedSequence,
         ulong nextSequence,
         ulong totalRecordCount,
+        ulong droppedRecordCount,
         PowerShellFfiStatus terminalStatus,
         bool isTerminal,
+        bool isTruncated,
         bool isComplete)
     {
         Records = Array.AsReadOnly(records);
         AcknowledgedSequence = acknowledgedSequence;
         NextSequence = nextSequence;
         TotalRecordCount = totalRecordCount;
+        DroppedRecordCount = droppedRecordCount;
         TerminalStatus = terminalStatus;
         IsTerminal = isTerminal;
+        IsTruncated = isTruncated;
         IsComplete = isComplete;
     }
 
@@ -77,9 +81,13 @@ public sealed class PowerShellObservedPresentationPage
 
     public ulong TotalRecordCount { get; }
 
+    public ulong DroppedRecordCount { get; }
+
     public PowerShellFfiStatus TerminalStatus { get; }
 
     public bool IsTerminal { get; }
+
+    public bool IsTruncated { get; }
 
     /// <summary>
     /// True only after both observed channels reached successful terminal states

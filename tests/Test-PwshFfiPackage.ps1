@@ -686,6 +686,7 @@ void VerifyCompleteResultProjection(PowerShellRuntime runtime)
     using (PowerShell presentationBuilder = CreatePowerShellWhenAvailable(runtime, "the observed presentation builder"))
     using (PowerShellObservedInvocation presentation = presentationBuilder
         .AddScript(@"
+            Write-Output 'package-presentation-result'
             Write-Information 'package-presentation-text' -InformationAction Continue
             Write-Progress -Id 17 -ParentId 5 -Activity 'package-progress' -Status 'running' -CurrentOperation 'packaging' -PercentComplete 58 -SecondsRemaining 12
         ")
@@ -695,19 +696,51 @@ void VerifyCompleteResultProjection(PowerShellRuntime runtime)
             maximumBufferedDiagnosticRecords: 4,
             maximumDiagnosticPageRecords: 2)))
     {
-        ulong resultAcknowledgement = 0;
-        ulong presentationAcknowledgement = 0;
+        PowerShellObservedTranscript transcript = presentation.CreateTranscript();
         var records = new List<PowerShellObservedPresentationRecord>();
         PowerShellValuePage resultPage = null!;
         PowerShellObservedPresentationPage presentationPage = null!;
         DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
         while (DateTime.UtcNow < deadline)
         {
-            resultPage = presentation.ReadResults(resultAcknowledgement, maximumRecords: 2);
-            resultAcknowledgement = resultPage.NextSequence;
-            presentationPage = presentation.ReadPresentation(presentationAcknowledgement, maximumRecords: 2);
-            presentationAcknowledgement = presentationPage.NextSequence;
+            resultPage = transcript.ReadResults();
+            Require(
+                ReferenceEquals(resultPage, transcript.ReadResults()),
+                "The observed transcript did not retain an uncommitted result page.");
+            presentationPage = transcript.ReadPresentation();
+            Require(
+                ReferenceEquals(presentationPage, transcript.ReadPresentation()),
+                "The observed transcript did not retain an uncommitted presentation page.");
             records.AddRange(presentationPage.Records);
+            ulong presentationAcknowledgement = transcript.PresentationAcknowledgedThrough;
+            transcript.CommitResults(resultPage);
+            Require(
+                transcript.ResultAcknowledgedThrough == resultPage.NextSequence &&
+                transcript.PresentationAcknowledgedThrough == presentationAcknowledgement,
+                "The observed transcript did not commit result and presentation cursors independently.");
+            bool rejectedStaleResultPage = false;
+            try
+            {
+                transcript.CommitResults(resultPage);
+            }
+            catch (InvalidOperationException)
+            {
+                rejectedStaleResultPage = true;
+            }
+
+            Require(rejectedStaleResultPage, "The observed transcript accepted a stale result page.");
+            transcript.CommitPresentation(presentationPage);
+            bool rejectedStalePresentationPage = false;
+            try
+            {
+                transcript.CommitPresentation(presentationPage);
+            }
+            catch (InvalidOperationException)
+            {
+                rejectedStalePresentationPage = true;
+            }
+
+            Require(rejectedStalePresentationPage, "The observed transcript accepted a stale presentation page.");
             if (resultPage.IsComplete && presentationPage.IsComplete)
             {
                 break;
@@ -737,6 +770,13 @@ void VerifyCompleteResultProjection(PowerShellRuntime runtime)
             presentationPage is not null &&
             resultPage.IsComplete &&
             presentationPage.IsComplete &&
+            resultPage.TotalRecordCount == 1 &&
+            resultPage.DroppedRecordCount == 0 &&
+            !resultPage.IsTruncated &&
+            presentationPage.DroppedRecordCount == 0 &&
+            !presentationPage.IsTruncated &&
+            transcript.ResultAcknowledgedThrough == resultPage.NextSequence &&
+            transcript.PresentationAcknowledgedThrough == presentationPage.NextSequence &&
             hasInformation &&
             hasProgress,
             string.Format(

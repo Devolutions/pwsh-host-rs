@@ -361,6 +361,15 @@ read it. A page can be retried before acknowledgement. `IsComplete` remains
 true only after both channels have successfully terminated and all their
 records were acknowledged.
 
+`CreateTranscript()` provides a commit-acknowledged pull wrapper for consumers
+that persist or render records incrementally. `ReadResults()` and
+`ReadPresentation()` retain the same immutable page until
+`CommitResults(page)` or `CommitPresentation(page)` succeeds. The two commits
+advance independent result and presentation cursors, so a consumer can commit
+only after its own durable/UI-model update completes. Each returned page
+retains total/dropped/truncated counts and terminal status; transcript callers
+must not issue direct observed reads for that invocation.
+
 The progress projection is a closed copied property bag with only
 `ActivityId`, `ParentActivityId`, `Activity`, optional `StatusDescription` and
 `CurrentOperation`, `PercentComplete`, `SecondsRemaining`, and `IsCompleted`.

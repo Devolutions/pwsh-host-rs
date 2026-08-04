@@ -277,9 +277,14 @@ facade:method:Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe::Int64 Increm
 facade:method:Devolutions.PowerShell.Ffi.PowerShellLiveObjectProbe::Void Dispose()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage ReadDiagnostics(UInt64, System.Nullable`1[System.Int32])
 facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage ReadPresentation(UInt64, System.Nullable`1[System.Int32])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Devolutions.PowerShell.Ffi.PowerShellObservedTranscript CreateTranscript()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Devolutions.PowerShell.Ffi.PowerShellValuePage ReadResults(UInt64, System.Nullable`1[System.Int32])
 facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Void Dispose()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation::Void Stop()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedTranscript::Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage ReadPresentation()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedTranscript::Devolutions.PowerShell.Ffi.PowerShellValuePage ReadResults()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedTranscript::Void CommitPresentation(Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellObservedTranscript::Void CommitResults(Devolutions.PowerShell.Ffi.PowerShellValuePage)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellResultSchema::Void Validate(Devolutions.PowerShell.Ffi.PowerShellInvocationResult)
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShell Create()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRuntime::Devolutions.PowerShell.Ffi.PowerShellCapabilitySet RegisterCapabilities(System.Collections.Generic.IEnumerable`1[Devolutions.PowerShell.Ffi.PowerShellCapabilityBinding])
@@ -482,9 +487,11 @@ facade:property:Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot::UInt32 Type
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObjectSnapshot::UInt64 Sequence
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::Boolean IsComplete
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::Boolean IsTerminal
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::Boolean IsTruncated
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::Devolutions.PowerShell.Ffi.PowerShellFfiStatus TerminalStatus
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticRecord] Records
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::UInt64 AcknowledgedSequence
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::UInt64 DroppedRecordCount
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::UInt64 NextSequence
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticPage::UInt64 TotalRecordCount
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedDiagnosticRecord::Devolutions.PowerShell.Ffi.PowerShellStreamKind Stream
@@ -496,15 +503,19 @@ facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions::
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions::Int32 MaximumResultPageRecords
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::Boolean IsComplete
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::Boolean IsTerminal
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::Boolean IsTruncated
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::Devolutions.PowerShell.Ffi.PowerShellFfiStatus TerminalStatus
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellObservedPresentationRecord] Records
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::UInt64 AcknowledgedSequence
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::UInt64 DroppedRecordCount
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::UInt64 NextSequence
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage::UInt64 TotalRecordCount
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationRecord::Devolutions.PowerShell.Ffi.PowerShellProgressUpdate Progress
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationRecord::Devolutions.PowerShell.Ffi.PowerShellStreamKind Stream
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationRecord::System.String Text
 facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationRecord::UInt64 Sequence
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedTranscript::UInt64 PresentationAcknowledgedThrough
+facade:property:Devolutions.PowerShell.Ffi.PowerShellObservedTranscript::UInt64 ResultAcknowledgedThrough
 facade:property:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate::Boolean IsCompleted
 facade:property:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate::Int32 PercentComplete
 facade:property:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate::Int64 ActivityId
@@ -662,6 +673,7 @@ facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedInvocation
 facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedInvocationOptions
 facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationPage
 facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedPresentationRecord
+facade:type:Devolutions.PowerShell.Ffi.PowerShellObservedTranscript
 facade:type:Devolutions.PowerShell.Ffi.PowerShellOperationState
 facade:type:Devolutions.PowerShell.Ffi.PowerShellProgressUpdate
 facade:type:Devolutions.PowerShell.Ffi.PowerShellResultSchema

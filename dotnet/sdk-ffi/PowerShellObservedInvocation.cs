@@ -101,6 +101,16 @@ public sealed unsafe class PowerShellObservedInvocation : IDisposable
     }
 
     /// <summary>
+    /// Creates a pull transcript that advances result and presentation cursors only
+    /// after the caller explicitly commits each returned page.
+    /// </summary>
+    public PowerShellObservedTranscript CreateTranscript()
+    {
+        PowerShell.EnsureObservedPresentationSupported();
+        return new PowerShellObservedTranscript(this);
+    }
+
+    /// <summary>
     /// Acknowledges the prior diagnostic page and returns copied output and diagnostic records.
     /// </summary>
     public PowerShellObservedDiagnosticPage ReadDiagnostics(ulong acknowledgedThrough, int? maximumRecords = null)
@@ -135,6 +145,7 @@ public sealed unsafe class PowerShellObservedInvocation : IDisposable
         ValidatePageInfo(info, acknowledgedThrough, checked((uint)limit), isDiagnostic: true);
 
         bool isTerminal = (info.Flags & Terminal) != 0;
+        bool isTruncated = (info.Flags & Truncated) != 0;
         bool isComplete = (info.Flags & Complete) != 0;
         var records = new PowerShellObservedDiagnosticRecord[checked((int)info.RecordCount)];
         ulong previousSequence = info.AcknowledgedSequence;
@@ -172,8 +183,10 @@ public sealed unsafe class PowerShellObservedInvocation : IDisposable
             info.AcknowledgedSequence,
             info.NextSequence,
             info.TotalRecordCount,
+            info.DroppedRecordCount,
             (PowerShellFfiStatus)info.TerminalStatus,
             isTerminal,
+            isTruncated,
             isComplete);
     }
 
@@ -216,6 +229,7 @@ public sealed unsafe class PowerShellObservedInvocation : IDisposable
         ValidatePageInfo(info, acknowledgedThrough, checked((uint)limit), isDiagnostic: true);
 
         bool isTerminal = (info.Flags & Terminal) != 0;
+        bool isTruncated = (info.Flags & Truncated) != 0;
         bool isComplete = (info.Flags & Complete) != 0;
         var records = new PowerShellObservedPresentationRecord[checked((int)info.RecordCount)];
         ulong previousSequence = info.AcknowledgedSequence;
@@ -259,8 +273,10 @@ public sealed unsafe class PowerShellObservedInvocation : IDisposable
             info.AcknowledgedSequence,
             info.NextSequence,
             info.TotalRecordCount,
+            info.DroppedRecordCount,
             (PowerShellFfiStatus)info.TerminalStatus,
             isTerminal,
+            isTruncated,
             isComplete);
     }
 
