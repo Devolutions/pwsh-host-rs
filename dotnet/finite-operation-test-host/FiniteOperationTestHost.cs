@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using Devolutions.PowerShell.Ffi.LiveObjects;
+using Devolutions.PowerShell.Ffi.LiveObjects.FiniteOperations;
 
 namespace Devolutions.MultiPwsh.FiniteOperationTest;
 

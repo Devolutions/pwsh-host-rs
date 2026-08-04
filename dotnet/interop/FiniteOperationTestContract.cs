@@ -34,7 +34,7 @@ public partial interface IPowerShellBridgeTestFiniteOperationTransport
 }
 
 /// <summary>
-/// A static, finite contract: it has two fixed operation modes and one fixed
+/// A static, finite contract: it has three fixed operation modes and one fixed
 /// copied report-page shape. It is deliberately not a generic job dispatcher.
 /// </summary>
 [BridgeContract("3F1DD1D0-AB49-4FE1-A40C-FE5BB48D8AEC", 1, 0, "82AD9A61-416F-47B3-A0B5-8CB2DA29D5CC")]

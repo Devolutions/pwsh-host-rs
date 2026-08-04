@@ -249,7 +249,7 @@ failure, lease, authorization, and staged-mutation rules.
 ### Finite operation and typed report-page preview
 
 `PowerShellFiniteOperationRegistry<TPage>` in
-`Devolutions.PowerShell.Ffi.LiveObjects` is an opt-in host-only state machine
+`Devolutions.PowerShell.Ffi.LiveObjects.FiniteOperations` is an opt-in host-only state machine
 for an application-selected generated Bridge Contract v2 page type. It has no
 generic script or job dispatch surface: the application supplies a fixed schema
 ID, a direct detached-copy codec, snapshot/permission validator, and only the

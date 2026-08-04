@@ -275,6 +275,7 @@ try {
 "@ | Set-Content -Path $finitePayloadProject -Encoding utf8
     @"
 using Devolutions.PowerShell.Ffi.LiveObjects;
+using Devolutions.PowerShell.Ffi.LiveObjects.FiniteOperations;
 
 internal static class Program
 {

@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using Devolutions.PowerShell.Ffi.LiveObjects;
+using Devolutions.PowerShell.Ffi.LiveObjects.FiniteOperations;
 
 /// <summary>
 /// Focused lifecycle tests for the finite operation primitive. The bridge
@@ -18,6 +19,7 @@ internal static class FiniteOperationTests
     internal static void Run()
     {
         OwnerAndTerminalPrecedenceAreClosed();
+        ActiveDeadlineCancelsWorkersWithoutLaterRegistryCall();
         CopiedPagesAreBoundedAndRevalidated();
         RetentionAndExplicitCleanupAreFinite();
     }
@@ -126,6 +128,33 @@ internal static class FiniteOperationTests
             registry.TryReadPage(owner, pending.OperationId, PowerShellFinitePageCursor.Start).Operation.Status ==
                 PowerShellFiniteOperationStatus.Active,
             "an active operation has no page before terminal success");
+    }
+
+    private static void ActiveDeadlineCancelsWorkersWithoutLaterRegistryCall()
+    {
+        var validator = new TestValidator();
+        using var registry = new PowerShellFiniteOperationRegistry<Page>(
+            new PowerShellFinitePageContract<Page>(
+                SchemaId,
+                maximumPages: 1,
+                maximumItemsPerPage: 1,
+                maximumPageBytes: 128,
+                new PageCodec(),
+                validator),
+            maximumOperations: 1);
+        using PowerShellFiniteOperationOwner owner = registry.CreateOwner();
+
+        PowerShellFiniteOperationResult started = registry.TryStart(
+            owner,
+            new PowerShellFiniteOperationBinding(SchemaId, snapshotRevision: 1, permissionRevision: 1),
+            new PowerShellFiniteOperationOptions(TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(1)),
+            out PowerShellFiniteOperationLease lease);
+
+        Require(
+            started.Status == PowerShellFiniteOperationStatus.Active &&
+            lease.CancellationToken.WaitHandle.WaitOne(TimeSpan.FromSeconds(5)) &&
+            registry.TryGet(owner, started.OperationId).Status == PowerShellFiniteOperationStatus.TimedOut,
+            "an elapsed deadline cancels an idle worker and resolves to timeout");
     }
 
     private static void RetentionAndExplicitCleanupAreFinite()

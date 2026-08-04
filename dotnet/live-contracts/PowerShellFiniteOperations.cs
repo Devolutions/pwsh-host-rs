@@ -5,7 +5,7 @@ using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Threading;
 
-namespace Devolutions.PowerShell.Ffi.LiveObjects;
+namespace Devolutions.PowerShell.Ffi.LiveObjects.FiniteOperations;
 
 /// <summary>
 /// The finite lifecycle states and request failures returned by
@@ -187,12 +187,24 @@ public sealed class PowerShellFinitePageContract<TPage>
         IPowerShellFinitePageCodec<TPage> codec,
         IPowerShellFinitePageAccessValidator accessValidator)
     {
-        if (schemaId == Guid.Empty ||
-            maximumPages is < 1 or > HardMaximumPages ||
-            maximumItemsPerPage is < 1 or > HardMaximumItemsPerPage ||
-            maximumPageBytes is < 1 or > HardMaximumPageBytes)
+        if (schemaId == Guid.Empty)
         {
-            throw new ArgumentOutOfRangeException(nameof(maximumPages), "The finite page contract bounds are invalid.");
+            throw new ArgumentOutOfRangeException(nameof(schemaId));
+        }
+
+        if (maximumPages is < 1 or > HardMaximumPages)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumPages));
+        }
+
+        if (maximumItemsPerPage is < 1 or > HardMaximumItemsPerPage)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumItemsPerPage));
+        }
+
+        if (maximumPageBytes is < 1 or > HardMaximumPageBytes)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumPageBytes));
         }
 
         SchemaId = schemaId;
@@ -293,7 +305,7 @@ public readonly struct PowerShellFiniteOperationResult
 
     public PowerShellFiniteOperationId OperationId { get; }
 
-    /// <summary>Gets the last read time for a retained terminal state, when retained.</summary>
+    /// <summary>Gets the expiration time for a retained terminal state, when retained.</summary>
     public DateTimeOffset? ExpiresAt { get; }
 
     /// <summary>Gets the host-supplied non-zero error code for a failed operation.</summary>
@@ -413,6 +425,11 @@ public sealed class PowerShellFiniteOperationRegistry<TPage> : IDisposable, IFin
         lock (gate)
         {
             ThrowIfDisposed();
+            if (!Owns(owner))
+            {
+                return Result(PowerShellFiniteOperationStatus.AccessDenied);
+            }
+
             if (entries.Count >= maximumOperations)
             {
                 return Result(PowerShellFiniteOperationStatus.CapacityExceeded);
@@ -423,6 +440,7 @@ public sealed class PowerShellFiniteOperationRegistry<TPage> : IDisposable, IFin
             var operationId = PowerShellFiniteOperationId.FromValue(value);
             var entry = new Entry(owner, binding, now + options.Deadline, options.TerminalRetention);
             entries.Add(value, entry);
+            entry.ScheduleDeadline(timeProvider, () => OnDeadline(value, entry));
             lease = new PowerShellFiniteOperationLease(operationId, entry.Cancellation.Token, entry.Deadline);
             return Result(entry, operationId);
         }
@@ -897,6 +915,7 @@ public sealed class PowerShellFiniteOperationRegistry<TPage> : IDisposable, IFin
     private static void DisposeEntry(Entry entry)
     {
         entry.Pages = null;
+        entry.DisposeDeadlineTimer();
         try
         {
             entry.Cancellation.Cancel();
@@ -914,6 +933,7 @@ public sealed class PowerShellFiniteOperationRegistry<TPage> : IDisposable, IFin
         int errorCode)
     {
         entry.Status = status;
+        entry.DisposeDeadlineTimer();
         entry.ErrorCode = errorCode;
         if (status != PowerShellFiniteOperationStatus.Succeeded)
         {
@@ -965,6 +985,29 @@ public sealed class PowerShellFiniteOperationRegistry<TPage> : IDisposable, IFin
         }
     }
 
+    private void OnDeadline(Guid operationValue, Entry expected)
+    {
+        lock (gate)
+        {
+            if (Volatile.Read(ref disposed) != 0 ||
+                !entries.TryGetValue(operationValue, out Entry? entry) ||
+                !ReferenceEquals(entry, expected) ||
+                entry.Status != PowerShellFiniteOperationStatus.Active)
+            {
+                return;
+            }
+
+            DateTimeOffset now = timeProvider.GetUtcNow();
+            if (now >= entry.Deadline)
+            {
+                TransitionLocked(entry, PowerShellFiniteOperationStatus.TimedOut, now, 0);
+                return;
+            }
+
+            entry.RescheduleDeadline(entry.Deadline - now);
+        }
+    }
+
     private void ThrowIfDisposed()
     {
         if (Volatile.Read(ref disposed) != 0)
@@ -1006,5 +1049,30 @@ public sealed class PowerShellFiniteOperationRegistry<TPage> : IDisposable, IFin
         internal DateTimeOffset? ExpiresAt { get; set; }
 
         internal List<TPage>? Pages { get; set; }
+
+        private ITimer? deadlineTimer;
+
+        internal void ScheduleDeadline(TimeProvider timeProvider, Action callback)
+        {
+            TimeSpan dueTime = Deadline - timeProvider.GetUtcNow();
+            deadlineTimer = timeProvider.CreateTimer(
+                static state => ((Action)state!).Invoke(),
+                callback,
+                dueTime > TimeSpan.Zero ? dueTime : TimeSpan.Zero,
+                Timeout.InfiniteTimeSpan);
+        }
+
+        internal void RescheduleDeadline(TimeSpan dueTime)
+        {
+            _ = deadlineTimer?.Change(
+                dueTime > TimeSpan.Zero ? dueTime : TimeSpan.Zero,
+                Timeout.InfiniteTimeSpan);
+        }
+
+        internal void DisposeDeadlineTimer()
+        {
+            deadlineTimer?.Dispose();
+            deadlineTimer = null;
+        }
     }
 }
