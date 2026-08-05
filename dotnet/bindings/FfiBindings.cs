@@ -4895,6 +4895,10 @@ namespace NativeHost
                 }
 
                 InitialSessionState initialState = InitialSessionState.CreateDefault2();
+                initialState.Commands.Add(new SessionStateCmdletEntry(
+                    "ConvertTo-SecureString",
+                    typeof(Microsoft.PowerShell.Commands.ConvertToSecureStringCommand),
+                    helpFileName: null));
                 if (initialConfiguration == ConstrainedLanguageConfiguration)
                 {
                     initialState.LanguageMode = PSLanguageMode.ConstrainedLanguage;

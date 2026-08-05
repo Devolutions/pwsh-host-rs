@@ -3482,9 +3482,7 @@ static void VerifySecretBindings(PowerShellRuntime runtime)
         .AddScript(
             "`$Result.Username = 'secure-user'; " +
             "`$Result.Domain = 'secure-domain'; " +
-            "`$securePassword = [System.Security.SecureString]::new(); " +
-            "foreach (`$character in 'secure-fixture'.ToCharArray()) { `$securePassword.AppendChar(`$character) }; " +
-            "`$Result.SecurePassword = `$securePassword")
+            "`$Result.SecurePassword = ConvertTo-SecureString 'secure-fixture' -AsPlainText -Force")
         .InvokeCredentialResult())
     {
         char[] transferredPassword = new char[result.Password!.Length];
