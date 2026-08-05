@@ -1953,9 +1953,20 @@ using (var secureString = new SecureString())
    {
    }
 }
+using (PowerShellSecret credentialUserNameSecret = PowerShellSecret.Create("credential-user-name-secret"))
+{
+   try
+   {
+       _ = new PowerShellCredential(new string('u', 257), credentialUserNameSecret);
+       return 1;
+   }
+   catch (ArgumentException)
+   {
+   }
+}
 try
 {
-    _ = PowerShellValue.From((Action)(() => { }));
+   _ = PowerShellValue.From((Action)(() => { }));
     return 1;
 }
 catch (PowerShellValueConversionException)
@@ -2085,6 +2096,17 @@ using (PowerShell nulBuilder = PowerShell.Create())
     catch (ArgumentException)
     {
     }
+}
+
+try
+{
+    _ = PowerShellSessionConfiguration.CreateWithModuleImports(
+        [new PowerShellModuleImport("SimpleModuleImportOverflow")],
+        moduleImports: Enumerable.Range(0, 32).Select(static index => $"SimpleModule{index}"));
+    return 1;
+}
+catch (ArgumentException)
+{
 }
 
 try

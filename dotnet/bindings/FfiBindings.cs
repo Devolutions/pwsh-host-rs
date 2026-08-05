@@ -2205,7 +2205,9 @@ namespace NativeHost
                     }
 
                     userName = Encoding.UTF8.GetString(payload.Slice(sizeof(int), userNameLength));
-                    if (string.IsNullOrWhiteSpace(userName) || userName.IndexOf('\0') >= 0)
+                    if (string.IsNullOrWhiteSpace(userName) ||
+                        userName.Length > FfiMaxSecretUserNameLength ||
+                        userName.IndexOf('\0') >= 0)
                     {
                         throw new InvalidOperationException("Secret adapter payload is invalid.");
                     }
@@ -2551,7 +2553,9 @@ namespace NativeHost
 
                     if (userName is not null)
                     {
-                        if (string.IsNullOrWhiteSpace(userName) || userName.Length > FfiMaxSecretUserNameLength)
+                        if (string.IsNullOrWhiteSpace(userName) ||
+                            userName.Length > FfiMaxSecretUserNameLength ||
+                            userName.IndexOf('\0') >= 0)
                         {
                             throw new InvalidOperationException("Secret result shape is invalid.");
                         }

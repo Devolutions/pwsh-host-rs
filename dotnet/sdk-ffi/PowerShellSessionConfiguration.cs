@@ -53,6 +53,7 @@ public sealed class PowerShellSessionConfiguration
         WorkingDirectory = ValidatePath(workingDirectory, nameof(workingDirectory));
         Environment = CopyEnvironment(environment);
         ExecutionPolicy = executionPolicy;
+        ValidateCombinedSimpleModuleImports();
         ValidateEncodedPayloads();
     }
 
@@ -102,10 +103,7 @@ public sealed class PowerShellSessionConfiguration
         PowerShellValue.PropertyBag(InitialVariables);
 
     internal PowerShellValue ModuleImportsValue =>
-        PowerShellValue.Array(ModuleImports
-            .Concat(ModuleImportSpecifications.Where(static import => import.IsSimpleImport).Select(static import => import.NameOrPath))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(PowerShellValue.String));
+        PowerShellValue.Array(GetCombinedSimpleModuleImports().Select(PowerShellValue.String));
 
     internal PowerShellValue AllowedModulePathsValue =>
         PowerShellValue.Array(AllowedModulePaths.Select(PowerShellValue.String));
@@ -212,6 +210,23 @@ public sealed class PowerShellSessionConfiguration
         }
 
         return new ReadOnlyCollection<PowerShellModuleImport>(copy);
+    }
+
+    private IReadOnlyList<string> GetCombinedSimpleModuleImports()
+    {
+        return ModuleImports
+            .Concat(ModuleImportSpecifications.Where(static import => import.IsSimpleImport).Select(static import => import.NameOrPath))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private void ValidateCombinedSimpleModuleImports()
+    {
+        if (GetCombinedSimpleModuleImports().Count > MaximumEntries)
+        {
+            throw new ArgumentException(
+                $"The combined simple module imports contain at most {MaximumEntries} entries.");
+        }
     }
 
     private static IReadOnlyDictionary<string, string> CopyEnvironment(
