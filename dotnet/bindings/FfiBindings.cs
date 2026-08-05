@@ -74,8 +74,11 @@ namespace NativeHost
         private const ulong FfiFeatureReliableBridgeEvents = 1UL << 28;
         private const ulong FfiFeatureObservedPresentation = 1UL << 29;
         private const ulong FfiFeatureSecretAdapters = 1UL << 30;
+        private const ulong FfiFeatureCredentialResultSink = 1UL << 31;
         private const int FfiMaxSecretLength = 4_096;
         private const int FfiMaxSecretUserNameLength = 256;
+        private const int FfiMaxCredentialResultTextLength = 4_096;
+        private const int FfiMaxCredentialResultMetadataLength = 16 * 1024;
         private const uint FfiTypedResultPageTerminal = 1;
         private const uint FfiTypedResultPageTruncated = 1 << 1;
         private const uint FfiTypedResultPageComplete = 1 << 2;
@@ -213,6 +216,7 @@ namespace NativeHost
             public IntPtr PowerShell_SetBridgeContext;
             public IntPtr ObservedDiagnosticPage_CopyRecordValue;
             public IntPtr PowerShell_InvokeSecretResult;
+            public IntPtr PowerShell_InvokeCredentialResult;
         }
 
         private const int FfiPreflightMaximumTextLength = 128;
@@ -1145,7 +1149,7 @@ namespace NativeHost
                     FfiFeatureLiveStreamPolling | FfiFeatureTypedResultPaging | FfiFeatureObservedInvocation |
                     FfiFeatureSessionPreflight | FfiFeatureRuntimeDiagnostics | FfiFeatureDuplexBrokerChannel |
                     FfiFeatureGeneratedBridgeAttachment | FfiFeatureReliableBridgeEvents |
-                    FfiFeatureObservedPresentation | FfiFeatureSecretAdapters,
+                    FfiFeatureObservedPresentation | FfiFeatureSecretAdapters | FfiFeatureCredentialResultSink,
                 PowerShell_Create = (IntPtr)(delegate* unmanaged<IntPtr*, FfiCallResult*, int>)&FfiPowerShell_Create,
                 PowerShell_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiPowerShell_Release,
                 PowerShell_AddArgumentUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, FfiCallResult*, int>)&FfiPowerShell_AddArgumentUtf8,
@@ -1233,6 +1237,7 @@ namespace NativeHost
                 PowerShell_SetBridgeContext = (IntPtr)(delegate* unmanaged<IntPtr, ulong, ulong, ulong, ushort, ushort, uint, uint, byte*, int, FfiCallResult*, int>)&FfiPowerShell_SetBridgeContext,
                 ObservedDiagnosticPage_CopyRecordValue = (IntPtr)(delegate* unmanaged<IntPtr, int, uint*, byte*, int, int*, FfiCallResult*, int>)&FfiObservedDiagnosticPage_CopyRecordValue,
                 PowerShell_InvokeSecretResult = (IntPtr)(delegate* unmanaged<IntPtr, uint, byte*, int, int*, char*, int, int*, FfiCallResult*, int>)&FfiPowerShell_InvokeSecretResult,
+                PowerShell_InvokeCredentialResult = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, int*, char*, int, int*, FfiCallResult*, int>)&FfiPowerShell_InvokeCredentialResult,
             };
         }
 
@@ -2591,6 +2596,124 @@ namespace NativeHost
             });
         }
 
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiPowerShell_InvokeCredentialResult(
+            IntPtr ptrHandle,
+            byte* metadataBuffer,
+            int metadataCapacity,
+            int* metadataLength,
+            char* secretBuffer,
+            int secretCapacity,
+            int* secretLength,
+            FfiCallResult* result)
+        {
+            if (metadataLength == null ||
+                secretLength == null ||
+                metadataCapacity < 0 ||
+                metadataCapacity > FfiMaxCredentialResultMetadataLength ||
+                secretCapacity < 0 ||
+                (metadataCapacity != 0 && metadataBuffer == null) ||
+                (secretCapacity != 0 && secretBuffer == null))
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Credential result arguments are invalid.");
+            }
+
+            return ExecuteSecret(result, () =>
+            {
+                FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                pipeline.ThrowIfSecretBound();
+                FfiCredentialResultSnapshot snapshot = InvokeCredentialResultPipeline(
+                    pipeline,
+                    TakeCompletedInput(ptrHandle));
+                try
+                {
+                    int requiredMetadataLength = snapshot.GetMetadataLength();
+                    if (requiredMetadataLength > metadataCapacity ||
+                        (snapshot.Password is not null && snapshot.Password.Length > secretCapacity))
+                    {
+                        throw new InvalidOperationException("Credential result exceeds its bound.");
+                    }
+
+                    snapshot.WriteMetadata(new Span<byte>(metadataBuffer, requiredMetadataLength));
+                    *metadataLength = requiredMetadataLength;
+                    *secretLength = 0;
+                    if (snapshot.Password is not null)
+                    {
+                        IntPtr bstr = Marshal.SecureStringToBSTR(snapshot.Password);
+                        try
+                        {
+                            new ReadOnlySpan<char>((void*)bstr, snapshot.Password.Length)
+                                .CopyTo(new Span<char>(secretBuffer, snapshot.Password.Length));
+                            *secretLength = snapshot.Password.Length;
+                        }
+                        finally
+                        {
+                            Marshal.ZeroFreeBSTR(bstr);
+                        }
+                    }
+                }
+                finally
+                {
+                    snapshot.Dispose();
+                    pipeline.PowerShell.Commands.Clear();
+                }
+            });
+        }
+
+        private static FfiCredentialResultSnapshot InvokeCredentialResultPipeline(
+            FfiPowerShellPipeline pipeline,
+            object[] input)
+        {
+            FfiCredentialResultSink sink = new();
+            PowerShell powerShell = pipeline.PowerShell;
+            Runspace runspace = powerShell.Runspace;
+            bool ownsRunspace = false;
+            if (runspace is null)
+            {
+                runspace = RunspaceFactory.CreateRunspace();
+                runspace.Open();
+                powerShell.Runspace = runspace;
+                ownsRunspace = true;
+            }
+
+            PSVariable previous = runspace.SessionStateProxy.PSVariable.Get("Result");
+            runspace.SessionStateProxy.SetVariable("Result", sink);
+            try
+            {
+                FfiSecretInvocationOutput invocation = InvokeSecretPipeline(pipeline, input, captureOutput: true);
+                if (invocation.HadErrors || invocation.OutputCount != 0)
+                {
+                    throw new InvalidOperationException(
+                        "Credential result invocations must not produce pipeline output or diagnostics.");
+                }
+
+                return sink.TakeSnapshot();
+            }
+            finally
+            {
+                try
+                {
+                    if (previous is null)
+                    {
+                        runspace.SessionStateProxy.PSVariable.Remove("Result");
+                    }
+                    else
+                    {
+                        runspace.SessionStateProxy.PSVariable.Set(previous);
+                    }
+                }
+                finally
+                {
+                    sink.Dispose();
+                    if (ownsRunspace)
+                    {
+                        powerShell.Runspace = null;
+                        runspace.Dispose();
+                    }
+                }
+            }
+        }
+
         private static bool TryProjectCredentialResult(
             PSObject result,
             object value,
@@ -2748,6 +2871,338 @@ namespace NativeHost
             public int OutputCount { get; }
 
             public bool HadErrors { get; }
+        }
+
+        private sealed class FfiCredentialResultSink : IDisposable
+        {
+            private bool active = true;
+            private string username = string.Empty;
+            private string domain = string.Empty;
+            private string outputMessages = string.Empty;
+            private string errorMessages = string.Empty;
+            private string logMessage = string.Empty;
+            private SecureString password;
+            private bool cancel;
+
+            public string Username
+            {
+                get
+                {
+                    EnsureActive();
+                    return username;
+                }
+                set
+                {
+                    EnsureActive();
+                    username = ValidateText(value, FfiMaxSecretUserNameLength, "Username");
+                }
+            }
+
+            public string Domain
+            {
+                get
+                {
+                    EnsureActive();
+                    return domain;
+                }
+                set
+                {
+                    EnsureActive();
+                    domain = ValidateText(value, FfiMaxSecretUserNameLength, "Domain");
+                }
+            }
+
+            public string Password
+            {
+                get
+                {
+                    EnsureActive();
+                    return password is null ? string.Empty : CopyPasswordToString(password);
+                }
+                set
+                {
+                    EnsureActive();
+                    ReplacePassword(CreateSecureString(value));
+                }
+            }
+
+            public SecureString SecurePassword
+            {
+                get
+                {
+                    EnsureActive();
+                    return password is null ? CreateEmptySecureString() : CopySecureString(password);
+                }
+                set
+                {
+                    EnsureActive();
+                    ReplacePassword(CopySecureString(value));
+                }
+            }
+
+            public bool Cancel
+            {
+                get
+                {
+                    EnsureActive();
+                    return cancel;
+                }
+                set
+                {
+                    EnsureActive();
+                    cancel = value;
+                }
+            }
+
+            public string OutputMessages
+            {
+                get
+                {
+                    EnsureActive();
+                    return outputMessages;
+                }
+                set
+                {
+                    EnsureActive();
+                    outputMessages = ValidateText(value, FfiMaxCredentialResultTextLength, "OutputMessages");
+                }
+            }
+
+            public string ErrorMessages
+            {
+                get
+                {
+                    EnsureActive();
+                    return errorMessages;
+                }
+                set
+                {
+                    EnsureActive();
+                    errorMessages = ValidateText(value, FfiMaxCredentialResultTextLength, "ErrorMessages");
+                }
+            }
+
+            public string LogMessage
+            {
+                get
+                {
+                    EnsureActive();
+                    return logMessage;
+                }
+                set
+                {
+                    EnsureActive();
+                    logMessage = ValidateText(value, FfiMaxCredentialResultTextLength, "LogMessage");
+                }
+            }
+
+            public FfiCredentialResultSnapshot TakeSnapshot()
+            {
+                EnsureActive();
+                active = false;
+                SecureString resultPassword = password;
+                password = null;
+                FfiCredentialResultSnapshot snapshot = new(
+                    username,
+                    domain,
+                    resultPassword,
+                    cancel,
+                    outputMessages,
+                    errorMessages,
+                    logMessage);
+                username = string.Empty;
+                domain = string.Empty;
+                outputMessages = string.Empty;
+                errorMessages = string.Empty;
+                logMessage = string.Empty;
+                cancel = false;
+                return snapshot;
+            }
+
+            public void Dispose()
+            {
+                active = false;
+                SecureString value = password;
+                password = null;
+                value?.Dispose();
+                username = string.Empty;
+                domain = string.Empty;
+                outputMessages = string.Empty;
+                errorMessages = string.Empty;
+                logMessage = string.Empty;
+                cancel = false;
+            }
+
+            private static string ValidateText(string value, int maximumLength, string propertyName)
+            {
+                ArgumentNullException.ThrowIfNull(value);
+                if (value.IndexOf('\0') >= 0 ||
+                    value.Length > maximumLength ||
+                    Encoding.UTF8.GetByteCount(value) > FfiMaxCredentialResultTextLength)
+                {
+                    throw new ArgumentException(
+                        $"{propertyName} must be non-NUL text within its credential result bound.",
+                        propertyName);
+                }
+
+                return value;
+            }
+
+            private static SecureString CreateSecureString(string value)
+            {
+                ArgumentNullException.ThrowIfNull(value);
+                if (value.Length is < 1 or > FfiMaxSecretLength || value.IndexOf('\0') >= 0)
+                {
+                    throw new ArgumentException("Password must be bounded non-NUL text.", nameof(value));
+                }
+
+                var result = new SecureString();
+                foreach (char character in value)
+                {
+                    result.AppendChar(character);
+                }
+                result.MakeReadOnly();
+                return result;
+            }
+
+            private static SecureString CreateEmptySecureString()
+            {
+                var result = new SecureString();
+                result.MakeReadOnly();
+                return result;
+            }
+
+            private static unsafe SecureString CopySecureString(SecureString value)
+            {
+                ArgumentNullException.ThrowIfNull(value);
+                if (value.Length is < 1 or > FfiMaxSecretLength)
+                {
+                    throw new ArgumentException("SecurePassword must be bounded non-empty text.", nameof(value));
+                }
+
+                IntPtr bstr = Marshal.SecureStringToBSTR(value);
+                try
+                {
+                    var result = new SecureString();
+                    foreach (char character in new ReadOnlySpan<char>((void*)bstr, value.Length))
+                    {
+                        if (character == '\0')
+                        {
+                            result.Dispose();
+                            throw new ArgumentException("SecurePassword must not contain NUL.", nameof(value));
+                        }
+                        result.AppendChar(character);
+                    }
+                    result.MakeReadOnly();
+                    return result;
+                }
+                finally
+                {
+                    Marshal.ZeroFreeBSTR(bstr);
+                }
+            }
+
+            private static string CopyPasswordToString(SecureString value)
+            {
+                IntPtr bstr = Marshal.SecureStringToBSTR(value);
+                try
+                {
+                    return Marshal.PtrToStringBSTR(bstr);
+                }
+                finally
+                {
+                    Marshal.ZeroFreeBSTR(bstr);
+                }
+            }
+
+            private void ReplacePassword(SecureString value)
+            {
+                SecureString previous = password;
+                password = value;
+                previous?.Dispose();
+            }
+
+            private void EnsureActive()
+            {
+                if (!active)
+                {
+                    throw new InvalidOperationException("The credential result sink is no longer active.");
+                }
+            }
+        }
+
+        private sealed class FfiCredentialResultSnapshot : IDisposable
+        {
+            private const uint HasPassword = 1;
+            private const uint Cancelled = 1 << 1;
+
+            public FfiCredentialResultSnapshot(
+                string username,
+                string domain,
+                SecureString password,
+                bool cancel,
+                string outputMessages,
+                string errorMessages,
+                string logMessage)
+            {
+                Username = username;
+                Domain = domain;
+                Password = password;
+                Cancel = cancel;
+                OutputMessages = outputMessages;
+                ErrorMessages = errorMessages;
+                LogMessage = logMessage;
+            }
+
+            public string Username { get; }
+            public string Domain { get; }
+            public SecureString Password { get; }
+            public bool Cancel { get; }
+            public string OutputMessages { get; }
+            public string ErrorMessages { get; }
+            public string LogMessage { get; }
+
+            public int GetMetadataLength()
+            {
+                return checked(
+                    sizeof(uint) +
+                    (sizeof(int) * 5) +
+                    Encoding.UTF8.GetByteCount(Username) +
+                    Encoding.UTF8.GetByteCount(Domain) +
+                    Encoding.UTF8.GetByteCount(OutputMessages) +
+                    Encoding.UTF8.GetByteCount(ErrorMessages) +
+                    Encoding.UTF8.GetByteCount(LogMessage));
+            }
+
+            public void WriteMetadata(Span<byte> destination)
+            {
+                if (destination.Length != GetMetadataLength())
+                {
+                    throw new ArgumentException("Credential result metadata buffer length is invalid.", nameof(destination));
+                }
+
+                uint flags = (Password is null ? 0U : HasPassword) | (Cancel ? Cancelled : 0U);
+                BinaryPrimitives.WriteUInt32LittleEndian(destination, flags);
+                int offset = sizeof(uint);
+                WriteField(destination, ref offset, Username);
+                WriteField(destination, ref offset, Domain);
+                WriteField(destination, ref offset, OutputMessages);
+                WriteField(destination, ref offset, ErrorMessages);
+                WriteField(destination, ref offset, LogMessage);
+            }
+
+            public void Dispose()
+            {
+                Password?.Dispose();
+            }
+
+            private static void WriteField(Span<byte> destination, ref int offset, string value)
+            {
+                int byteLength = Encoding.UTF8.GetByteCount(value);
+                BinaryPrimitives.WriteInt32LittleEndian(destination.Slice(offset, sizeof(int)), byteLength);
+                offset += sizeof(int);
+                offset += Encoding.UTF8.GetBytes(value, destination[offset..]);
+            }
         }
 
         [UnmanagedCallersOnly]

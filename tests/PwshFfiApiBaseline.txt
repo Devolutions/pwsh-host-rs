@@ -1137,6 +1137,19 @@ facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdenti
 facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo
 facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState
 bindings:FfiPowerShell_InvokeSecretResult
+bindings:FfiPowerShell_InvokeCredentialResult
+facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShellCredentialResult InvokeCredentialResult()
+facade:type:Devolutions.PowerShell.Ffi.PowerShellCredentialResult
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::System.String Domain
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::System.String ErrorMessages
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::Boolean IsCancelled
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::System.String LogMessage
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::System.String OutputMessages
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::Devolutions.PowerShell.Ffi.PowerShellSecret Password
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::System.String Username
+facade:method:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::System.String ToString()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::Void Dispose()
+native:multi_pwsh_invoke_credential_result
 facade:ctor:Devolutions.PowerShell.Ffi.PowerShellCredential::Void .ctor(System.String, Devolutions.PowerShell.Ffi.PowerShellSecret)
 facade:ctor:Devolutions.PowerShell.Ffi.PowerShellModuleImport::Void .ctor(System.String, System.Version, Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions)
 facade:ctor:Devolutions.PowerShell.Ffi.PowerShellRemoteSessionOptions::Void .ctor(System.String, Devolutions.PowerShell.Ffi.PowerShellCredential, Boolean, Int32)

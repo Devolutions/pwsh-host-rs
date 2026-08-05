@@ -55,6 +55,7 @@ const FEATURE_BROKER_TERMINAL_OBSERVATION: u64 = 1 << 27;
 const FEATURE_RELIABLE_BRIDGE_EVENTS: u64 = 1 << 28;
 const FEATURE_OBSERVED_PRESENTATION: u64 = 1 << 29;
 const FEATURE_SECRET_ADAPTERS: u64 = 1 << 30;
+const FEATURE_CREDENTIAL_RESULT_SINK: u64 = 1 << 31;
 const SECRET_VALUE_KIND_UTF16: u32 = 15;
 const SECRET_VALUE_KIND_CREDENTIAL: u32 = 16;
 const MAX_SECRET_UTF16_CODE_UNITS: usize = 4_096;
@@ -6300,6 +6301,7 @@ fn feature_flags() -> u64 {
         | FEATURE_RELIABLE_BRIDGE_EVENTS
         | FEATURE_OBSERVED_PRESENTATION
         | FEATURE_SECRET_ADAPTERS
+        | FEATURE_CREDENTIAL_RESULT_SINK
 }
 
 fn create_live_object_probe(initial_count: i64) -> Result<*mut std::ffi::c_void, (Status, String)> {
@@ -6902,6 +6904,55 @@ pub unsafe extern "C" fn multi_pwsh_invoke_secret_result(
                     )
                 })?;
             *user_name_length = returned_user_name_length;
+            *secret_length = returned_secret_length;
+            Ok(Status::Success)
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_invoke_credential_result(
+    handle: u64,
+    metadata_buffer: *mut u8,
+    metadata_capacity: usize,
+    metadata_length: *mut usize,
+    secret_buffer: *mut u16,
+    secret_capacity: usize,
+    secret_length: *mut usize,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        if metadata_length.is_null()
+            || secret_length.is_null()
+            || metadata_capacity > 16 * 1024
+            || (metadata_capacity != 0 && metadata_buffer.is_null())
+            || (secret_capacity != 0 && secret_buffer.is_null())
+        {
+            return Err((
+                Status::InvalidArgument,
+                "credential result arguments are invalid".to_owned(),
+            ));
+        }
+
+        let metadata = if metadata_capacity == 0 {
+            &mut []
+        } else {
+            slice::from_raw_parts_mut(metadata_buffer, metadata_capacity)
+        };
+        let secret = if secret_capacity == 0 {
+            &mut []
+        } else {
+            slice::from_raw_parts_mut(secret_buffer, secret_capacity)
+        };
+        with_session_result(handle, true, |session| {
+            let (returned_metadata_length, returned_secret_length) =
+                session.invoke_credential_result(metadata, secret).map_err(|_| {
+                    (
+                        Status::ManagedFailure,
+                        "credential result PowerShell operation failed".to_owned(),
+                    )
+                })?;
+            *metadata_length = returned_metadata_length;
             *secret_length = returned_secret_length;
             Ok(Status::Success)
         })
@@ -10312,7 +10363,8 @@ mod tests {
             | FEATURE_BROKER_TERMINAL_OBSERVATION
             | FEATURE_RELIABLE_BRIDGE_EVENTS
             | FEATURE_OBSERVED_PRESENTATION
-            | FEATURE_SECRET_ADAPTERS;
+            | FEATURE_SECRET_ADAPTERS
+            | FEATURE_CREDENTIAL_RESULT_SINK;
 
         assert_eq!(ABI_VERSION, 2);
         assert_eq!(MINIMUM_COMPATIBLE_ABI_VERSION, 2);

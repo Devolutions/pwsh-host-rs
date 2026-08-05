@@ -3476,6 +3476,102 @@ static void VerifySecretBindings(PowerShellRuntime runtime)
             result.Credential?.UserName == "fixture-user",
             "The contract-pack PSCredential result binding failed.");
     }
+
+    using (PowerShell pipeline = session.CreatePowerShell())
+    using (PowerShellCredentialResult result = pipeline
+        .AddScript(
+            "`$Result.Username = 'secure-user'; " +
+            "`$Result.Domain = 'secure-domain'; " +
+            "`$securePassword = [System.Security.SecureString]::new(); " +
+            "foreach (`$character in 'secure-fixture'.ToCharArray()) { `$securePassword.AppendChar(`$character) }; " +
+            "`$Result.SecurePassword = `$securePassword")
+        .InvokeCredentialResult())
+    {
+        Require(
+            result.Username == "secure-user" &&
+            result.Domain == "secure-domain" &&
+            result.Password is not null &&
+            !result.ToString().Contains("secure-fixture", StringComparison.Ordinal) &&
+            !result.Password.ToString().Contains("secure-fixture", StringComparison.Ordinal),
+            "The payload-local SecurePassword credential result sink did not return a redacted typed result.");
+    }
+
+    using (PowerShell pipeline = session.CreatePowerShell())
+    using (PowerShellCredentialResult result = pipeline
+        .AddScript("`$Result.Username = 'plain-user'; `$Result.Password = 'plain-fixture'")
+        .InvokeCredentialResult())
+    {
+        Require(
+            result.Username == "plain-user" &&
+            result.Password is not null &&
+            !result.ToString().Contains("plain-fixture", StringComparison.Ordinal),
+            "The payload-local Password credential result sink did not convert a legacy password assignment.");
+    }
+
+    using (PowerShell pipeline = session.CreatePowerShell())
+    using (PowerShellCredentialResult result = pipeline
+        .AddScript(
+            "`$Result.Cancel = `$true; " +
+            "`$Result.OutputMessages = 'output message'; " +
+            "`$Result.ErrorMessages = 'error message'; " +
+            "`$Result.LogMessage = 'log message'")
+        .InvokeCredentialResult())
+    {
+        Require(
+            result.IsCancelled &&
+            result.OutputMessages == "output message" &&
+            result.ErrorMessages == "error message" &&
+            result.LogMessage == "log message" &&
+            result.Password is null,
+            "The payload-local credential result sink did not return cancellation and bounded messages.");
+    }
+
+    try
+    {
+        using PowerShell pipeline = session.CreatePowerShell();
+        _ = pipeline
+            .AddScript("`$Result.Password = 'output-fixture'; `$Result.Password")
+            .InvokeCredentialResult();
+        throw new InvalidOperationException("Credential result output was accepted by an ordinary result path.");
+    }
+    catch (PowerShellFfiException exception)
+    {
+        Require(
+            !exception.Message.Contains("output-fixture", StringComparison.Ordinal),
+            "Credential result output leaked a secret through diagnostics.");
+    }
+
+    using (PowerShell pipeline = session.CreatePowerShell())
+    using (PowerShellCredentialResult result = pipeline
+        .AddScript("`$global:RetainedCredentialResult = `$Result; `$Result.Password = 'retained-fixture'")
+        .InvokeCredentialResult())
+    {
+        Require(result.Password is not null, "Credential result retention fixture did not produce a typed secret.");
+    }
+
+    try
+    {
+        using (PowerShell pipeline = session.CreatePowerShell())
+        {
+            PowerShellInvocationResult retainedResult = pipeline
+                .AddScript(
+                    "`$rejected = `$false; " +
+                    "try { `$global:RetainedCredentialResult.Username = 'must-not-set' } " +
+                    "catch { `$rejected = `$true }; " +
+                    "`$rejected")
+                .InvokeWithDiagnostics();
+            Require(
+                retainedResult.Output.Records.Count == 1 &&
+                retainedResult.Output.Records[0].DisplayText == "True" &&
+                retainedResult.Errors.Records.Count == 0,
+                "A retained credential result sink remained usable after its invocation.");
+        }
+    }
+    finally
+    {
+        using PowerShell cleanup = session.CreatePowerShell();
+        _ = cleanup.AddScript("Remove-Variable -Name RetainedCredentialResult -Scope Global -ErrorAction SilentlyContinue").Invoke();
+    }
 }
 
 if (args.Length != 1)
