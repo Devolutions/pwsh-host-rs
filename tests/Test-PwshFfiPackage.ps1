@@ -1791,6 +1791,22 @@ using (PowerShellCredential credential = new("fixture-user", secret))
        !credential.ToString().Contains(secretMarker, StringComparison.Ordinal),
        "Secret lease diagnostics exposed the fixture secret.");
 
+   using (PowerShellSession secretSession = runtime.CreateSession(new PowerShellSessionOptions()))
+   using (PowerShell discardedSecretOutputPipeline = secretSession.CreatePowerShell())
+   {
+       using PowerShellSecretResult discardedSecretOutput = discardedSecretOutputPipeline
+           .AddScript(
+               "param([System.Security.SecureString]`$Secret) " +
+               "`$Secret")
+           .AddParameter("Secret", secret)
+           .InvokeWithSecretBindings();
+       Require(
+           discardedSecretOutput.Kind == PowerShellSecretResultKind.None &&
+           discardedSecretOutput.Secret is null &&
+           discardedSecretOutput.Credential is null,
+           "The explicit no-output secret invocation contract failed.");
+   }
+
    using (PowerShell secretPipeline = runtime.Create())
    {
        using PowerShellSecretResult secretResult = secretPipeline
@@ -1820,21 +1836,6 @@ using (PowerShellCredential credential = new("fixture-user", secret))
            !credentialResult.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
            !credentialResult.Credential.ToString().Contains(secretMarker, StringComparison.Ordinal),
            "The explicit SecureString input or redacted PSCredential output contract failed.");
-   }
-
-   using (PowerShell discardedSecretOutputPipeline = runtime.Create())
-   {
-       using PowerShellSecretResult discardedSecretOutput = discardedSecretOutputPipeline
-           .AddScript(
-               "param([System.Security.SecureString]`$Secret) " +
-               "`$Secret")
-           .AddParameter("Secret", secret)
-           .InvokeWithSecretBindings();
-       Require(
-           discardedSecretOutput.Kind == PowerShellSecretResultKind.None &&
-           discardedSecretOutput.Secret is null &&
-           discardedSecretOutput.Credential is null,
-           "The explicit no-output secret invocation contract failed.");
    }
 
    using (PowerShell normalResultPipeline = runtime.Create())
