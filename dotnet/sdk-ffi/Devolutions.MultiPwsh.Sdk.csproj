@@ -142,6 +142,9 @@
   <Target Name="BuildPwshFfiNativeAsset"
           BeforeTargets="GenerateNuspec"
           Condition="'$(BuildPwshFfiNativeAsset)' != 'false' and '$(PwshFfiNativeStagingRoot)' == ''">
+    <MSBuild Projects="$(RepositoryRoot)\dotnet\bindings\Devolutions.PowerShell.SDK.Bindings.csproj"
+             Targets="Build"
+             Properties="Configuration=$(Configuration);PwshExePath=$(PwshExePath)" />
     <Exec Command="cargo build --profile $(PwshFfiCargoProfile) -p pwsh-sdk-ffi"
           WorkingDirectory="$(RepositoryRoot)"
           EnvironmentVariables="RUSTFLAGS=$(PwshFfiRustFlags)" />

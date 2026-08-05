@@ -353,6 +353,18 @@ internal static unsafe partial class NativeMethods
         nuint* secretLength,
         NativeCallResult* result);
 
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_invoke_credential_result")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int InvokeCredentialResult(
+        ulong handle,
+        byte* metadataBuffer,
+        nuint metadataCapacity,
+        nuint* metadataLength,
+        char* secretBuffer,
+        nuint secretCapacity,
+        nuint* secretLength,
+        NativeCallResult* result);
+
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_add_parameter_switch")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int AddParameterSwitch(
