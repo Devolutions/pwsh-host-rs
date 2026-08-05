@@ -2521,10 +2521,17 @@ namespace NativeHost
                     {
                         secureString = resultSecureString;
                     }
-                    else if (expectedKind == 2 && value is PSCredential credential)
+                    else if (expectedKind == 2)
                     {
-                        secureString = credential.Password;
-                        userName = credential.UserName;
+                        if (value is PSCredential credential)
+                        {
+                            secureString = credential.Password;
+                            userName = credential.UserName;
+                        }
+                        else if (!TryProjectCredentialResult(output[0], value, out userName, out secureString))
+                        {
+                            throw new InvalidOperationException("Secret result shape is invalid.");
+                        }
                     }
                     else
                     {
@@ -2574,6 +2581,44 @@ namespace NativeHost
                     pipeline.PowerShell.Commands.Clear();
                 }
             });
+        }
+
+        private static bool TryProjectCredentialResult(
+            PSObject result,
+            object value,
+            out string userName,
+            out SecureString secret)
+        {
+            userName = null;
+            secret = null;
+            if (value is null)
+            {
+                return false;
+            }
+
+            Type valueType = value.GetType();
+            if (!string.Equals(valueType.FullName, typeof(PSCredential).FullName, StringComparison.Ordinal) ||
+                !string.Equals(
+                    valueType.Assembly.GetName().Name,
+                    typeof(PSCredential).Assembly.GetName().Name,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            // The selected payload may load SMA in a different context. Project only
+            // the fixed PSCredential members from its already-known PSObject wrapper.
+            PSPropertyInfo userNameProperty = result.Properties["UserName"];
+            PSPropertyInfo passwordProperty = result.Properties["Password"];
+            if (userNameProperty?.Value is not string credentialUserName ||
+                passwordProperty?.Value is not SecureString credentialSecret)
+            {
+                return false;
+            }
+
+            userName = credentialUserName;
+            secret = credentialSecret;
+            return true;
         }
 
         [UnmanagedCallersOnly]

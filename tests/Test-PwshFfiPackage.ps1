@@ -1805,6 +1805,23 @@ using (PowerShellCredential credential = new("fixture-user", secret))
            "The explicit credential input or redacted SecureString output contract failed.");
    }
 
+   using (PowerShell credentialResultPipeline = runtime.Create())
+   {
+       using PowerShellSecretResult credentialResult = credentialResultPipeline
+           .AddScript(
+               "param([System.Security.SecureString]`$Secret) " +
+               "[System.Management.Automation.PSCredential]::new('native-aot-user', `$Secret)")
+           .AddParameter("Secret", secret)
+           .InvokeSecretResult(PowerShellSecretResultKind.Credential);
+       Require(
+           credentialResult.Kind == PowerShellSecretResultKind.Credential &&
+           credentialResult.Credential is not null &&
+           credentialResult.Credential.UserName == "native-aot-user" &&
+           !credentialResult.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
+           !credentialResult.Credential.ToString().Contains(secretMarker, StringComparison.Ordinal),
+           "The explicit SecureString input or redacted PSCredential output contract failed.");
+   }
+
    using (PowerShell normalResultPipeline = runtime.Create())
    {
        try
