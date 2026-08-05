@@ -1791,7 +1791,11 @@ using (PowerShellCredential credential = new("fixture-user", secret))
        !credential.ToString().Contains(secretMarker, StringComparison.Ordinal),
        "Secret lease diagnostics exposed the fixture secret.");
 
-   using (PowerShellSession secretSession = runtime.CreateSession(new PowerShellSessionOptions()))
+   using (PowerShellSession secretSession = runtime.CreateSession(
+       new PowerShellSessionOptions(
+           historyMode: PowerShellSessionHistoryMode.Disabled,
+           errorPreference: PowerShellSessionPreference.Stop,
+           warningPreference: PowerShellSessionPreference.Continue)))
    using (PowerShell discardedSecretOutputPipeline = secretSession.CreatePowerShell())
    {
        using PowerShellSecretResult discardedSecretOutput = discardedSecretOutputPipeline
@@ -3315,6 +3319,73 @@ static void Require(bool condition, string message)
     }
 }
 
+static PowerShellSecret CreateFixtureSecret()
+{
+    char[] characters =
+    [
+        (char)102, (char)105, (char)120, (char)116, (char)117, (char)114, (char)101,
+        (char)45, (char)115, (char)101, (char)99, (char)114, (char)101, (char)116,
+    ];
+    try
+    {
+        return PowerShellSecret.Create(characters);
+    }
+    finally
+    {
+        Array.Clear(characters);
+    }
+}
+
+static void VerifySecretBindings(PowerShellRuntime runtime)
+{
+    using PowerShellSession session = runtime.CreateSession(
+        new PowerShellSessionOptions(
+            historyMode: PowerShellSessionHistoryMode.Disabled,
+            errorPreference: PowerShellSessionPreference.Stop,
+            warningPreference: PowerShellSessionPreference.Continue));
+
+    using (PowerShellSecret secret = CreateFixtureSecret())
+    using (PowerShellCredential credential = new("fixture-user", secret))
+    using (PowerShell pipeline = session.CreatePowerShell())
+    using (PowerShellSecretResult result = pipeline
+        .AddScript(
+            "param([System.Management.Automation.PSCredential]`$Credential) " +
+            "if (`$Credential.UserName -ne 'fixture-user' -or " +
+            "`$Credential.GetNetworkCredential().Password.Length -eq 0) { throw 'credential binding failed' }")
+        .AddParameter("Credential", credential)
+        .InvokeWithSecretBindings())
+    {
+        Require(result.Kind == PowerShellSecretResultKind.None,
+            "The contract-pack credential input binding failed.");
+    }
+
+    using (PowerShellSecret secret = CreateFixtureSecret())
+    using (PowerShell pipeline = session.CreatePowerShell())
+    using (PowerShellSecretResult result = pipeline
+        .AddScript("param([System.Security.SecureString]`$Secret) `$Secret")
+        .AddParameter("Secret", secret)
+        .InvokeSecretResult(PowerShellSecretResultKind.SecureString))
+    {
+        Require(result.Kind == PowerShellSecretResultKind.SecureString && result.Secret is not null,
+            "The contract-pack SecureString result binding failed.");
+    }
+
+    using (PowerShellSecret secret = CreateFixtureSecret())
+    using (PowerShell pipeline = session.CreatePowerShell())
+    using (PowerShellSecretResult result = pipeline
+        .AddScript(
+            "param([System.Security.SecureString]`$Secret) " +
+            "[System.Management.Automation.PSCredential]::new('fixture-user', `$Secret)")
+        .AddParameter("Secret", secret)
+        .InvokeSecretResult(PowerShellSecretResultKind.Credential))
+    {
+        Require(
+            result.Kind == PowerShellSecretResultKind.Credential &&
+            result.Credential?.UserName == "fixture-user",
+            "The contract-pack PSCredential result binding failed.");
+    }
+}
+
 if (args.Length != 1)
 {
     throw new ArgumentException("Expected exactly one PowerShell payload directory.");
@@ -3328,6 +3399,7 @@ PowerShellRuntime runtime = PowerShellRuntime.Activate(
     [new PowerShellLiveObjectContractPack(
         packPath,
         "Devolutions.MultiPwsh.BridgeTest.BridgeContractTestPack, FfiPackageBridgePack")]);
+VerifySecretBindings(runtime);
 using PowerShellBridgeChannel channel = runtime.CreateBridgeChannel(
     new PowerShellBrokerChannelOptions(
         maximumInflightFrames: 8,

@@ -2235,7 +2235,7 @@ namespace NativeHost
                     FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
                     FfiInvocationResults.TryRemove(ptrHandle, out _);
                     object boundValue = kind == (uint)FfiValueKind.Credential
-                        ? new PSCredential(userName, secureString)
+                        ? pipeline.CreatePayloadCredential(userName, secureString)
                         : secureString;
                     pipeline.PowerShell.AddParameter(name, boundValue);
                     pipeline.AddSecretBinding(secureString);
@@ -3986,6 +3986,16 @@ namespace NativeHost
                 secretBindings.Add(value);
             }
 
+            public object CreatePayloadCredential(string userName, SecureString secret)
+            {
+                ArgumentException.ThrowIfNullOrWhiteSpace(userName);
+                ArgumentNullException.ThrowIfNull(secret);
+
+                return Session is null
+                    ? new PSCredential(userName, secret)
+                    : Session.CreatePayloadCredential(userName, secret);
+            }
+
             public void ThrowIfSecretBound()
             {
                 if (HasSecretBindings)
@@ -4131,6 +4141,9 @@ namespace NativeHost
             private const uint StateClosed = 3;
             private const uint StateFaulted = 4;
             private const uint EventsTruncated = 1;
+            private const string CreateCredentialScript =
+                "param([string]$UserName, [System.Security.SecureString]$Secret) " +
+                "[System.Management.Automation.PSCredential]::new($UserName, $Secret)";
 
             private readonly object gate = new object();
             private readonly Runspace runspace;
@@ -4564,6 +4577,37 @@ namespace NativeHost
                         leaseCount--;
                         throw;
                     }
+                }
+            }
+
+            public object CreatePayloadCredential(string userName, SecureString secret)
+            {
+                ArgumentException.ThrowIfNullOrWhiteSpace(userName);
+                ArgumentNullException.ThrowIfNull(secret);
+
+                lock (gate)
+                {
+                    if (ownerReleased || disposed)
+                    {
+                        throw new InvalidOperationException("PowerShell session has been released.");
+                    }
+
+                    // The runspace creates this fixed, non-interpolated credential so its
+                    // SMA type identity always matches the target pipeline's binder.
+                    using var builder = PowerShell.Create();
+                    builder.Runspace = runspace;
+                    builder
+                        .AddScript(CreateCredentialScript, useLocalScope: true)
+                        .AddParameter("UserName", userName)
+                        .AddParameter("Secret", secret);
+
+                    Collection<PSObject> output = builder.Invoke();
+                    if (builder.HadErrors || output.Count != 1 || output[0]?.BaseObject is null)
+                    {
+                        throw new InvalidOperationException("Payload credential construction failed.");
+                    }
+
+                    return output[0].BaseObject;
                 }
             }
 
