@@ -1796,6 +1796,7 @@ using (PowerShellCredential credential = new("fixture-user", secret))
            historyMode: PowerShellSessionHistoryMode.Disabled,
            errorPreference: PowerShellSessionPreference.Stop,
            warningPreference: PowerShellSessionPreference.Continue)))
+   {
    using (PowerShell discardedSecretOutputPipeline = secretSession.CreatePowerShell())
    {
        using PowerShellSecretResult discardedSecretOutput = discardedSecretOutputPipeline
@@ -1842,6 +1843,7 @@ using (PowerShellCredential credential = new("fixture-user", secret))
            !sessionCredentialResult.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
            !sessionCredentialResult.Credential.ToString().Contains(secretMarker, StringComparison.Ordinal),
            "The persistent-session PSCredential secret result contract failed.");
+   }
    }
 
    using (PowerShell secretPipeline = runtime.Create())
