@@ -6954,8 +6954,7 @@ pub unsafe extern "C" fn multi_pwsh_invoke_credential_result(
         }
 
         with_session_result(handle, true, |session| {
-            session
-                .invoke_credential_result(credential_result)
+            unsafe { session.invoke_credential_result(credential_result) }
                 .map(|_| Status::Success)
                 .map_err(|_| {
                     (

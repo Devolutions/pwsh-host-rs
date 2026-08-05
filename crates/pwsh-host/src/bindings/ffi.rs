@@ -1556,7 +1556,14 @@ impl FfiPowerShell {
         Ok((user_name_length, secret_length))
     }
 
-    pub fn invoke_credential_result(&self, credential_result: &mut FfiCredentialResult) -> Result<(), FfiBindingError> {
+    /// # Safety
+    ///
+    /// Every non-null buffer in `credential_result` must be writable for its
+    /// declared capacity and remain valid for the duration of the call.
+    pub unsafe fn invoke_credential_result(
+        &self,
+        credential_result: &mut FfiCredentialResult,
+    ) -> Result<(), FfiBindingError> {
         self.call(|handle, result| unsafe {
             (self.bindings.power_shell_invoke_credential_result_fn)(handle, credential_result, result)
         })?;

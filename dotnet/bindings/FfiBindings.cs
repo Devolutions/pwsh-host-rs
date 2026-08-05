@@ -2650,6 +2650,7 @@ namespace NativeHost
                 bool sessionInvocationStarted = false;
                 Exception terminatingException = null;
                 Runspace runspace = null;
+                Runspace ownedCredentialRunspace = null;
                 PSVariable previousResult = null;
                 bool resultVariableRead = false;
                 try
@@ -2660,8 +2661,15 @@ namespace NativeHost
                         sessionInvocationStarted = true;
                     }
 
-                    runspace = pipeline.PowerShell.Runspace ?? Runspace.DefaultRunspace
-                        ?? throw new InvalidOperationException("Credential result invocation requires an opened runspace.");
+                    runspace = pipeline.PowerShell.Runspace;
+                    if (runspace is null)
+                    {
+                        ownedCredentialRunspace = RunspaceFactory.CreateRunspace();
+                        ownedCredentialRunspace.Open();
+                        pipeline.PowerShell.Runspace = ownedCredentialRunspace;
+                        runspace = ownedCredentialRunspace;
+                    }
+
                     previousResult = runspace.SessionStateProxy.PSVariable.Get("Result");
                     resultVariableRead = true;
                     runspace.SessionStateProxy.PSVariable.Set(new PSVariable("Result", sink));
@@ -2697,8 +2705,25 @@ namespace NativeHost
                     {
                         try
                         {
-                            sink.Dispose();
-                            pipeline.PowerShell.Commands.Clear();
+                            try
+                            {
+                                sink.Dispose();
+                                pipeline.PowerShell.Commands.Clear();
+                            }
+                            finally
+                            {
+                                if (ownedCredentialRunspace is not null)
+                                {
+                                    try
+                                    {
+                                        pipeline.PowerShell.Runspace = null;
+                                    }
+                                    finally
+                                    {
+                                        ownedCredentialRunspace.Dispose();
+                                    }
+                                }
+                            }
                         }
                         finally
                         {

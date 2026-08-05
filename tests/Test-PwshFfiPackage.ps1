@@ -3522,6 +3522,20 @@ static void VerifySecretBindings(PowerShellRuntime runtime)
         }
     }
 
+    using (PowerShell pipeline = PowerShell.Create())
+    using (PowerShellCredentialResult result = pipeline
+        .AddScript(
+            "`$Result.Username = 'standalone-user'; " +
+            "`$Result.Password = 'standalone-fixture'")
+        .InvokeCredentialResult())
+    {
+        Require(
+            result.Username == "standalone-user" &&
+            result.Password is not null &&
+            result.Password.Length == "standalone-fixture".Length,
+            "The standalone credential result invocation did not create an isolated runspace.");
+    }
+
     using (PowerShell pipeline = session.CreatePowerShell())
     using (PowerShellCredentialResult result = pipeline
         .AddScript(
