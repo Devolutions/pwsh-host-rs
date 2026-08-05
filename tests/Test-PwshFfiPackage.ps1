@@ -1814,18 +1814,26 @@ using (PowerShellCredential credential = new("fixture-user", secret))
 
    using (PowerShell sessionSecureStringResultPipeline = secretSession.CreatePowerShell())
    {
+       PowerShellSessionSnapshot beforeSecretResult = secretSession.GetSnapshot();
        using PowerShellSecretResult sessionSecureStringResult = sessionSecureStringResultPipeline
            .AddScript(
                "param([System.Security.SecureString]`$Secret) " +
+               "if (`$ErrorActionPreference -ne [System.Management.Automation.ActionPreference]::Stop) " +
+               "{ throw 'secret invocation settings were not applied' }; " +
                "`$Secret")
            .AddParameter("Secret", secret)
            .InvokeSecretResult(PowerShellSecretResultKind.SecureString);
+       PowerShellSessionSnapshot afterSecretResult = secretSession.GetSnapshot();
        Require(
            sessionSecureStringResult.Kind == PowerShellSecretResultKind.SecureString &&
            sessionSecureStringResult.Secret is not null &&
            !sessionSecureStringResult.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
            !sessionSecureStringResult.Secret.ToString().Contains(secretMarker, StringComparison.Ordinal),
            "The persistent-session SecureString secret result contract failed.");
+       Require(
+           afterSecretResult.InvocationCount == beforeSecretResult.InvocationCount + 1 &&
+           afterSecretResult.ActivePipelineCount == 0,
+           "The persistent-session SecureString secret result bypassed session lifecycle accounting.");
    }
 
    using (PowerShell sessionCredentialResultPipeline = secretSession.CreatePowerShell())
@@ -1843,6 +1851,33 @@ using (PowerShellCredential credential = new("fixture-user", secret))
            !sessionCredentialResult.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
            !sessionCredentialResult.Credential.ToString().Contains(secretMarker, StringComparison.Ordinal),
            "The persistent-session PSCredential secret result contract failed.");
+   }
+
+   using (PowerShell sessionMultipleSecretResultsPipeline = secretSession.CreatePowerShell())
+   {
+       PowerShellSessionSnapshot beforeMultipleResults = secretSession.GetSnapshot();
+       try
+       {
+           sessionMultipleSecretResultsPipeline
+               .AddScript(
+                   "param([System.Security.SecureString]`$Secret) " +
+                   "`$Secret; `$Secret")
+               .AddParameter("Secret", secret)
+               .InvokeSecretResult(PowerShellSecretResultKind.SecureString);
+           return 1;
+       }
+       catch (PowerShellFfiException exception)
+       {
+           Require(
+               !exception.Message.Contains(secretMarker, StringComparison.Ordinal),
+               "The rejected multi-result secret invocation leaked the fixture secret.");
+       }
+
+       PowerShellSessionSnapshot afterMultipleResults = secretSession.GetSnapshot();
+       Require(
+           afterMultipleResults.InvocationCount == beforeMultipleResults.InvocationCount + 1 &&
+           afterMultipleResults.ActivePipelineCount == 0,
+           "The rejected multi-result secret invocation left the session active.");
    }
    }
 

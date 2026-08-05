@@ -2496,8 +2496,11 @@ namespace NativeHost
                 SecureString resultSecret = null;
                 try
                 {
-                    Collection<PSObject> output = pipeline.PowerShell.Invoke(TakeCompletedInput(ptrHandle));
-                    if (pipeline.PowerShell.HadErrors)
+                    FfiSecretInvocationOutput invocation = InvokeSecretPipeline(
+                        pipeline,
+                        TakeCompletedInput(ptrHandle),
+                        captureOutput: expectedKind != 0);
+                    if (invocation.HadErrors)
                     {
                         throw new InvalidOperationException("Secret-bound PowerShell invocation failed.");
                     }
@@ -2509,12 +2512,13 @@ namespace NativeHost
                         return;
                     }
 
-                    if (output.Count != 1)
+                    if (invocation.OutputCount != 1)
                     {
                         throw new InvalidOperationException("Secret result shape is invalid.");
                     }
 
-                    object value = output[0].BaseObject;
+                    PSObject output = invocation.Output;
+                    object value = output.BaseObject;
                     SecureString secureString;
                     string userName = null;
                     if (expectedKind == 1 && value is SecureString resultSecureString)
@@ -2528,7 +2532,7 @@ namespace NativeHost
                             secureString = credential.Password;
                             userName = credential.UserName;
                         }
-                        else if (!TryProjectCredentialResult(output[0], value, out userName, out secureString))
+                        else if (!TryProjectCredentialResult(output, value, out userName, out secureString))
                         {
                             throw new InvalidOperationException("Secret result shape is invalid.");
                         }
@@ -2619,6 +2623,127 @@ namespace NativeHost
             userName = credentialUserName;
             secret = credentialSecret;
             return true;
+        }
+
+        private static FfiSecretInvocationOutput InvokeSecretPipeline(
+            FfiPowerShellPipeline pipeline,
+            object[] input,
+            bool captureOutput)
+        {
+            PowerShell powerShell = pipeline.PowerShell;
+            FfiPowerShellSession session = pipeline.Session;
+            var output = new PSDataCollection<PSObject> { DataAddedCount = 1 };
+            PSObject capturedOutput = null;
+            int outputCount = 0;
+            bool hadErrors = false;
+            bool sessionInvocationStarted = false;
+            Exception terminatingException = null;
+            PSDataCollection<object> inputCollection = null;
+
+            EventHandler<DataAddedEventArgs> outputAdded = (_, args) =>
+            {
+                if (captureOutput)
+                {
+                    PSObject value = output[args.Index];
+                    outputCount++;
+                    if (outputCount == 1)
+                    {
+                        capturedOutput = value;
+                    }
+                    else
+                    {
+                        output.Clear();
+                        throw new InvalidOperationException("Secret result shape is invalid.");
+                    }
+                }
+
+                output.Clear();
+            };
+            EventHandler<DataAddedEventArgs> errorAdded = (_, _) =>
+            {
+                hadErrors = true;
+                powerShell.Streams.Error.Clear();
+            };
+            EventHandler<DataAddedEventArgs> warningAdded = (_, _) => powerShell.Streams.Warning.Clear();
+            EventHandler<DataAddedEventArgs> verboseAdded = (_, _) => powerShell.Streams.Verbose.Clear();
+            EventHandler<DataAddedEventArgs> debugAdded = (_, _) => powerShell.Streams.Debug.Clear();
+            EventHandler<DataAddedEventArgs> informationAdded = (_, _) => powerShell.Streams.Information.Clear();
+            EventHandler<DataAddedEventArgs> progressAdded = (_, _) => powerShell.Streams.Progress.Clear();
+
+            ClearStreamBuffers(powerShell);
+            output.DataAdded += outputAdded;
+            powerShell.Streams.Error.DataAdded += errorAdded;
+            powerShell.Streams.Warning.DataAdded += warningAdded;
+            powerShell.Streams.Verbose.DataAdded += verboseAdded;
+            powerShell.Streams.Debug.DataAdded += debugAdded;
+            powerShell.Streams.Information.DataAdded += informationAdded;
+            powerShell.Streams.Progress.DataAdded += progressAdded;
+            try
+            {
+                if (session is not null)
+                {
+                    session.BeginInvocation();
+                    sessionInvocationStarted = true;
+                }
+
+                PSInvocationSettings invocationSettings = session?.CreateInvocationSettings();
+                if (input is null)
+                {
+                    powerShell.Invoke<PSObject, PSObject>(null, output, invocationSettings);
+                }
+                else
+                {
+                    inputCollection = new PSDataCollection<object>();
+                    foreach (object value in input)
+                    {
+                        inputCollection.Add(value);
+                    }
+
+                    inputCollection.Complete();
+                    powerShell.Invoke<object, PSObject>(inputCollection, output, invocationSettings);
+                }
+
+                hadErrors |= powerShell.HadErrors;
+                return new FfiSecretInvocationOutput(capturedOutput, outputCount, hadErrors);
+            }
+            catch (Exception exception)
+            {
+                terminatingException = exception;
+                throw;
+            }
+            finally
+            {
+                output.DataAdded -= outputAdded;
+                powerShell.Streams.Error.DataAdded -= errorAdded;
+                powerShell.Streams.Warning.DataAdded -= warningAdded;
+                powerShell.Streams.Verbose.DataAdded -= verboseAdded;
+                powerShell.Streams.Debug.DataAdded -= debugAdded;
+                powerShell.Streams.Information.DataAdded -= informationAdded;
+                powerShell.Streams.Progress.DataAdded -= progressAdded;
+                inputCollection?.Clear();
+                output.Clear();
+                ClearStreamBuffers(powerShell);
+                if (sessionInvocationStarted)
+                {
+                    session.EndInvocation(terminatingException is not null);
+                }
+            }
+        }
+
+        private sealed class FfiSecretInvocationOutput
+        {
+            public FfiSecretInvocationOutput(PSObject output, int outputCount, bool hadErrors)
+            {
+                Output = output;
+                OutputCount = outputCount;
+                HadErrors = hadErrors;
+            }
+
+            public PSObject Output { get; }
+
+            public int OutputCount { get; }
+
+            public bool HadErrors { get; }
         }
 
         [UnmanagedCallersOnly]
