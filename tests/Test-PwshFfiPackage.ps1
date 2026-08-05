@@ -1822,6 +1822,21 @@ using (PowerShellCredential credential = new("fixture-user", secret))
            "The explicit SecureString input or redacted PSCredential output contract failed.");
    }
 
+   using (PowerShell discardedSecretOutputPipeline = runtime.Create())
+   {
+       using PowerShellSecretResult discardedSecretOutput = discardedSecretOutputPipeline
+           .AddScript(
+               "param([System.Security.SecureString]`$Secret) " +
+               "`$Secret")
+           .AddParameter("Secret", secret)
+           .InvokeWithSecretBindings();
+       Require(
+           discardedSecretOutput.Kind == PowerShellSecretResultKind.None &&
+           discardedSecretOutput.Secret is null &&
+           discardedSecretOutput.Credential is null,
+           "The explicit no-output secret invocation contract failed.");
+   }
+
    using (PowerShell normalResultPipeline = runtime.Create())
    {
        try
