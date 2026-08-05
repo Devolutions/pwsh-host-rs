@@ -74,8 +74,12 @@ namespace NativeHost
         private const ulong FfiFeatureReliableBridgeEvents = 1UL << 28;
         private const ulong FfiFeatureObservedPresentation = 1UL << 29;
         private const ulong FfiFeatureSecretAdapters = 1UL << 30;
+        private const ulong FfiFeatureCredentialResult = 1UL << 31;
         private const int FfiMaxSecretLength = 4_096;
         private const int FfiMaxSecretUserNameLength = 256;
+        private const int FfiMaxCredentialTextUtf8Bytes = 4 * 1024;
+        private const int FfiMaxCredentialMessages = 16;
+        private const int FfiMaxCredentialMessageUtf8Bytes = 4 * 1024;
         private const uint FfiTypedResultPageTerminal = 1;
         private const uint FfiTypedResultPageTruncated = 1 << 1;
         private const uint FfiTypedResultPageComplete = 1 << 2;
@@ -91,6 +95,31 @@ namespace NativeHost
             public int DiagnosticCapacity;
             public int DiagnosticRequiredLength;
             public int DiagnosticWrittenLength;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public unsafe struct FfiCredentialResult
+        {
+            public uint Size;
+            public uint IsCancelled;
+            public byte* Username;
+            public int UsernameCapacity;
+            public int UsernameLength;
+            public byte* Domain;
+            public int DomainCapacity;
+            public int DomainLength;
+            public char* Password;
+            public int PasswordCapacity;
+            public int PasswordLength;
+            public byte* OutputMessages;
+            public int OutputMessagesCapacity;
+            public int OutputMessagesLength;
+            public byte* ErrorMessages;
+            public int ErrorMessagesCapacity;
+            public int ErrorMessagesLength;
+            public byte* LogMessage;
+            public int LogMessageCapacity;
+            public int LogMessageLength;
         }
 
         private static bool TryGetConfigurationStrings(object[] values, out string[] result)
@@ -213,6 +242,7 @@ namespace NativeHost
             public IntPtr PowerShell_SetBridgeContext;
             public IntPtr ObservedDiagnosticPage_CopyRecordValue;
             public IntPtr PowerShell_InvokeSecretResult;
+            public IntPtr PowerShell_InvokeCredentialResult;
         }
 
         private const int FfiPreflightMaximumTextLength = 128;
@@ -1145,7 +1175,7 @@ namespace NativeHost
                     FfiFeatureLiveStreamPolling | FfiFeatureTypedResultPaging | FfiFeatureObservedInvocation |
                     FfiFeatureSessionPreflight | FfiFeatureRuntimeDiagnostics | FfiFeatureDuplexBrokerChannel |
                     FfiFeatureGeneratedBridgeAttachment | FfiFeatureReliableBridgeEvents |
-                    FfiFeatureObservedPresentation | FfiFeatureSecretAdapters,
+                    FfiFeatureObservedPresentation | FfiFeatureSecretAdapters | FfiFeatureCredentialResult,
                 PowerShell_Create = (IntPtr)(delegate* unmanaged<IntPtr*, FfiCallResult*, int>)&FfiPowerShell_Create,
                 PowerShell_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiPowerShell_Release,
                 PowerShell_AddArgumentUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, FfiCallResult*, int>)&FfiPowerShell_AddArgumentUtf8,
@@ -1233,6 +1263,7 @@ namespace NativeHost
                 PowerShell_SetBridgeContext = (IntPtr)(delegate* unmanaged<IntPtr, ulong, ulong, ulong, ushort, ushort, uint, uint, byte*, int, FfiCallResult*, int>)&FfiPowerShell_SetBridgeContext,
                 ObservedDiagnosticPage_CopyRecordValue = (IntPtr)(delegate* unmanaged<IntPtr, int, uint*, byte*, int, int*, FfiCallResult*, int>)&FfiObservedDiagnosticPage_CopyRecordValue,
                 PowerShell_InvokeSecretResult = (IntPtr)(delegate* unmanaged<IntPtr, uint, byte*, int, int*, char*, int, int*, FfiCallResult*, int>)&FfiPowerShell_InvokeSecretResult,
+                PowerShell_InvokeCredentialResult = (IntPtr)(delegate* unmanaged<IntPtr, FfiCredentialResult*, FfiCallResult*, int>)&FfiPowerShell_InvokeCredentialResult,
             };
         }
 
@@ -2589,6 +2620,488 @@ namespace NativeHost
                     pipeline.PowerShell.Commands.Clear();
                 }
             });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiPowerShell_InvokeCredentialResult(
+            IntPtr ptrHandle,
+            FfiCredentialResult* credentialResult,
+            FfiCallResult* result)
+        {
+            if (credentialResult == null ||
+                credentialResult->Size < (uint)sizeof(FfiCredentialResult) ||
+                !HasValidCredentialBuffer(credentialResult->Username, credentialResult->UsernameCapacity) ||
+                !HasValidCredentialBuffer(credentialResult->Domain, credentialResult->DomainCapacity) ||
+                !HasValidCredentialSecretBuffer(credentialResult->Password, credentialResult->PasswordCapacity) ||
+                !HasValidCredentialBuffer(credentialResult->OutputMessages, credentialResult->OutputMessagesCapacity) ||
+                !HasValidCredentialBuffer(credentialResult->ErrorMessages, credentialResult->ErrorMessagesCapacity) ||
+                !HasValidCredentialBuffer(credentialResult->LogMessage, credentialResult->LogMessageCapacity))
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Credential result arguments are invalid.");
+            }
+
+            return ExecuteSecret(result, () =>
+            {
+                FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                pipeline.ThrowIfSecretBound();
+                FfiInvocationResults.TryRemove(ptrHandle, out _);
+                var sink = new FfiCredentialResultSink();
+                FfiPowerShellSession session = pipeline.Session;
+                bool sessionInvocationStarted = false;
+                Exception terminatingException = null;
+                Runspace runspace = null;
+                PSVariable previousResult = null;
+                bool resultVariableRead = false;
+                try
+                {
+                    if (session is not null)
+                    {
+                        session.BeginInvocation();
+                        sessionInvocationStarted = true;
+                    }
+
+                    runspace = pipeline.PowerShell.Runspace ?? Runspace.DefaultRunspace
+                        ?? throw new InvalidOperationException("Credential result invocation requires an opened runspace.");
+                    previousResult = runspace.SessionStateProxy.PSVariable.Get("Result");
+                    resultVariableRead = true;
+                    runspace.SessionStateProxy.PSVariable.Set(new PSVariable("Result", sink));
+                    FfiCredentialInvocationOutput invocation = InvokeCredentialPipeline(
+                        pipeline,
+                        TakeCompletedInput(ptrHandle));
+                    if (invocation.OutputCount != 0 || invocation.HadErrors)
+                    {
+                        throw new InvalidOperationException("Credential result invocation emitted output or errors.");
+                    }
+
+                    WriteCredentialResult(credentialResult, sink);
+                }
+                catch (Exception exception)
+                {
+                    terminatingException = exception;
+                    throw;
+                }
+                finally
+                {
+                    try
+                    {
+                        if (resultVariableRead && runspace is not null && previousResult is null)
+                        {
+                            runspace.SessionStateProxy.PSVariable.Remove("Result");
+                        }
+                        else if (resultVariableRead && runspace is not null)
+                        {
+                            runspace.SessionStateProxy.PSVariable.Set(previousResult);
+                        }
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            sink.Dispose();
+                            pipeline.PowerShell.Commands.Clear();
+                        }
+                        finally
+                        {
+                            if (sessionInvocationStarted)
+                            {
+                                session.EndInvocation(terminatingException is not null);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        private static unsafe bool HasValidCredentialBuffer(byte* buffer, int capacity)
+        {
+            return capacity >= 0 && (capacity == 0 || buffer != null);
+        }
+
+        private static unsafe bool HasValidCredentialSecretBuffer(char* buffer, int capacity)
+        {
+            return capacity >= 0 && (capacity == 0 || buffer != null);
+        }
+
+        private static unsafe void WriteCredentialResult(
+            FfiCredentialResult* result,
+            FfiCredentialResultSink sink)
+        {
+            result->IsCancelled = sink.IsCancelled ? 1U : 0U;
+            result->UsernameLength = WriteCredentialText(
+                sink.UsernameValue,
+                result->Username,
+                result->UsernameCapacity);
+            result->DomainLength = WriteCredentialText(
+                sink.DomainValue,
+                result->Domain,
+                result->DomainCapacity);
+            result->LogMessageLength = WriteCredentialText(
+                sink.LogMessageValue,
+                result->LogMessage,
+                result->LogMessageCapacity);
+            result->OutputMessagesLength = WriteCredentialMessages(
+                sink.OutputMessageValues,
+                result->OutputMessages,
+                result->OutputMessagesCapacity);
+            result->ErrorMessagesLength = WriteCredentialMessages(
+                sink.ErrorMessageValues,
+                result->ErrorMessages,
+                result->ErrorMessagesCapacity);
+            result->PasswordLength = sink.IsCancelled
+                ? 0
+                : sink.CopyPassword(result->Password, result->PasswordCapacity);
+        }
+
+        private static unsafe int WriteCredentialText(string value, byte* destination, int capacity)
+        {
+            if (value is null)
+            {
+                return 0;
+            }
+
+            int required = Encoding.UTF8.GetByteCount(value);
+            if (required > capacity)
+            {
+                throw new InvalidOperationException("Credential result exceeds its bound.");
+            }
+
+            Encoding.UTF8.GetBytes(value, new Span<byte>(destination, required));
+            return required;
+        }
+
+        private static unsafe int WriteCredentialMessages(
+            IReadOnlyList<string> messages,
+            byte* destination,
+            int capacity)
+        {
+            int required = sizeof(uint);
+            foreach (string message in messages)
+            {
+                required = checked(required + sizeof(uint) + Encoding.UTF8.GetByteCount(message));
+            }
+            if (required > capacity)
+            {
+                throw new InvalidOperationException("Credential result messages exceed their bound.");
+            }
+
+            Span<byte> target = new(destination, required);
+            BinaryPrimitives.WriteUInt32LittleEndian(target, checked((uint)messages.Count));
+            int offset = sizeof(uint);
+            foreach (string message in messages)
+            {
+                int length = Encoding.UTF8.GetByteCount(message);
+                BinaryPrimitives.WriteUInt32LittleEndian(target[offset..], checked((uint)length));
+                offset += sizeof(uint);
+                Encoding.UTF8.GetBytes(message, target[offset..(offset + length)]);
+                offset += length;
+            }
+
+            return required;
+        }
+
+        private static FfiCredentialInvocationOutput InvokeCredentialPipeline(
+            FfiPowerShellPipeline pipeline,
+            object[] input)
+        {
+            PowerShell powerShell = pipeline.PowerShell;
+            FfiPowerShellSession session = pipeline.Session;
+            var output = new PSDataCollection<PSObject> { DataAddedCount = 1 };
+            int outputCount = 0;
+            bool hadErrors = false;
+            PSDataCollection<object> inputCollection = null;
+
+            EventHandler<DataAddedEventArgs> outputAdded = (_, _) =>
+            {
+                outputCount++;
+                output.Clear();
+            };
+            EventHandler<DataAddedEventArgs> errorAdded = (_, _) =>
+            {
+                hadErrors = true;
+                powerShell.Streams.Error.Clear();
+            };
+            EventHandler<DataAddedEventArgs> warningAdded = (_, _) => powerShell.Streams.Warning.Clear();
+            EventHandler<DataAddedEventArgs> verboseAdded = (_, _) => powerShell.Streams.Verbose.Clear();
+            EventHandler<DataAddedEventArgs> debugAdded = (_, _) => powerShell.Streams.Debug.Clear();
+            EventHandler<DataAddedEventArgs> informationAdded = (_, _) => powerShell.Streams.Information.Clear();
+            EventHandler<DataAddedEventArgs> progressAdded = (_, _) => powerShell.Streams.Progress.Clear();
+
+            ClearStreamBuffers(powerShell);
+            output.DataAdded += outputAdded;
+            powerShell.Streams.Error.DataAdded += errorAdded;
+            powerShell.Streams.Warning.DataAdded += warningAdded;
+            powerShell.Streams.Verbose.DataAdded += verboseAdded;
+            powerShell.Streams.Debug.DataAdded += debugAdded;
+            powerShell.Streams.Information.DataAdded += informationAdded;
+            powerShell.Streams.Progress.DataAdded += progressAdded;
+            try
+            {
+                PSInvocationSettings invocationSettings = session?.CreateInvocationSettings();
+                if (input is null)
+                {
+                    powerShell.Invoke<PSObject, PSObject>(null, output, invocationSettings);
+                }
+                else
+                {
+                    inputCollection = new PSDataCollection<object>();
+                    foreach (object value in input)
+                    {
+                        inputCollection.Add(value);
+                    }
+
+                    inputCollection.Complete();
+                    powerShell.Invoke<object, PSObject>(inputCollection, output, invocationSettings);
+                }
+
+                hadErrors |= powerShell.HadErrors;
+                return new FfiCredentialInvocationOutput(outputCount, hadErrors);
+            }
+            finally
+            {
+                output.DataAdded -= outputAdded;
+                powerShell.Streams.Error.DataAdded -= errorAdded;
+                powerShell.Streams.Warning.DataAdded -= warningAdded;
+                powerShell.Streams.Verbose.DataAdded -= verboseAdded;
+                powerShell.Streams.Debug.DataAdded -= debugAdded;
+                powerShell.Streams.Information.DataAdded -= informationAdded;
+                powerShell.Streams.Progress.DataAdded -= progressAdded;
+                inputCollection?.Clear();
+                output.Clear();
+                ClearStreamBuffers(powerShell);
+            }
+        }
+
+        private sealed class FfiCredentialInvocationOutput
+        {
+            public FfiCredentialInvocationOutput(int outputCount, bool hadErrors)
+            {
+                OutputCount = outputCount;
+                HadErrors = hadErrors;
+            }
+
+            public int OutputCount { get; }
+
+            public bool HadErrors { get; }
+        }
+
+        private sealed unsafe class FfiCredentialResultSink : IDisposable
+        {
+            private SecureString password;
+            private string[] outputMessages = Array.Empty<string>();
+            private string[] errorMessages = Array.Empty<string>();
+
+            public object Username
+            {
+                set => username = ValidateCredentialText(value, "Username", allowNull: true);
+            }
+
+            public object Domain
+            {
+                set => domain = ValidateCredentialText(value, "Domain", allowNull: true);
+            }
+
+            public object Password
+            {
+                set => SetPassword(value, secure: false);
+            }
+
+            public object SecurePassword
+            {
+                set => SetPassword(value, secure: true);
+            }
+
+            public object OutputMessages
+            {
+                set => outputMessages = ValidateCredentialMessages(value, "OutputMessages");
+            }
+
+            public object ErrorMessages
+            {
+                set => errorMessages = ValidateCredentialMessages(value, "ErrorMessages");
+            }
+
+            public object LogMessage
+            {
+                set => logMessage = ValidateCredentialText(value, "LogMessage", allowNull: true);
+            }
+
+            public object Cancel
+            {
+                set
+                {
+                    if (value is not bool cancelled)
+                    {
+                        throw new InvalidOperationException("Credential result Cancel must be Boolean.");
+                    }
+
+                    isCancelled = cancelled;
+                }
+            }
+
+            private string username;
+            private string domain;
+            private string logMessage;
+            private bool isCancelled;
+
+            internal string UsernameValue => username;
+            internal string DomainValue => domain;
+            internal string LogMessageValue => logMessage;
+            internal IReadOnlyList<string> OutputMessageValues => outputMessages;
+            internal IReadOnlyList<string> ErrorMessageValues => errorMessages;
+            internal bool IsCancelled => isCancelled;
+
+            internal int CopyPassword(char* destination, int capacity)
+            {
+                if (password is null)
+                {
+                    return 0;
+                }
+
+                int length = password.Length;
+                if (length > capacity)
+                {
+                    throw new InvalidOperationException("Credential password exceeds its bound.");
+                }
+
+                IntPtr bstr = Marshal.SecureStringToBSTR(password);
+                try
+                {
+                    new ReadOnlySpan<char>((void*)bstr, length).CopyTo(new Span<char>(destination, length));
+                    return length;
+                }
+                finally
+                {
+                    Marshal.ZeroFreeBSTR(bstr);
+                }
+            }
+
+            public void Dispose()
+            {
+                SecureString value = Interlocked.Exchange(ref password, null);
+                value?.Dispose();
+            }
+
+            private void SetPassword(object value, bool secure)
+            {
+                SecureString next = null;
+                if (value is null)
+                {
+                    ReplacePassword(null);
+                    return;
+                }
+
+                if (secure)
+                {
+                    if (value is not SecureString secureString)
+                    {
+                        throw new InvalidOperationException("Credential result SecurePassword must be a SecureString.");
+                    }
+
+                    next = CopySecureString(secureString);
+                }
+                else
+                {
+                    if (value is not string text)
+                    {
+                        throw new InvalidOperationException("Credential result Password must be a string.");
+                    }
+
+                    next = CreateSecureString(text);
+                }
+
+                ReplacePassword(next);
+            }
+
+            private void ReplacePassword(SecureString next)
+            {
+                SecureString previous = Interlocked.Exchange(ref password, next);
+                previous?.Dispose();
+            }
+
+            private static string ValidateCredentialText(object value, string name, bool allowNull)
+            {
+                if (value is null && allowNull)
+                {
+                    return null;
+                }
+                if (value is not string text ||
+                    text.IndexOf('\0') >= 0 ||
+                    Encoding.UTF8.GetByteCount(text) > FfiMaxCredentialTextUtf8Bytes)
+                {
+                    throw new InvalidOperationException($"Credential result {name} is invalid.");
+                }
+
+                return text;
+            }
+
+            private static string[] ValidateCredentialMessages(object value, string name)
+            {
+                if (value is not object[] values || values.Length > FfiMaxCredentialMessages)
+                {
+                    throw new InvalidOperationException($"Credential result {name} must be a bounded string array.");
+                }
+
+                var result = new string[values.Length];
+                for (int index = 0; index < values.Length; index++)
+                {
+                    if (values[index] is not string text ||
+                        text.Length == 0 ||
+                        text.IndexOf('\0') >= 0 ||
+                        Encoding.UTF8.GetByteCount(text) > FfiMaxCredentialMessageUtf8Bytes)
+                    {
+                        throw new InvalidOperationException($"Credential result {name} is invalid.");
+                    }
+
+                    result[index] = text;
+                }
+
+                return result;
+            }
+
+            private static SecureString CreateSecureString(string text)
+            {
+                if (text.Length is < 1 or > FfiMaxSecretLength || text.IndexOf('\0') >= 0)
+                {
+                    throw new InvalidOperationException("Credential password is invalid.");
+                }
+
+                var result = new SecureString();
+                foreach (char character in text)
+                {
+                    result.AppendChar(character);
+                }
+                result.MakeReadOnly();
+                return result;
+            }
+
+            private static SecureString CopySecureString(SecureString source)
+            {
+                if (source.Length is < 1 or > FfiMaxSecretLength)
+                {
+                    throw new InvalidOperationException("Credential password is invalid.");
+                }
+
+                IntPtr bstr = Marshal.SecureStringToBSTR(source);
+                try
+                {
+                    var result = new SecureString();
+                    foreach (char character in new ReadOnlySpan<char>((void*)bstr, source.Length))
+                    {
+                        if (character == '\0')
+                        {
+                            result.Dispose();
+                            throw new InvalidOperationException("Credential password is invalid.");
+                        }
+                        result.AppendChar(character);
+                    }
+                    result.MakeReadOnly();
+                    return result;
+                }
+                finally
+                {
+                    Marshal.ZeroFreeBSTR(bstr);
+                }
+            }
         }
 
         private static bool TryProjectCredentialResult(
@@ -4440,6 +4953,10 @@ namespace NativeHost
                 }
 
                 InitialSessionState initialState = InitialSessionState.CreateDefault2();
+                initialState.Commands.Add(new SessionStateCmdletEntry(
+                    "ConvertTo-SecureString",
+                    typeof(Microsoft.PowerShell.Commands.ConvertToSecureStringCommand),
+                    null));
                 if (initialConfiguration == ConstrainedLanguageConfiguration)
                 {
                     initialState.LanguageMode = PSLanguageMode.ConstrainedLanguage;

@@ -12,10 +12,11 @@ pub(crate) use self::bindings_generated::Bindings;
 use self::bindings_generated::PowerShellHandle;
 pub(crate) use self::ffi::FfiBindings;
 pub use self::ffi::{
-    FfiBindingError, FfiBridgeContext, FfiInvocationResult, FfiLiveInvocation, FfiLiveObjectContractDescriptor,
-    FfiLiveStreamBatch, FfiLiveStreamRecord, FfiObservedDiagnosticPage, FfiObservedDiagnosticRecord,
-    FfiObservedInvocation, FfiPayloadRuntimeDiagnostics, FfiPowerShell, FfiPowerShellSession, FfiSessionEvent,
-    FfiSessionSnapshot, FfiSnapshotValue, FfiTypedResultInvocation, FfiTypedResultPage, FfiTypedResultRecord,
+    FfiBindingError, FfiBridgeContext, FfiCredentialResult, FfiInvocationResult, FfiLiveInvocation,
+    FfiLiveObjectContractDescriptor, FfiLiveStreamBatch, FfiLiveStreamRecord, FfiObservedDiagnosticPage,
+    FfiObservedDiagnosticRecord, FfiObservedInvocation, FfiPayloadRuntimeDiagnostics, FfiPowerShell,
+    FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue, FfiTypedResultInvocation,
+    FfiTypedResultPage, FfiTypedResultRecord,
 };
 use crate::loader::HostedRuntime;
 

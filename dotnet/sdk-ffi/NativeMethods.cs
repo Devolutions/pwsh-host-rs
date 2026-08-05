@@ -33,6 +33,31 @@ internal unsafe struct NativeDataValue
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal unsafe struct NativeCredentialResult
+{
+    internal uint Size;
+    internal uint IsCancelled;
+    internal byte* Username;
+    internal int UsernameCapacity;
+    internal int UsernameLength;
+    internal byte* Domain;
+    internal int DomainCapacity;
+    internal int DomainLength;
+    internal char* Password;
+    internal int PasswordCapacity;
+    internal int PasswordLength;
+    internal byte* OutputMessages;
+    internal int OutputMessagesCapacity;
+    internal int OutputMessagesLength;
+    internal byte* ErrorMessages;
+    internal int ErrorMessagesCapacity;
+    internal int ErrorMessagesLength;
+    internal byte* LogMessage;
+    internal int LogMessageCapacity;
+    internal int LogMessageLength;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal struct NativeBrokerChannelOptions
 {
     internal uint Size;
@@ -351,6 +376,13 @@ internal static unsafe partial class NativeMethods
         char* secretBuffer,
         nuint secretCapacity,
         nuint* secretLength,
+        NativeCallResult* result);
+
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_invoke_credential_result")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int InvokeCredentialResult(
+        ulong handle,
+        NativeCredentialResult* credentialResult,
         NativeCallResult* result);
 
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_add_parameter_switch")]

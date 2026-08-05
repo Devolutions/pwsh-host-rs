@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use pwsh_host::FfiLiveStreamRecord;
 use pwsh_host::{
-    find_pwsh_dir, FfiBindingError, FfiBridgeContext, FfiInvocationResult, FfiLiveInvocation,
+    find_pwsh_dir, FfiBindingError, FfiBridgeContext, FfiCredentialResult, FfiInvocationResult, FfiLiveInvocation,
     FfiLiveObjectContractDescriptor, FfiLiveStreamBatch, FfiObservedDiagnosticPage, FfiObservedInvocation,
     FfiPowerShell, FfiPowerShellSession, FfiSessionEvent, FfiSessionSnapshot, FfiSnapshotValue,
     FfiTypedResultInvocation, FfiTypedResultPage, FfiTypedResultRecord, HostedRuntime, LiveObjectContractPack,
@@ -55,10 +55,16 @@ const FEATURE_BROKER_TERMINAL_OBSERVATION: u64 = 1 << 27;
 const FEATURE_RELIABLE_BRIDGE_EVENTS: u64 = 1 << 28;
 const FEATURE_OBSERVED_PRESENTATION: u64 = 1 << 29;
 const FEATURE_SECRET_ADAPTERS: u64 = 1 << 30;
+const FEATURE_CREDENTIAL_RESULT: u64 = 1 << 31;
 const SECRET_VALUE_KIND_UTF16: u32 = 15;
 const SECRET_VALUE_KIND_CREDENTIAL: u32 = 16;
 const MAX_SECRET_UTF16_CODE_UNITS: usize = 4_096;
 const MAX_SECRET_USER_NAME_UTF8_BYTES: usize = 1_024;
+const MAX_CREDENTIAL_TEXT_UTF8_BYTES: usize = 4 * 1024;
+const MAX_CREDENTIAL_MESSAGE_COUNT: usize = 16;
+const MAX_CREDENTIAL_MESSAGE_UTF8_BYTES: usize = 4 * 1024;
+const MAX_CREDENTIAL_MESSAGE_BUFFER_BYTES: usize = std::mem::size_of::<u32>()
+    + MAX_CREDENTIAL_MESSAGE_COUNT * (std::mem::size_of::<u32>() + MAX_CREDENTIAL_MESSAGE_UTF8_BYTES);
 const CALL_RESULT_DIAGNOSTIC_TRUNCATED: u32 = 1;
 #[cfg(test)]
 const RESULT_RECORD_SCALAR_VALUE_PRESENT: u32 = 1 << 1;
@@ -6300,6 +6306,7 @@ fn feature_flags() -> u64 {
         | FEATURE_RELIABLE_BRIDGE_EVENTS
         | FEATURE_OBSERVED_PRESENTATION
         | FEATURE_SECRET_ADAPTERS
+        | FEATURE_CREDENTIAL_RESULT
 }
 
 fn create_live_object_probe(initial_count: i64) -> Result<*mut std::ffi::c_void, (Status, String)> {
@@ -6904,6 +6911,58 @@ pub unsafe extern "C" fn multi_pwsh_invoke_secret_result(
             *user_name_length = returned_user_name_length;
             *secret_length = returned_secret_length;
             Ok(Status::Success)
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_invoke_credential_result(
+    handle: u64,
+    credential_result: *mut FfiCredentialResult,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        if credential_result.is_null() {
+            return Err((Status::InvalidArgument, "credential result output is null".to_owned()));
+        }
+
+        let credential_result = &mut *credential_result;
+        if credential_result.size < std::mem::size_of::<FfiCredentialResult>() as u32
+            || credential_result.username_capacity < 0
+            || credential_result.username_capacity as usize > MAX_CREDENTIAL_TEXT_UTF8_BYTES
+            || credential_result.domain_capacity < 0
+            || credential_result.domain_capacity as usize > MAX_CREDENTIAL_TEXT_UTF8_BYTES
+            || credential_result.password_capacity < 0
+            || credential_result.password_capacity as usize > MAX_SECRET_UTF16_CODE_UNITS
+            || credential_result.output_messages_capacity < 0
+            || credential_result.output_messages_capacity as usize > MAX_CREDENTIAL_MESSAGE_BUFFER_BYTES
+            || credential_result.error_messages_capacity < 0
+            || credential_result.error_messages_capacity as usize > MAX_CREDENTIAL_MESSAGE_BUFFER_BYTES
+            || credential_result.log_message_capacity < 0
+            || credential_result.log_message_capacity as usize > MAX_CREDENTIAL_TEXT_UTF8_BYTES
+            || (credential_result.username_capacity != 0 && credential_result.username.is_null())
+            || (credential_result.domain_capacity != 0 && credential_result.domain.is_null())
+            || (credential_result.password_capacity != 0 && credential_result.password.is_null())
+            || (credential_result.output_messages_capacity != 0 && credential_result.output_messages.is_null())
+            || (credential_result.error_messages_capacity != 0 && credential_result.error_messages.is_null())
+            || (credential_result.log_message_capacity != 0 && credential_result.log_message.is_null())
+        {
+            return Err((
+                Status::InvalidArgument,
+                "credential result output is invalid".to_owned(),
+            ));
+        }
+
+        with_session_result(handle, true, |session| {
+            session
+                .invoke_credential_result(credential_result)
+                .map(|_| Status::Success)
+                .map_err(|_| {
+                    (
+                        Status::ManagedFailure,
+                        "credential result PowerShell operation failed".to_owned(),
+                    )
+                })
         })
     })
 }
@@ -10312,7 +10371,8 @@ mod tests {
             | FEATURE_BROKER_TERMINAL_OBSERVATION
             | FEATURE_RELIABLE_BRIDGE_EVENTS
             | FEATURE_OBSERVED_PRESENTATION
-            | FEATURE_SECRET_ADAPTERS;
+            | FEATURE_SECRET_ADAPTERS
+            | FEATURE_CREDENTIAL_RESULT;
 
         assert_eq!(ABI_VERSION, 2);
         assert_eq!(MINIMUM_COMPATIBLE_ABI_VERSION, 2);

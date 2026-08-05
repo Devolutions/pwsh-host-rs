@@ -112,9 +112,9 @@ static void ValidateAbiCompatibility(Assembly facadeAssembly, BindingFlags stati
         throw new InvalidOperationException("The facade must retain an ABI validation overload that accepts NativeAbiInfo.");
     }
 
-    const ulong allRequiredFeatures = 0x1FFFDFF;
+    const ulong allRequiredFeatures = 0xC1FFFDFF;
     ensureSupportedAbi.Invoke(null, [CreateAbiInfo(abiInfoType, allRequiredFeatures, abiVersion: 2, minimumCompatibleAbiVersion: 2)]);
-    for (int bit = 0; bit <= 24; bit++)
+    foreach (int bit in Enumerable.Range(0, 25).Concat([30, 31]))
     {
         if ((allRequiredFeatures & (1UL << bit)) == 0)
         {

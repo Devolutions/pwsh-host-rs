@@ -3476,6 +3476,122 @@ static void VerifySecretBindings(PowerShellRuntime runtime)
             result.Credential?.UserName == "fixture-user",
             "The contract-pack PSCredential result binding failed.");
     }
+
+    using (PowerShell pipeline = session.CreatePowerShell())
+    using (PowerShellCredentialResult result = pipeline
+        .AddScript(
+            "`$Result.Username = 'fixture-user'; " +
+            "`$Result.Domain = 'fixture-domain'; " +
+            "`$Result.Password = 'plain-fixture'; " +
+            "`$Result.OutputMessages = @('output-one', 'output-two'); " +
+            "`$Result.ErrorMessages = @('error-one'); " +
+            "`$Result.LogMessage = 'fixture-log'")
+        .InvokeCredentialResult())
+    {
+        Require(
+            result.Username == "fixture-user" &&
+            result.Domain == "fixture-domain" &&
+            result.OutputMessages.SequenceEqual(["output-one", "output-two"]) &&
+            result.ErrorMessages.SequenceEqual(["error-one"]) &&
+            result.LogMessage == "fixture-log" &&
+            !result.IsCancelled &&
+            result.Password is not null,
+            "The bounded plaintext credential result projection failed.");
+        Require(
+            !result.ToString().Contains("plain-fixture", StringComparison.Ordinal) &&
+            !result.Password.ToString().Contains("plain-fixture", StringComparison.Ordinal),
+            "The plaintext credential result leaked through diagnostics.");
+
+        char[] password = new char[result.Password.Length];
+        try
+        {
+            result.Password.CopyTo(password);
+            Require(
+                password.AsSpan().SequenceEqual("plain-fixture".AsSpan()),
+                "PowerShellSecret.CopyTo did not transfer the credential result.");
+
+            using var securePassword = result.Password.ToSecureString();
+            Require(
+                securePassword.IsReadOnly() &&
+                securePassword.Length == password.Length,
+                "PowerShellSecret.ToSecureString did not return an independent read-only copy.");
+        }
+        finally
+        {
+            Array.Clear(password);
+        }
+    }
+
+    using (PowerShell pipeline = session.CreatePowerShell())
+    using (PowerShellCredentialResult result = pipeline
+        .AddScript(
+            "`$Result.Username = 'secure-user'; " +
+            "`$Result.SecurePassword = ConvertTo-SecureString 'secure-fixture' -AsPlainText -Force")
+        .InvokeCredentialResult())
+    {
+        Require(
+            result.Username == "secure-user" &&
+            result.Password is not null &&
+            result.Password.Length == "secure-fixture".Length,
+            "CreateDefault2 did not expose the controlled ConvertTo-SecureString credential result path.");
+
+        char[] password = new char[result.Password.Length];
+        try
+        {
+            result.Password.CopyTo(password);
+            Require(
+                password.AsSpan().SequenceEqual("secure-fixture".AsSpan()),
+                "The SecureString credential result did not preserve its contents.");
+        }
+        finally
+        {
+            Array.Clear(password);
+        }
+    }
+
+    using (PowerShell pipeline = session.CreatePowerShell())
+    using (PowerShellCredentialResult result = pipeline
+        .AddScript("`$Result.Cancel = `$true; `$Result.Password = 'discarded-fixture'")
+        .InvokeCredentialResult())
+    {
+        Require(
+            result.IsCancelled && result.Password is null,
+            "A cancelled credential result retained password material.");
+    }
+
+    using (PowerShell pipeline = session.CreatePowerShell())
+    {
+        try
+        {
+            pipeline
+                .AddScript("`$Result.Username = 'fixture-user'; 'ordinary-output'")
+                .InvokeCredentialResult();
+            throw new InvalidOperationException("Credential result invocation accepted ordinary pipeline output.");
+        }
+        catch (PowerShellFfiException exception)
+        {
+            Require(
+                !exception.Message.Contains("ordinary-output", StringComparison.Ordinal),
+                "Rejected credential-result output leaked through diagnostics.");
+        }
+    }
+
+    using (PowerShell pipeline = session.CreatePowerShell())
+    {
+        try
+        {
+            pipeline
+                .AddScript("`$Result.Password = 7")
+                .InvokeCredentialResult();
+            throw new InvalidOperationException("Credential result invocation accepted an unsafe password value.");
+        }
+        catch (PowerShellFfiException exception)
+        {
+            Require(
+                !exception.Message.Contains("Password", StringComparison.Ordinal),
+                "Rejected credential-result values leaked sink details through diagnostics.");
+        }
+    }
 }
 
 if (args.Length != 1)

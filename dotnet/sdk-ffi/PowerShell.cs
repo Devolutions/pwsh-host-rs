@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -35,6 +36,7 @@ public sealed unsafe class PowerShell : IDisposable
     private const ulong ReliableBridgeEventsFeature = 1UL << 28;
     private const ulong ObservedPresentationFeature = 1UL << 29;
     private const ulong SecretAdaptersFeature = 1UL << 30;
+    private const ulong CredentialResultFeature = 1UL << 31;
     private const ulong LiveObjectProbeFeature = 1UL << 17;
     private const ulong LiveSessionObjectProbeFeature = 1UL << 18;
     private const ulong LiveObjectContractsFeature = 1UL << 19;
@@ -51,7 +53,8 @@ public sealed unsafe class PowerShell : IDisposable
         SessionConfigurationFeature | SessionVariablesFeature | CapabilityRpcFeature |
         LiveObjectProbeFeature | LiveSessionObjectProbeFeature | LiveObjectContractsFeature |
         LiveStreamPollingFeature | TypedResultPagingFeature | ObservedInvocationFeature |
-        SessionPreflightFeature | RuntimeDiagnosticsFeature;
+        SessionPreflightFeature | RuntimeDiagnosticsFeature | SecretAdaptersFeature |
+        CredentialResultFeature;
     private const uint ResultTerminatingFailure = 1;
     private const uint ResultSequenceTruncated = 1 << 1;
     private const uint StreamTruncated = 1;
@@ -68,6 +71,12 @@ public sealed unsafe class PowerShell : IDisposable
     private const nuint MaxResultFieldUtf8Bytes = 16 * 1024;
     private const nuint MaxResultValueBytes = 16 * 1024;
     private const nuint MaxPayloadPathUtf8Bytes = 32 * 1024;
+    private const int MaxCredentialTextUtf8Bytes = 4 * 1024;
+    private const int MaxCredentialMessages = 16;
+    private const int MaxCredentialMessageBytes = 4 * 1024;
+    private const int MaxCredentialMessageBufferBytes =
+        sizeof(uint) + (MaxCredentialMessages * (sizeof(uint) + MaxCredentialMessageBytes));
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     private readonly PowerShellHandle handle;
 
@@ -728,6 +737,194 @@ public sealed unsafe class PowerShell : IDisposable
         }
     }
 
+    /// <summary>
+    /// Invokes a credential resolver pipeline. The script must assign the
+    /// supported values to <c>$Result</c> and must not emit pipeline output.
+    /// </summary>
+    public PowerShellCredentialResult InvokeCredentialResult()
+    {
+        EnsureCredentialResultSupported();
+        byte[] username = new byte[MaxCredentialTextUtf8Bytes];
+        byte[] domain = new byte[MaxCredentialTextUtf8Bytes];
+        byte[] outputMessages = new byte[MaxCredentialMessageBufferBytes];
+        byte[] errorMessages = new byte[MaxCredentialMessageBufferBytes];
+        byte[] logMessage = new byte[MaxCredentialTextUtf8Bytes];
+        char[] password = new char[PowerShellSecret.MaximumLength];
+        try
+        {
+            using PowerShellHandle.HandleLease lease = handle.Borrow();
+            byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+            NativeCallResult callResult = NativeCall.CreateResult(diagnostic);
+            fixed (byte* usernamePointer = username)
+            fixed (byte* domainPointer = domain)
+            fixed (byte* outputMessagesPointer = outputMessages)
+            fixed (byte* errorMessagesPointer = errorMessages)
+            fixed (byte* logMessagePointer = logMessage)
+            fixed (char* passwordPointer = password)
+            {
+                var nativeResult = new NativeCredentialResult
+                {
+                    Size = checked((uint)sizeof(NativeCredentialResult)),
+                    Username = usernamePointer,
+                    UsernameCapacity = username.Length,
+                    Domain = domainPointer,
+                    DomainCapacity = domain.Length,
+                    Password = passwordPointer,
+                    PasswordCapacity = password.Length,
+                    OutputMessages = outputMessagesPointer,
+                    OutputMessagesCapacity = outputMessages.Length,
+                    ErrorMessages = errorMessagesPointer,
+                    ErrorMessagesCapacity = errorMessages.Length,
+                    LogMessage = logMessagePointer,
+                    LogMessageCapacity = logMessage.Length,
+                };
+                int status = NativeMethods.InvokeCredentialResult(lease.Value, &nativeResult, &callResult);
+                NativeCall.ThrowIfFailed(status, callResult, diagnostic);
+
+                if (nativeResult.IsCancelled > 1 ||
+                    nativeResult.UsernameLength is < 0 or > MaxCredentialTextUtf8Bytes ||
+                    nativeResult.DomainLength is < 0 or > MaxCredentialTextUtf8Bytes ||
+                    nativeResult.LogMessageLength is < 0 or > MaxCredentialTextUtf8Bytes ||
+                    nativeResult.PasswordLength is < 0 or > PowerShellSecret.MaximumLength ||
+                    nativeResult.OutputMessagesLength is < 0 or > MaxCredentialMessageBufferBytes ||
+                    nativeResult.ErrorMessagesLength is < 0 or > MaxCredentialMessageBufferBytes)
+                {
+                    throw new PowerShellFfiException(
+                        PowerShellFfiStatus.ManagedFailure,
+                        "Native PowerShell FFI returned an invalid credential result.");
+                }
+
+                PowerShellSecret? secret = null;
+                if (nativeResult.PasswordLength != 0)
+                {
+                    if (nativeResult.IsCancelled != 0)
+                    {
+                        throw new PowerShellFfiException(
+                            PowerShellFfiStatus.ManagedFailure,
+                            "Native PowerShell FFI returned a password for a cancelled credential result.");
+                    }
+
+                    char[] ownedSecret = password[..nativeResult.PasswordLength];
+                    CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(password.AsSpan()));
+                    password = Array.Empty<char>();
+                    secret = PowerShellSecret.TakeOwnership(ownedSecret);
+                }
+
+                try
+                {
+                    return new PowerShellCredentialResult(
+                        DecodeCredentialText(username.AsSpan(0, nativeResult.UsernameLength)),
+                        DecodeCredentialText(domain.AsSpan(0, nativeResult.DomainLength)),
+                        secret,
+                        DecodeCredentialMessages(outputMessages, nativeResult.OutputMessagesLength),
+                        DecodeCredentialMessages(errorMessages, nativeResult.ErrorMessagesLength),
+                        DecodeCredentialText(logMessage.AsSpan(0, nativeResult.LogMessageLength)),
+                        nativeResult.IsCancelled != 0);
+                }
+                catch
+                {
+                    secret?.Dispose();
+                    throw;
+                }
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(username);
+            CryptographicOperations.ZeroMemory(domain);
+            CryptographicOperations.ZeroMemory(outputMessages);
+            CryptographicOperations.ZeroMemory(errorMessages);
+            CryptographicOperations.ZeroMemory(logMessage);
+            CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(password.AsSpan()));
+        }
+    }
+
+    private static string? DecodeCredentialText(ReadOnlySpan<byte> buffer)
+    {
+        if (buffer.IsEmpty)
+        {
+            return null;
+        }
+
+        string value;
+        try
+        {
+            value = StrictUtf8.GetString(buffer);
+        }
+        catch (DecoderFallbackException)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned invalid credential text.");
+        }
+
+        if (value.IndexOf('\0') >= 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned invalid credential text.");
+        }
+
+        return value;
+    }
+
+    private static IReadOnlyList<string> DecodeCredentialMessages(byte[] buffer, int length)
+    {
+        if (length < sizeof(uint))
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned invalid credential messages.");
+        }
+
+        ReadOnlySpan<byte> source = buffer.AsSpan(0, length);
+        int offset = 0;
+        uint count = BinaryPrimitives.ReadUInt32LittleEndian(source);
+        offset += sizeof(uint);
+        if (count > MaxCredentialMessages)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned an unbounded credential message count.");
+        }
+
+        var messages = new string[checked((int)count)];
+        for (int index = 0; index < messages.Length; index++)
+        {
+            if (source.Length - offset < sizeof(uint))
+            {
+                throw new PowerShellFfiException(
+                    PowerShellFfiStatus.ManagedFailure,
+                    "Native PowerShell FFI returned invalid credential messages.");
+            }
+
+            uint messageLength = BinaryPrimitives.ReadUInt32LittleEndian(source[offset..]);
+            offset += sizeof(uint);
+            if (messageLength is 0 or > MaxCredentialMessageBytes ||
+                messageLength > source.Length - offset)
+            {
+                throw new PowerShellFfiException(
+                    PowerShellFfiStatus.ManagedFailure,
+                    "Native PowerShell FFI returned invalid credential messages.");
+            }
+
+            string? message = DecodeCredentialText(source.Slice(offset, checked((int)messageLength)));
+            messages[index] = message ?? throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned invalid credential messages.");
+            offset += checked((int)messageLength);
+        }
+
+        if (offset != source.Length)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.ManagedFailure,
+                "Native PowerShell FFI returned invalid credential messages.");
+        }
+
+        return Array.AsReadOnly(messages);
+    }
+
     public PowerShellInvocationResult InvokeWithDiagnostics()
     {
         using PowerShellHandle.HandleLease lease = handle.Borrow();
@@ -982,6 +1179,17 @@ public sealed unsafe class PowerShell : IDisposable
         }
     }
 
+    private static void EnsureCredentialResultSupported()
+    {
+        EnsureSecretAdaptersSupported();
+        if ((FeatureFlags & CredentialResultFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell payload does not support bounded credential results.");
+        }
+    }
+
     internal static void EnsureTypedResultPagingSupported(NativeAbiInfo info)
     {
         EnsureSupportedAbi(info);
@@ -1035,7 +1243,7 @@ public sealed unsafe class PowerShell : IDisposable
             (info.FeatureFlags & RequiredFeatures) != RequiredFeatures)
         {
             throw new NotSupportedException(
-                $"Native PowerShell FFI ABI {info.AbiVersion} does not support facade ABI {RequiredAbiVersion} structured errors, diagnostics, UTF-8, value, command, input, result, async operation, and session features.");
+                $"Native PowerShell FFI ABI {info.AbiVersion} does not support facade ABI {RequiredAbiVersion} structured errors, diagnostics, UTF-8, value, command, input, result, async operation, session, and credential-result features.");
         }
     }
 
