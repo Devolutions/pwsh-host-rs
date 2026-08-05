@@ -1811,6 +1811,39 @@ using (PowerShellCredential credential = new("fixture-user", secret))
            "The explicit no-output secret invocation contract failed.");
    }
 
+   using (PowerShell sessionSecureStringResultPipeline = secretSession.CreatePowerShell())
+   {
+       using PowerShellSecretResult sessionSecureStringResult = sessionSecureStringResultPipeline
+           .AddScript(
+               "param([System.Security.SecureString]`$Secret) " +
+               "`$Secret")
+           .AddParameter("Secret", secret)
+           .InvokeSecretResult(PowerShellSecretResultKind.SecureString);
+       Require(
+           sessionSecureStringResult.Kind == PowerShellSecretResultKind.SecureString &&
+           sessionSecureStringResult.Secret is not null &&
+           !sessionSecureStringResult.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
+           !sessionSecureStringResult.Secret.ToString().Contains(secretMarker, StringComparison.Ordinal),
+           "The persistent-session SecureString secret result contract failed.");
+   }
+
+   using (PowerShell sessionCredentialResultPipeline = secretSession.CreatePowerShell())
+   {
+       using PowerShellSecretResult sessionCredentialResult = sessionCredentialResultPipeline
+           .AddScript(
+               "param([System.Security.SecureString]`$Secret) " +
+               "[System.Management.Automation.PSCredential]::new('native-aot-user', `$Secret)")
+           .AddParameter("Secret", secret)
+           .InvokeSecretResult(PowerShellSecretResultKind.Credential);
+       Require(
+           sessionCredentialResult.Kind == PowerShellSecretResultKind.Credential &&
+           sessionCredentialResult.Credential is not null &&
+           sessionCredentialResult.Credential.UserName == "native-aot-user" &&
+           !sessionCredentialResult.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
+           !sessionCredentialResult.Credential.ToString().Contains(secretMarker, StringComparison.Ordinal),
+           "The persistent-session PSCredential secret result contract failed.");
+   }
+
    using (PowerShell secretPipeline = runtime.Create())
    {
        using PowerShellSecretResult secretResult = secretPipeline
