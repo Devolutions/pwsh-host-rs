@@ -1761,11 +1761,10 @@ VerifyCompleteResultProjection(runtime);
 await VerifyRecipesSchemasAndPoliciesAsync(runtime);
 await VerifyTypedResultPagingAsync(runtime);
 await VerifyObservedInvocationAsync(runtime);
-const string SecretMarker = "ffi-secret-marker-not-accepted";
 Require(
    PowerShellSecretTransfer.Policy == PowerShellSecretTransferPolicy.Rejected &&
    typeof(PowerShellSecretTransfer).GetMethod(nameof(PowerShellSecretTransfer.ThrowNotSupported), BindingFlags.Public | BindingFlags.Static)!.GetParameters().Length == 0,
-   "The secret-transfer rejection boundary unexpectedly accepts input.");
+   "The explicit secret-transfer boundary is unavailable.");
 try
 {
    PowerShellSecretTransfer.ThrowNotSupported();
@@ -1774,28 +1773,200 @@ try
 catch (PowerShellSecretTransferNotSupportedException exception)
 {
    Require(
-       !exception.Message.Contains(SecretMarker, StringComparison.Ordinal),
-       "Secret-transfer rejection leaked a caller marker into diagnostics.");
+       !exception.Message.Contains("fixture", StringComparison.OrdinalIgnoreCase),
+       "The legacy secret-transfer exception leaked a caller marker into diagnostics.");
 }
+
+char[] secretCharacters =
+[
+   (char)102, (char)105, (char)120, (char)116, (char)117, (char)114, (char)101,
+   (char)45, (char)115, (char)101, (char)99, (char)114, (char)101, (char)116,
+];
+string secretMarker = new(secretCharacters);
+using (PowerShellSecret secret = PowerShellSecret.Create(secretCharacters))
+using (PowerShellCredential credential = new("fixture-user", secret))
+{
+   Require(
+       !secret.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
+       !credential.ToString().Contains(secretMarker, StringComparison.Ordinal),
+       "Secret lease diagnostics exposed the fixture secret.");
+
+   using (PowerShellSession secretSession = runtime.CreateSession(
+       new PowerShellSessionOptions(
+           historyMode: PowerShellSessionHistoryMode.Disabled,
+           errorPreference: PowerShellSessionPreference.Stop,
+           warningPreference: PowerShellSessionPreference.Continue)))
+   {
+   using (PowerShell discardedSecretOutputPipeline = secretSession.CreatePowerShell())
+   {
+       using PowerShellSecretResult discardedSecretOutput = discardedSecretOutputPipeline
+           .AddScript(
+               "param([System.Security.SecureString]`$Secret) " +
+               "`$Secret")
+           .AddParameter("Secret", secret)
+           .InvokeWithSecretBindings();
+       Require(
+           discardedSecretOutput.Kind == PowerShellSecretResultKind.None &&
+           discardedSecretOutput.Secret is null &&
+           discardedSecretOutput.Credential is null,
+           "The explicit no-output secret invocation contract failed.");
+   }
+
+   using (PowerShell sessionSecureStringResultPipeline = secretSession.CreatePowerShell())
+   {
+       PowerShellSessionSnapshot beforeSecretResult = secretSession.GetSnapshot();
+       using PowerShellSecretResult sessionSecureStringResult = sessionSecureStringResultPipeline
+           .AddScript(
+               "param([System.Security.SecureString]`$Secret) " +
+               "if (`$ErrorActionPreference -ne [System.Management.Automation.ActionPreference]::Stop) " +
+               "{ throw 'secret invocation settings were not applied' }; " +
+               "`$Secret")
+           .AddParameter("Secret", secret)
+           .InvokeSecretResult(PowerShellSecretResultKind.SecureString);
+       PowerShellSessionSnapshot afterSecretResult = secretSession.GetSnapshot();
+       Require(
+           sessionSecureStringResult.Kind == PowerShellSecretResultKind.SecureString &&
+           sessionSecureStringResult.Secret is not null &&
+           !sessionSecureStringResult.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
+           !sessionSecureStringResult.Secret.ToString().Contains(secretMarker, StringComparison.Ordinal),
+           "The persistent-session SecureString secret result contract failed.");
+       Require(
+           afterSecretResult.InvocationCount == beforeSecretResult.InvocationCount + 1 &&
+           afterSecretResult.ActivePipelineCount == 0,
+           "The persistent-session SecureString secret result bypassed session lifecycle accounting.");
+   }
+
+   using (PowerShell sessionCredentialResultPipeline = secretSession.CreatePowerShell())
+   {
+       using PowerShellSecretResult sessionCredentialResult = sessionCredentialResultPipeline
+           .AddScript(
+               "param([System.Security.SecureString]`$Secret) " +
+               "[System.Management.Automation.PSCredential]::new('native-aot-user', `$Secret)")
+           .AddParameter("Secret", secret)
+           .InvokeSecretResult(PowerShellSecretResultKind.Credential);
+       Require(
+           sessionCredentialResult.Kind == PowerShellSecretResultKind.Credential &&
+           sessionCredentialResult.Credential is not null &&
+           sessionCredentialResult.Credential.UserName == "native-aot-user" &&
+           !sessionCredentialResult.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
+           !sessionCredentialResult.Credential.ToString().Contains(secretMarker, StringComparison.Ordinal),
+           "The persistent-session PSCredential secret result contract failed.");
+   }
+
+   using (PowerShell sessionMultipleSecretResultsPipeline = secretSession.CreatePowerShell())
+   {
+       PowerShellSessionSnapshot beforeMultipleResults = secretSession.GetSnapshot();
+       try
+       {
+           sessionMultipleSecretResultsPipeline
+               .AddScript(
+                   "param([System.Security.SecureString]`$Secret) " +
+                   "`$Secret; `$Secret")
+               .AddParameter("Secret", secret)
+               .InvokeSecretResult(PowerShellSecretResultKind.SecureString);
+           return 1;
+       }
+       catch (PowerShellFfiException exception)
+       {
+           Require(
+               !exception.Message.Contains(secretMarker, StringComparison.Ordinal),
+               "The rejected multi-result secret invocation leaked the fixture secret.");
+       }
+
+       PowerShellSessionSnapshot afterMultipleResults = secretSession.GetSnapshot();
+       Require(
+           afterMultipleResults.InvocationCount == beforeMultipleResults.InvocationCount + 1 &&
+           afterMultipleResults.ActivePipelineCount == 0,
+           "The rejected multi-result secret invocation left the session active.");
+   }
+   }
+
+   using (PowerShell secretPipeline = runtime.Create())
+   {
+       using PowerShellSecretResult secretResult = secretPipeline
+           .AddScript("param([PSCredential]`$Credential) `$Credential.Password")
+           .AddParameter("Credential", credential)
+           .InvokeSecretResult(PowerShellSecretResultKind.SecureString);
+       Require(
+           secretResult.Kind == PowerShellSecretResultKind.SecureString &&
+           secretResult.Secret is not null &&
+           !secretResult.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
+           !secretResult.Secret.ToString().Contains(secretMarker, StringComparison.Ordinal),
+           "The explicit credential input or redacted SecureString output contract failed.");
+   }
+
+   using (PowerShell credentialResultPipeline = runtime.Create())
+   {
+       using PowerShellSecretResult credentialResult = credentialResultPipeline
+           .AddScript(
+               "param([System.Security.SecureString]`$Secret) " +
+               "[System.Management.Automation.PSCredential]::new('native-aot-user', `$Secret)")
+           .AddParameter("Secret", secret)
+           .InvokeSecretResult(PowerShellSecretResultKind.Credential);
+       Require(
+           credentialResult.Kind == PowerShellSecretResultKind.Credential &&
+           credentialResult.Credential is not null &&
+           credentialResult.Credential.UserName == "native-aot-user" &&
+           !credentialResult.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
+           !credentialResult.Credential.ToString().Contains(secretMarker, StringComparison.Ordinal),
+           "The explicit SecureString input or redacted PSCredential output contract failed.");
+   }
+
+   using (PowerShell normalResultPipeline = runtime.Create())
+   {
+       try
+       {
+           normalResultPipeline
+               .AddScript("param([PSCredential]`$Credential) 'normal-output'")
+               .AddParameter("Credential", credential)
+               .InvokeWithDiagnostics();
+           return 1;
+       }
+       catch (PowerShellFfiException exception)
+       {
+           Require(
+               !exception.Message.Contains(secretMarker, StringComparison.Ordinal),
+               "Secret-bound normal invocation leaked the fixture secret.");
+       }
+   }
+
+   try
+   {
+       _ = PowerShellValue.From(secret);
+       return 1;
+   }
+   catch (PowerShellValueConversionException)
+   {
+   }
+}
+Array.Clear(secretCharacters);
 using (var secureString = new SecureString())
 {
-    foreach (char character in SecretMarker)
-    {
-       secureString.AppendChar(character);
-    }
-    secureString.MakeReadOnly();
-    try
-    {
+   secureString.AppendChar((char)120);
+   secureString.MakeReadOnly();
+   try
+   {
        _ = PowerShellValue.From(secureString);
        return 1;
-    }
-    catch (PowerShellValueConversionException)
-    {
-    }
+   }
+   catch (PowerShellValueConversionException)
+   {
+   }
+}
+using (PowerShellSecret credentialUserNameSecret = PowerShellSecret.Create("credential-user-name-secret"))
+{
+   try
+   {
+       _ = new PowerShellCredential(new string('u', 257), credentialUserNameSecret);
+       return 1;
+   }
+   catch (ArgumentException)
+   {
+   }
 }
 try
 {
-    _ = PowerShellValue.From((Action)(() => { }));
+   _ = PowerShellValue.From((Action)(() => { }));
     return 1;
 }
 catch (PowerShellValueConversionException)
@@ -1848,8 +2019,8 @@ using (PowerShell projectionBuilder = PowerShell.Create())
 
     byte[] stored = PowerShellSnapshotSerializer.Serialize(projectionResult);
     Require(
-        !Encoding.UTF8.GetString(stored).Contains(SecretMarker, StringComparison.Ordinal),
-        "Snapshot serialization leaked a rejected secret marker.");
+        !Encoding.UTF8.GetString(stored).Contains(secretMarker, StringComparison.Ordinal),
+        "Snapshot serialization leaked the explicit secret fixture.");
     PowerShellInvocationResult restored = PowerShellSnapshotSerializer.Deserialize(stored);
     PowerShellValue? restoredBag = restored.Output.Records[0].PropertyBag;
     Require(
@@ -1925,6 +2096,17 @@ using (PowerShell nulBuilder = PowerShell.Create())
     catch (ArgumentException)
     {
     }
+}
+
+try
+{
+    _ = PowerShellSessionConfiguration.CreateWithModuleImports(
+        [new PowerShellModuleImport("SimpleModuleImportOverflow")],
+        moduleImports: Enumerable.Range(0, 32).Select(static index => $"SimpleModule{index}"));
+    return 1;
+}
+catch (ArgumentException)
+{
 }
 
 try
@@ -2125,6 +2307,38 @@ try
         contained.ModuleImports.Single().Status == PowerShellSessionModuleImportStatus.Resolved,
         "Session preflight rejected a manifest whose module references are contained or name-based.");
 
+    string declaredModuleName = "DeclaredModuleImport";
+    string declaredModuleDirectory = Path.Combine(preflightRoot, declaredModuleName);
+    Directory.CreateDirectory(declaredModuleDirectory);
+    File.WriteAllText(
+        Path.Combine(declaredModuleDirectory, $"{declaredModuleName}.psd1"),
+        $"@{{ RootModule = '{declaredModuleName}.psm1'; ModuleVersion = '1.0'; FunctionsToExport = @('Get-DeclaredModuleValue') }}");
+    File.WriteAllText(
+        Path.Combine(declaredModuleDirectory, $"{declaredModuleName}.psm1"),
+        "function Get-DeclaredModuleValue { 'declared-module-value' }");
+    PowerShellSessionConfiguration declaredModuleConfiguration =
+        PowerShellSessionConfiguration.CreateWithModuleImports(
+            new[]
+            {
+                new PowerShellModuleImport(
+                    declaredModuleName,
+                    new Version(1, 0),
+                    PowerShellModuleImportOptions.Force),
+            },
+            allowedModulePaths: new[] { preflightRoot });
+    using (PowerShellSession declaredModuleSession = runtime.CreateSession(
+        new PowerShellSessionOptions(configuration: declaredModuleConfiguration)))
+    using (PowerShell declaredModuleCommand = declaredModuleSession.CreatePowerShell())
+    {
+        PowerShellInvocationResult declaredModuleResult = declaredModuleCommand
+            .AddCommand("Get-DeclaredModuleValue")
+            .InvokeWithDiagnostics();
+        Require(
+            declaredModuleResult.Output.Records.Count == 1 &&
+            declaredModuleResult.Output.Records[0].DisplayText == "declared-module-value",
+            "A declared module import did not remain within its approved module root.");
+    }
+
     PowerShellSessionPreflightReport missingWorkingDirectory = runtime.ValidateSessionConfiguration(
         new PowerShellSessionConfiguration(
             allowedModulePaths: new[] { preflightRoot },
@@ -2189,6 +2403,22 @@ using PowerShellSession session = runtime.CreateSession(
         historyMode: PowerShellSessionHistoryMode.Enabled,
         errorPreference: PowerShellSessionPreference.Stop,
         configuration: sessionConfiguration));
+string? remoteComputer = Environment.GetEnvironmentVariable("PWSH_FFI_REMOTE_COMPUTER");
+if (!string.IsNullOrWhiteSpace(remoteComputer))
+{
+    using PowerShellRemoteSession remoteSession = PowerShellRemoteSession.Create(
+        session,
+        new PowerShellRemoteSessionOptions(remoteComputer));
+    PowerShellRemoteSessionMetadata remoteMetadata = remoteSession.GetMetadata();
+    PowerShellInvocationResult remoteResult = remoteSession.InvokeScript("'remote-package-smoke'");
+    Require(
+        remoteMetadata.Id > 0 &&
+        !string.IsNullOrWhiteSpace(remoteMetadata.State) &&
+        !string.IsNullOrWhiteSpace(remoteMetadata.ComputerName) &&
+        remoteResult.Output.Records.Count == 1 &&
+        remoteResult.Output.Records[0].DisplayText == "remote-package-smoke",
+        "The environment-configured PSSession adapter smoke test failed.");
+}
 using PowerShell sessionPowerShell = session.CreatePowerShell();
 PowerShellInvocationResult sessionResult = sessionPowerShell
     .AddScript("@(`$FfiMarker, `$FfiNumber, `$env:DPS_FFI_TEST, (Get-Location).Path, `$ErrorActionPreference)")
@@ -3181,6 +3411,73 @@ static void Require(bool condition, string message)
     }
 }
 
+static PowerShellSecret CreateFixtureSecret()
+{
+    char[] characters =
+    [
+        (char)102, (char)105, (char)120, (char)116, (char)117, (char)114, (char)101,
+        (char)45, (char)115, (char)101, (char)99, (char)114, (char)101, (char)116,
+    ];
+    try
+    {
+        return PowerShellSecret.Create(characters);
+    }
+    finally
+    {
+        Array.Clear(characters);
+    }
+}
+
+static void VerifySecretBindings(PowerShellRuntime runtime)
+{
+    using PowerShellSession session = runtime.CreateSession(
+        new PowerShellSessionOptions(
+            historyMode: PowerShellSessionHistoryMode.Disabled,
+            errorPreference: PowerShellSessionPreference.Stop,
+            warningPreference: PowerShellSessionPreference.Continue));
+
+    using (PowerShellSecret secret = CreateFixtureSecret())
+    using (PowerShellCredential credential = new("fixture-user", secret))
+    using (PowerShell pipeline = session.CreatePowerShell())
+    using (PowerShellSecretResult result = pipeline
+        .AddScript(
+            "param([System.Management.Automation.PSCredential]`$Credential) " +
+            "if (`$Credential.UserName -ne 'fixture-user' -or " +
+            "`$Credential.GetNetworkCredential().Password.Length -eq 0) { throw 'credential binding failed' }")
+        .AddParameter("Credential", credential)
+        .InvokeWithSecretBindings())
+    {
+        Require(result.Kind == PowerShellSecretResultKind.None,
+            "The contract-pack credential input binding failed.");
+    }
+
+    using (PowerShellSecret secret = CreateFixtureSecret())
+    using (PowerShell pipeline = session.CreatePowerShell())
+    using (PowerShellSecretResult result = pipeline
+        .AddScript("param([System.Security.SecureString]`$Secret) `$Secret")
+        .AddParameter("Secret", secret)
+        .InvokeSecretResult(PowerShellSecretResultKind.SecureString))
+    {
+        Require(result.Kind == PowerShellSecretResultKind.SecureString && result.Secret is not null,
+            "The contract-pack SecureString result binding failed.");
+    }
+
+    using (PowerShellSecret secret = CreateFixtureSecret())
+    using (PowerShell pipeline = session.CreatePowerShell())
+    using (PowerShellSecretResult result = pipeline
+        .AddScript(
+            "param([System.Security.SecureString]`$Secret) " +
+            "[System.Management.Automation.PSCredential]::new('fixture-user', `$Secret)")
+        .AddParameter("Secret", secret)
+        .InvokeSecretResult(PowerShellSecretResultKind.Credential))
+    {
+        Require(
+            result.Kind == PowerShellSecretResultKind.Credential &&
+            result.Credential?.UserName == "fixture-user",
+            "The contract-pack PSCredential result binding failed.");
+    }
+}
+
 if (args.Length != 1)
 {
     throw new ArgumentException("Expected exactly one PowerShell payload directory.");
@@ -3194,6 +3491,7 @@ PowerShellRuntime runtime = PowerShellRuntime.Activate(
     [new PowerShellLiveObjectContractPack(
         packPath,
         "Devolutions.MultiPwsh.BridgeTest.BridgeContractTestPack, FfiPackageBridgePack")]);
+VerifySecretBindings(runtime);
 using PowerShellBridgeChannel channel = runtime.CreateBridgeChannel(
     new PowerShellBrokerChannelOptions(
         maximumInflightFrames: 8,

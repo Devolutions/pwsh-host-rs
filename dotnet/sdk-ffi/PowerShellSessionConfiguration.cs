@@ -19,6 +19,27 @@ public sealed class PowerShellSessionConfiguration
         string? workingDirectory = null,
         IEnumerable<KeyValuePair<string, string>>? environment = null,
         PowerShellSessionExecutionPolicy executionPolicy = PowerShellSessionExecutionPolicy.Default)
+        : this(
+            initialVariables,
+            moduleImports,
+            allowedModulePaths,
+            workingDirectory,
+            environment,
+            executionPolicy,
+            moduleImportSpecifications: null,
+            initialize: true)
+    {
+    }
+
+    private PowerShellSessionConfiguration(
+        IEnumerable<KeyValuePair<string, PowerShellValue>>? initialVariables,
+        IEnumerable<string>? moduleImports,
+        IEnumerable<string>? allowedModulePaths,
+        string? workingDirectory,
+        IEnumerable<KeyValuePair<string, string>>? environment,
+        PowerShellSessionExecutionPolicy executionPolicy,
+        IEnumerable<PowerShellModuleImport>? moduleImportSpecifications,
+        bool initialize)
     {
         if (!Enum.IsDefined(executionPolicy))
         {
@@ -27,16 +48,41 @@ public sealed class PowerShellSessionConfiguration
 
         InitialVariables = CopyValues(initialVariables, nameof(initialVariables), "initial variable");
         ModuleImports = CopyNames(moduleImports, nameof(moduleImports), "module import", IsModuleImportName);
+        ModuleImportSpecifications = CopyModuleImports(moduleImportSpecifications);
         AllowedModulePaths = CopyPaths(allowedModulePaths);
         WorkingDirectory = ValidatePath(workingDirectory, nameof(workingDirectory));
         Environment = CopyEnvironment(environment);
         ExecutionPolicy = executionPolicy;
+        ValidateCombinedSimpleModuleImports();
         ValidateEncodedPayloads();
+    }
+
+    public static PowerShellSessionConfiguration CreateWithModuleImports(
+        IEnumerable<PowerShellModuleImport> moduleImportSpecifications,
+        IEnumerable<KeyValuePair<string, PowerShellValue>>? initialVariables = null,
+        IEnumerable<string>? moduleImports = null,
+        IEnumerable<string>? allowedModulePaths = null,
+        string? workingDirectory = null,
+        IEnumerable<KeyValuePair<string, string>>? environment = null,
+        PowerShellSessionExecutionPolicy executionPolicy = PowerShellSessionExecutionPolicy.Default)
+    {
+        ArgumentNullException.ThrowIfNull(moduleImportSpecifications);
+        return new PowerShellSessionConfiguration(
+            initialVariables,
+            moduleImports,
+            allowedModulePaths,
+            workingDirectory,
+            environment,
+            executionPolicy,
+            moduleImportSpecifications,
+            initialize: true);
     }
 
     public IReadOnlyDictionary<string, PowerShellValue> InitialVariables { get; }
 
     public IReadOnlyList<string> ModuleImports { get; }
+
+    public IReadOnlyList<PowerShellModuleImport> ModuleImportSpecifications { get; }
 
     public IReadOnlyList<string> AllowedModulePaths { get; }
 
@@ -57,7 +103,7 @@ public sealed class PowerShellSessionConfiguration
         PowerShellValue.PropertyBag(InitialVariables);
 
     internal PowerShellValue ModuleImportsValue =>
-        PowerShellValue.Array(ModuleImports.Select(PowerShellValue.String));
+        PowerShellValue.Array(GetCombinedSimpleModuleImports().Select(PowerShellValue.String));
 
     internal PowerShellValue AllowedModulePathsValue =>
         PowerShellValue.Array(AllowedModulePaths.Select(PowerShellValue.String));
@@ -129,6 +175,7 @@ public sealed class PowerShellSessionConfiguration
                 {
                     throw new ArgumentException("Allowed module paths must be unique.", nameof(values));
                 }
+
                 if (copy.Count == MaximumEntries)
                 {
                     throw new ArgumentOutOfRangeException(nameof(values), $"Allowed module paths contain at most {MaximumEntries} entries.");
@@ -139,6 +186,47 @@ public sealed class PowerShellSessionConfiguration
         }
 
         return new ReadOnlyCollection<string>(copy);
+    }
+
+    private static IReadOnlyList<PowerShellModuleImport> CopyModuleImports(
+        IEnumerable<PowerShellModuleImport>? values)
+    {
+        var copy = new List<PowerShellModuleImport>();
+        var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (values is not null)
+        {
+            foreach (PowerShellModuleImport value in values)
+            {
+                ArgumentNullException.ThrowIfNull(value, nameof(values));
+                if (copy.Count == MaximumEntries || !unique.Add(value.NameOrPath))
+                {
+                    throw new ArgumentException(
+                        $"Module import specifications must be unique and contain at most {MaximumEntries} entries.",
+                        nameof(values));
+                }
+
+                copy.Add(value);
+            }
+        }
+
+        return new ReadOnlyCollection<PowerShellModuleImport>(copy);
+    }
+
+    private IReadOnlyList<string> GetCombinedSimpleModuleImports()
+    {
+        return ModuleImports
+            .Concat(ModuleImportSpecifications.Where(static import => import.IsSimpleImport).Select(static import => import.NameOrPath))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private void ValidateCombinedSimpleModuleImports()
+    {
+        if (GetCombinedSimpleModuleImports().Count > MaximumEntries)
+        {
+            throw new ArgumentException(
+                $"The combined simple module imports contain at most {MaximumEntries} entries.");
+        }
     }
 
     private static IReadOnlyDictionary<string, string> CopyEnvironment(

@@ -33,7 +33,7 @@ Typical downstream vendored-SDK usage:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.18.0-bridge-v2.dbc.local.6" PrivateAssets="all" />
+  <PackageReference Include="Devolutions.MultiPwsh.Cli" Version="0.18.0" PrivateAssets="all" />
 </ItemGroup>
 
 <PropertyGroup>

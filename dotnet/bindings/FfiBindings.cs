@@ -10,6 +10,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.Marshalling;
+using System.Security;
 using System.Threading;
 using System.Text;
 using System.Management.Automation;
@@ -72,6 +73,9 @@ namespace NativeHost
         private const ulong FfiFeatureGeneratedBridgeAttachment = 1UL << 26;
         private const ulong FfiFeatureReliableBridgeEvents = 1UL << 28;
         private const ulong FfiFeatureObservedPresentation = 1UL << 29;
+        private const ulong FfiFeatureSecretAdapters = 1UL << 30;
+        private const int FfiMaxSecretLength = 4_096;
+        private const int FfiMaxSecretUserNameLength = 256;
         private const uint FfiTypedResultPageTerminal = 1;
         private const uint FfiTypedResultPageTruncated = 1 << 1;
         private const uint FfiTypedResultPageComplete = 1 << 2;
@@ -208,6 +212,7 @@ namespace NativeHost
             public IntPtr PowerShell_SetBrokerContext;
             public IntPtr PowerShell_SetBridgeContext;
             public IntPtr ObservedDiagnosticPage_CopyRecordValue;
+            public IntPtr PowerShell_InvokeSecretResult;
         }
 
         private const int FfiPreflightMaximumTextLength = 128;
@@ -1140,7 +1145,7 @@ namespace NativeHost
                     FfiFeatureLiveStreamPolling | FfiFeatureTypedResultPaging | FfiFeatureObservedInvocation |
                     FfiFeatureSessionPreflight | FfiFeatureRuntimeDiagnostics | FfiFeatureDuplexBrokerChannel |
                     FfiFeatureGeneratedBridgeAttachment | FfiFeatureReliableBridgeEvents |
-                    FfiFeatureObservedPresentation,
+                    FfiFeatureObservedPresentation | FfiFeatureSecretAdapters,
                 PowerShell_Create = (IntPtr)(delegate* unmanaged<IntPtr*, FfiCallResult*, int>)&FfiPowerShell_Create,
                 PowerShell_Release = (IntPtr)(delegate* unmanaged<IntPtr, FfiCallResult*, int>)&FfiPowerShell_Release,
                 PowerShell_AddArgumentUtf8 = (IntPtr)(delegate* unmanaged<IntPtr, byte*, int, FfiCallResult*, int>)&FfiPowerShell_AddArgumentUtf8,
@@ -1227,6 +1232,7 @@ namespace NativeHost
                 PowerShell_SetBrokerContext = (IntPtr)(delegate* unmanaged<IntPtr, ulong, ulong, IntPtr, IntPtr, uint, FfiCallResult*, int>)&FfiPowerShell_SetBrokerContext,
                 PowerShell_SetBridgeContext = (IntPtr)(delegate* unmanaged<IntPtr, ulong, ulong, ulong, ushort, ushort, uint, uint, byte*, int, FfiCallResult*, int>)&FfiPowerShell_SetBridgeContext,
                 ObservedDiagnosticPage_CopyRecordValue = (IntPtr)(delegate* unmanaged<IntPtr, int, uint*, byte*, int, int*, FfiCallResult*, int>)&FfiObservedDiagnosticPage_CopyRecordValue,
+                PowerShell_InvokeSecretResult = (IntPtr)(delegate* unmanaged<IntPtr, uint, byte*, int, int*, char*, int, int*, FfiCallResult*, int>)&FfiPowerShell_InvokeSecretResult,
             };
         }
 
@@ -2146,6 +2152,11 @@ namespace NativeHost
                 return status;
             }
 
+            if (kind is (uint)FfiValueKind.SecretUtf16 or (uint)FfiValueKind.Credential)
+            {
+                return AddSecretParameter(ptrHandle, nameText, kind, data, dataLength, result);
+            }
+
             status = ReadValue(kind, data, dataLength, result, out object value);
             if (status != FfiStatusSuccess)
             {
@@ -2157,6 +2168,85 @@ namespace NativeHost
                 PowerShell ps = GetPowerShell(ptrHandle);
                 FfiInvocationResults.TryRemove(ptrHandle, out _);
                 ps.AddParameter(nameText, value);
+            });
+        }
+
+        private static unsafe int AddSecretParameter(
+            IntPtr ptrHandle,
+            string name,
+            uint kind,
+            byte* data,
+            int dataLength,
+            FfiCallResult* result)
+        {
+            if (dataLength is < 2 or > (sizeof(int) + FfiMaxSecretUserNameLength * 4 + FfiMaxSecretLength * sizeof(char)) ||
+                data == null)
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Secret adapter payload is invalid.");
+            }
+
+            return ExecuteSecret(result, () =>
+            {
+                ReadOnlySpan<byte> payload = new(data, dataLength);
+                string userName = null;
+                ReadOnlySpan<byte> secretPayload = payload;
+                if (kind == (uint)FfiValueKind.Credential)
+                {
+                    if (payload.Length < sizeof(int))
+                    {
+                        throw new InvalidOperationException("Secret adapter payload is invalid.");
+                    }
+
+                    int userNameLength = BitConverter.ToInt32(payload[..sizeof(int)]);
+                    if (userNameLength is < 1 or > FfiMaxSecretUserNameLength * 4 ||
+                        payload.Length <= sizeof(int) + userNameLength)
+                    {
+                        throw new InvalidOperationException("Secret adapter payload is invalid.");
+                    }
+
+                    userName = Encoding.UTF8.GetString(payload.Slice(sizeof(int), userNameLength));
+                    if (string.IsNullOrWhiteSpace(userName) ||
+                        userName.Length > FfiMaxSecretUserNameLength ||
+                        userName.IndexOf('\0') >= 0)
+                    {
+                        throw new InvalidOperationException("Secret adapter payload is invalid.");
+                    }
+
+                    secretPayload = payload[(sizeof(int) + userNameLength)..];
+                }
+
+                if (secretPayload.Length is < 2 or > FfiMaxSecretLength * sizeof(char) || secretPayload.Length % sizeof(char) != 0)
+                {
+                    throw new InvalidOperationException("Secret adapter payload is invalid.");
+                }
+
+                var secureString = new SecureString();
+                try
+                {
+                    foreach (char character in MemoryMarshal.Cast<byte, char>(secretPayload))
+                    {
+                        if (character == '\0')
+                        {
+                            throw new InvalidOperationException("Secret adapter payload is invalid.");
+                        }
+
+                        secureString.AppendChar(character);
+                    }
+
+                    secureString.MakeReadOnly();
+                    FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                    FfiInvocationResults.TryRemove(ptrHandle, out _);
+                    object boundValue = kind == (uint)FfiValueKind.Credential
+                        ? pipeline.CreatePayloadCredential(userName, secureString)
+                        : secureString;
+                    pipeline.PowerShell.AddParameter(name, boundValue);
+                    pipeline.AddSecretBinding(secureString);
+                    secureString = null;
+                }
+                finally
+                {
+                    secureString?.Dispose();
+                }
             });
         }
 
@@ -2243,6 +2333,7 @@ namespace NativeHost
             return Execute(result, () =>
             {
                 FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                pipeline.ThrowIfSecretBound();
                 PowerShell ps = pipeline.PowerShell;
                 InvocationResult invocation = FfiInvocationResults.GetOrAdd(
                     ptrHandle,
@@ -2359,6 +2450,7 @@ namespace NativeHost
             return Execute(result, () =>
             {
                 FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                pipeline.ThrowIfSecretBound();
                 PowerShell ps = pipeline.PowerShell;
                 FfiInvocationResults.TryRemove(ptrHandle, out _);
                 FfiInvocationResultSnapshot snapshot = InvokeAndCaptureStreamSnapshot(
@@ -2369,6 +2461,293 @@ namespace NativeHost
                 GCHandle handle = GCHandle.Alloc(snapshot, GCHandleType.Normal);
                 *ptrResultHandle = GCHandle.ToIntPtr(handle);
             });
+        }
+
+        [UnmanagedCallersOnly]
+        public static unsafe int FfiPowerShell_InvokeSecretResult(
+            IntPtr ptrHandle,
+            uint expectedKind,
+            byte* userNameBuffer,
+            int userNameCapacity,
+            int* userNameLength,
+            char* secretBuffer,
+            int secretCapacity,
+            int* secretLength,
+            FfiCallResult* result)
+        {
+            if (expectedKind > (uint)FfiValueKind.Credential ||
+                expectedKind > 2 ||
+                userNameLength == null ||
+                secretLength == null ||
+                userNameCapacity < 0 ||
+                secretCapacity < 0 ||
+                (userNameCapacity != 0 && userNameBuffer == null) ||
+                (secretCapacity != 0 && secretBuffer == null))
+            {
+                return WriteFailure(result, FfiStatusInvalidArgument, "Secret result arguments are invalid.");
+            }
+
+            return ExecuteSecret(result, () =>
+            {
+                FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                if (!pipeline.HasSecretBindings)
+                {
+                    throw new InvalidOperationException("Secret result invocation requires an explicit secret parameter.");
+                }
+
+                SecureString resultSecret = null;
+                try
+                {
+                    FfiSecretInvocationOutput invocation = InvokeSecretPipeline(
+                        pipeline,
+                        TakeCompletedInput(ptrHandle),
+                        captureOutput: expectedKind != 0);
+                    if (invocation.HadErrors)
+                    {
+                        throw new InvalidOperationException("Secret-bound PowerShell invocation failed.");
+                    }
+
+                    *userNameLength = 0;
+                    *secretLength = 0;
+                    if (expectedKind == 0)
+                    {
+                        return;
+                    }
+
+                    if (invocation.OutputCount != 1)
+                    {
+                        throw new InvalidOperationException("Secret result shape is invalid.");
+                    }
+
+                    PSObject output = invocation.Output;
+                    object value = output.BaseObject;
+                    SecureString secureString;
+                    string userName = null;
+                    if (expectedKind == 1 && value is SecureString resultSecureString)
+                    {
+                        secureString = resultSecureString;
+                    }
+                    else if (expectedKind == 2)
+                    {
+                        if (value is PSCredential credential)
+                        {
+                            secureString = credential.Password;
+                            userName = credential.UserName;
+                        }
+                        else if (!TryProjectCredentialResult(output, value, out userName, out secureString))
+                        {
+                            throw new InvalidOperationException("Secret result shape is invalid.");
+                        }
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException("Secret result shape is invalid.");
+                    }
+                    resultSecret = secureString;
+
+                    int requiredSecretLength = secureString.Length;
+                    if (requiredSecretLength is < 1 or > FfiMaxSecretLength || secretCapacity < requiredSecretLength)
+                    {
+                        throw new InvalidOperationException("Secret result exceeds its bound.");
+                    }
+
+                    if (userName is not null)
+                    {
+                        if (string.IsNullOrWhiteSpace(userName) ||
+                            userName.Length > FfiMaxSecretUserNameLength ||
+                            userName.IndexOf('\0') >= 0)
+                        {
+                            throw new InvalidOperationException("Secret result shape is invalid.");
+                        }
+
+                        int requiredUserNameLength = Encoding.UTF8.GetByteCount(userName);
+                        if (requiredUserNameLength > userNameCapacity)
+                        {
+                            throw new InvalidOperationException("Secret result exceeds its bound.");
+                        }
+
+                        Encoding.UTF8.GetBytes(userName, new Span<byte>(userNameBuffer, requiredUserNameLength));
+                        *userNameLength = requiredUserNameLength;
+                    }
+
+                    IntPtr bstr = Marshal.SecureStringToBSTR(secureString);
+                    try
+                    {
+                        new ReadOnlySpan<char>((void*)bstr, requiredSecretLength)
+                            .CopyTo(new Span<char>(secretBuffer, requiredSecretLength));
+                        *secretLength = requiredSecretLength;
+                    }
+                    finally
+                    {
+                        Marshal.ZeroFreeBSTR(bstr);
+                    }
+                }
+                finally
+                {
+                    pipeline.DisposeSecretResult(resultSecret);
+                    pipeline.ClearSecretBindings();
+                    pipeline.PowerShell.Commands.Clear();
+                }
+            });
+        }
+
+        private static bool TryProjectCredentialResult(
+            PSObject result,
+            object value,
+            out string userName,
+            out SecureString secret)
+        {
+            userName = null;
+            secret = null;
+            if (value is null)
+            {
+                return false;
+            }
+
+            Type valueType = value.GetType();
+            if (!string.Equals(valueType.FullName, typeof(PSCredential).FullName, StringComparison.Ordinal) ||
+                !string.Equals(
+                    valueType.Assembly.GetName().Name,
+                    typeof(PSCredential).Assembly.GetName().Name,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            // The selected payload may load SMA in a different context. Project only
+            // the fixed PSCredential members from its already-known PSObject wrapper.
+            PSPropertyInfo userNameProperty = result.Properties["UserName"];
+            PSPropertyInfo passwordProperty = result.Properties["Password"];
+            if (userNameProperty?.Value is not string credentialUserName ||
+                passwordProperty?.Value is not SecureString credentialSecret)
+            {
+                return false;
+            }
+
+            userName = credentialUserName;
+            secret = credentialSecret;
+            return true;
+        }
+
+        private static FfiSecretInvocationOutput InvokeSecretPipeline(
+            FfiPowerShellPipeline pipeline,
+            object[] input,
+            bool captureOutput)
+        {
+            PowerShell powerShell = pipeline.PowerShell;
+            FfiPowerShellSession session = pipeline.Session;
+            var output = new PSDataCollection<PSObject> { DataAddedCount = 1 };
+            PSObject capturedOutput = null;
+            int outputCount = 0;
+            bool hadErrors = false;
+            bool sessionInvocationStarted = false;
+            Exception terminatingException = null;
+            PSDataCollection<object> inputCollection = null;
+
+            EventHandler<DataAddedEventArgs> outputAdded = (_, args) =>
+            {
+                if (captureOutput)
+                {
+                    PSObject value = output[args.Index];
+                    outputCount++;
+                    if (outputCount == 1)
+                    {
+                        capturedOutput = value;
+                    }
+                    else
+                    {
+                        output.Clear();
+                        throw new InvalidOperationException("Secret result shape is invalid.");
+                    }
+                }
+
+                output.Clear();
+            };
+            EventHandler<DataAddedEventArgs> errorAdded = (_, _) =>
+            {
+                hadErrors = true;
+                powerShell.Streams.Error.Clear();
+            };
+            EventHandler<DataAddedEventArgs> warningAdded = (_, _) => powerShell.Streams.Warning.Clear();
+            EventHandler<DataAddedEventArgs> verboseAdded = (_, _) => powerShell.Streams.Verbose.Clear();
+            EventHandler<DataAddedEventArgs> debugAdded = (_, _) => powerShell.Streams.Debug.Clear();
+            EventHandler<DataAddedEventArgs> informationAdded = (_, _) => powerShell.Streams.Information.Clear();
+            EventHandler<DataAddedEventArgs> progressAdded = (_, _) => powerShell.Streams.Progress.Clear();
+
+            ClearStreamBuffers(powerShell);
+            output.DataAdded += outputAdded;
+            powerShell.Streams.Error.DataAdded += errorAdded;
+            powerShell.Streams.Warning.DataAdded += warningAdded;
+            powerShell.Streams.Verbose.DataAdded += verboseAdded;
+            powerShell.Streams.Debug.DataAdded += debugAdded;
+            powerShell.Streams.Information.DataAdded += informationAdded;
+            powerShell.Streams.Progress.DataAdded += progressAdded;
+            try
+            {
+                if (session is not null)
+                {
+                    session.BeginInvocation();
+                    sessionInvocationStarted = true;
+                }
+
+                PSInvocationSettings invocationSettings = session?.CreateInvocationSettings();
+                if (input is null)
+                {
+                    powerShell.Invoke<PSObject, PSObject>(null, output, invocationSettings);
+                }
+                else
+                {
+                    inputCollection = new PSDataCollection<object>();
+                    foreach (object value in input)
+                    {
+                        inputCollection.Add(value);
+                    }
+
+                    inputCollection.Complete();
+                    powerShell.Invoke<object, PSObject>(inputCollection, output, invocationSettings);
+                }
+
+                hadErrors |= powerShell.HadErrors;
+                return new FfiSecretInvocationOutput(capturedOutput, outputCount, hadErrors);
+            }
+            catch (Exception exception)
+            {
+                terminatingException = exception;
+                throw;
+            }
+            finally
+            {
+                output.DataAdded -= outputAdded;
+                powerShell.Streams.Error.DataAdded -= errorAdded;
+                powerShell.Streams.Warning.DataAdded -= warningAdded;
+                powerShell.Streams.Verbose.DataAdded -= verboseAdded;
+                powerShell.Streams.Debug.DataAdded -= debugAdded;
+                powerShell.Streams.Information.DataAdded -= informationAdded;
+                powerShell.Streams.Progress.DataAdded -= progressAdded;
+                inputCollection?.Clear();
+                output.Clear();
+                ClearStreamBuffers(powerShell);
+                if (sessionInvocationStarted)
+                {
+                    session.EndInvocation(terminatingException is not null);
+                }
+            }
+        }
+
+        private sealed class FfiSecretInvocationOutput
+        {
+            public FfiSecretInvocationOutput(PSObject output, int outputCount, bool hadErrors)
+            {
+                Output = output;
+                OutputCount = outputCount;
+                HadErrors = hadErrors;
+            }
+
+            public PSObject Output { get; }
+
+            public int OutputCount { get; }
+
+            public bool HadErrors { get; }
         }
 
         [UnmanagedCallersOnly]
@@ -2385,6 +2764,7 @@ namespace NativeHost
             return Execute(result, () =>
             {
                 FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                pipeline.ThrowIfSecretBound();
                 FfiInvocationResults.TryRemove(ptrHandle, out _);
                 var liveInvocation = new FfiLiveInvocation(
                     pipeline.PowerShell,
@@ -2427,6 +2807,7 @@ namespace NativeHost
             return Execute(result, () =>
             {
                 FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                pipeline.ThrowIfSecretBound();
                 FfiInvocationResults.TryRemove(ptrHandle, out _);
                 var typedResults = new FfiTypedResultQueue(maximumBufferedRecords, maximumPageRecords);
                 var liveInvocation = new FfiLiveInvocation(
@@ -2660,6 +3041,7 @@ namespace NativeHost
             return Execute(result, () =>
             {
                 FfiPowerShellPipeline pipeline = GetPowerShellPipeline(ptrHandle);
+                pipeline.ThrowIfSecretBound();
                 FfiInvocationResults.TryRemove(ptrHandle, out _);
                 var typedResults = new FfiTypedResultQueue(
                     maximumBufferedResultRecords,
@@ -3531,6 +3913,7 @@ namespace NativeHost
                 FfiInvocationResults.TryRemove(ptrHandle, out _);
                 FfiInputBuffers.TryRemove(ptrHandle, out _);
                 ps.Commands.Clear();
+                GetPowerShellPipeline(ptrHandle).ClearSecretBindings();
             });
         }
 
@@ -3557,6 +3940,8 @@ namespace NativeHost
             UriUtf8 = 12,
             Array = 13,
             PropertyBag = 14,
+            SecretUtf16 = 15,
+            Credential = 16,
         }
 
         private sealed class FfiInputBuffer
@@ -3705,6 +4090,7 @@ namespace NativeHost
             private FfiCapabilityContext capabilityContext;
             private FfiBrokerContext brokerContext;
             private FfiBridgeContext bridgeContext;
+            private readonly List<SecureString> secretBindings = new();
 
             public FfiPowerShellPipeline(PowerShell powerShell, FfiPowerShellSession session)
             {
@@ -3715,6 +4101,66 @@ namespace NativeHost
             public PowerShell PowerShell { get; }
 
             public FfiPowerShellSession Session { get; }
+
+            public bool HasSecretBindings => secretBindings.Count != 0;
+
+            public void AddSecretBinding(SecureString value)
+            {
+                ArgumentNullException.ThrowIfNull(value);
+                if (Volatile.Read(ref disposed) != 0)
+                {
+                    throw new ObjectDisposedException(nameof(FfiPowerShellPipeline));
+                }
+
+                secretBindings.Add(value);
+            }
+
+            public object CreatePayloadCredential(string userName, SecureString secret)
+            {
+                ArgumentException.ThrowIfNullOrWhiteSpace(userName);
+                ArgumentNullException.ThrowIfNull(secret);
+
+                return Session is null
+                    ? new PSCredential(userName, secret)
+                    : Session.CreatePayloadCredential(userName, secret);
+            }
+
+            public void ThrowIfSecretBound()
+            {
+                if (HasSecretBindings)
+                {
+                    throw new InvalidOperationException(
+                        "Secret-bound pipelines must use the explicit secret result invocation API.");
+                }
+            }
+
+            public void ClearSecretBindings()
+            {
+                foreach (SecureString secret in secretBindings)
+                {
+                    secret.Dispose();
+                }
+
+                secretBindings.Clear();
+            }
+
+            public void DisposeSecretResult(SecureString value)
+            {
+                if (value is null)
+                {
+                    return;
+                }
+
+                foreach (SecureString binding in secretBindings)
+                {
+                    if (ReferenceEquals(binding, value))
+                    {
+                        return;
+                    }
+                }
+
+                value.Dispose();
+            }
 
             public void SetCapabilityContext(FfiCapabilityContext value)
             {
@@ -3797,6 +4243,7 @@ namespace NativeHost
                 try
                 {
                     ClearBridgeContext();
+                    ClearSecretBindings();
                     PowerShell.Dispose();
                 }
                 finally
@@ -3823,6 +4270,9 @@ namespace NativeHost
             private const uint StateClosed = 3;
             private const uint StateFaulted = 4;
             private const uint EventsTruncated = 1;
+            private const string CreateCredentialScript =
+                "param([string]$UserName, [System.Security.SecureString]$Secret) " +
+                "[System.Management.Automation.PSCredential]::new($UserName, $Secret)";
 
             private readonly object gate = new object();
             private readonly Runspace runspace;
@@ -4256,6 +4706,37 @@ namespace NativeHost
                         leaseCount--;
                         throw;
                     }
+                }
+            }
+
+            public object CreatePayloadCredential(string userName, SecureString secret)
+            {
+                ArgumentException.ThrowIfNullOrWhiteSpace(userName);
+                ArgumentNullException.ThrowIfNull(secret);
+
+                lock (gate)
+                {
+                    if (ownerReleased || disposed)
+                    {
+                        throw new InvalidOperationException("PowerShell session has been released.");
+                    }
+
+                    // The runspace creates this fixed, non-interpolated credential so its
+                    // SMA type identity always matches the target pipeline's binder.
+                    using var builder = PowerShell.Create();
+                    builder.Runspace = runspace;
+                    builder
+                        .AddScript(CreateCredentialScript, useLocalScope: true)
+                        .AddParameter("UserName", userName)
+                        .AddParameter("Secret", secret);
+
+                    Collection<PSObject> output = builder.Invoke();
+                    if (builder.HadErrors || output.Count != 1 || output[0]?.BaseObject is null)
+                    {
+                        throw new InvalidOperationException("Payload credential construction failed.");
+                    }
+
+                    return output[0].BaseObject;
                 }
             }
 
@@ -8216,6 +8697,24 @@ namespace NativeHost
             catch (Exception exception)
             {
                 return WriteFailure(result, FfiStatusManagedFailure, exception);
+            }
+        }
+
+        private static unsafe int ExecuteSecret(FfiCallResult* result, Action operation)
+        {
+            if (!TryInitializeResult(result))
+            {
+                return FfiStatusInvalidArgument;
+            }
+
+            try
+            {
+                operation();
+                return WriteSuccess(result);
+            }
+            catch
+            {
+                return WriteFailure(result, FfiStatusManagedFailure, "Secret-bound PowerShell operation failed.");
             }
         }
 

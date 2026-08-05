@@ -8,10 +8,12 @@ public sealed unsafe class PowerShellSession : IDisposable
     private const uint EventsTruncated = 1;
     private const uint MaximumEvents = 32;
     private readonly PowerShellSessionHandle handle;
+    private readonly IReadOnlyList<string> approvedModuleRoots;
 
-    private PowerShellSession(PowerShellSessionHandle handle)
+    private PowerShellSession(PowerShellSessionHandle handle, IReadOnlyList<string> approvedModuleRoots)
     {
         this.handle = handle;
+        this.approvedModuleRoots = approvedModuleRoots;
     }
 
     internal static PowerShellSession Create(PowerShellSessionOptions options)
@@ -24,7 +26,26 @@ public sealed unsafe class PowerShellSession : IDisposable
             NativeCallResult result = NativeCall.CreateResult(diagnostic);
             int status = NativeMethods.CreateSession(nativeOptions, &nativeSessionHandle, &result);
             NativeCall.ThrowIfFailed(status, result, diagnostic);
-            return new PowerShellSession(new PowerShellSessionHandle(nativeSessionHandle));
+            var session = new PowerShellSession(
+                new PowerShellSessionHandle(nativeSessionHandle),
+                options.Configuration.AllowedModulePaths
+                    .Select(static path => CanonicalizeExistingPath(path, isDirectory: true))
+                    .ToArray());
+            try
+            {
+                foreach (PowerShellModuleImport moduleImport in options.Configuration.ModuleImportSpecifications
+                    .Where(static import => !import.IsSimpleImport))
+                {
+                    session.ImportModule(moduleImport);
+                }
+
+                return session;
+            }
+            catch
+            {
+                session.Dispose();
+                throw;
+            }
         });
     }
 
@@ -83,6 +104,38 @@ public sealed unsafe class PowerShellSession : IDisposable
         int status = NativeMethods.CreateSessionBuilder(lease.Value, &nativeBuilderHandle, &result);
         NativeCall.ThrowIfFailed(status, result, diagnostic);
         return PowerShell.CreateFromNative(nativeBuilderHandle);
+    }
+
+    /// <summary>
+    /// Imports a module into this persistent local session using a finite,
+    /// declared import shape. Paths remain subject to the session's approved
+    /// module-root policy in the payload.
+    /// </summary>
+    public void ImportModule(PowerShellModuleImport moduleImport)
+    {
+        ArgumentNullException.ThrowIfNull(moduleImport);
+        EnsureApprovedModuleImport(moduleImport);
+        using PowerShell powerShell = CreatePowerShell();
+        powerShell.AddCommand("Import-Module")
+            .AddParameter("Name", moduleImport.NameOrPath);
+        if (moduleImport.RequiredVersion is not null)
+        {
+            powerShell.AddParameter("RequiredVersion", moduleImport.RequiredVersion.ToString());
+        }
+        if ((moduleImport.Options & PowerShellModuleImportOptions.Force) != 0)
+        {
+            powerShell.AddParameter("Force");
+        }
+        if ((moduleImport.Options & PowerShellModuleImportOptions.DisableNameChecking) != 0)
+        {
+            powerShell.AddParameter("DisableNameChecking");
+        }
+        if ((moduleImport.Options & PowerShellModuleImportOptions.SkipEditionCheck) != 0)
+        {
+            powerShell.AddParameter("SkipEditionCheck");
+        }
+
+        _ = powerShell.InvokeWithDiagnostics();
     }
 
     /// <summary>
@@ -405,6 +458,70 @@ public sealed unsafe class PowerShellSession : IDisposable
                 "Session variable names must use ASCII-like identifier characters and be at most 64 characters.",
                 nameof(value));
         }
+    }
+
+    private void EnsureApprovedModuleImport(PowerShellModuleImport moduleImport)
+        {
+            if (approvedModuleRoots.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "Module imports require at least one approved module root on the persistent session.");
+            }
+
+            if (!Path.IsPathFullyQualified(moduleImport.NameOrPath))
+            {
+                return;
+            }
+
+            string importPath = CanonicalizeExistingPath(moduleImport.NameOrPath, isDirectory: Directory.Exists(moduleImport.NameOrPath));
+            if (!approvedModuleRoots.Any(root => IsBeneathRoot(root, importPath)))
+            {
+                throw new InvalidOperationException(
+                    "Module import paths must resolve beneath an approved module root.");
+            }
+        }
+
+    private static string CanonicalizeExistingPath(string path, bool isDirectory)
+        {
+            string fullPath = Path.GetFullPath(path);
+            if (isDirectory)
+            {
+                fullPath = Path.TrimEndingDirectorySeparator(fullPath);
+            }
+
+            string root = Path.GetPathRoot(fullPath)
+                ?? throw new ArgumentException("The path has no filesystem root.", nameof(path));
+            string canonicalPath = root;
+            foreach (string component in fullPath[root.Length..].Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries))
+            {
+                canonicalPath = Path.Combine(canonicalPath, component);
+                FileSystemInfo info = Directory.Exists(canonicalPath)
+                    ? new DirectoryInfo(canonicalPath)
+                    : new FileInfo(canonicalPath);
+                if (!info.Exists)
+                {
+                    throw new IOException("The path does not exist.");
+                }
+
+                FileSystemInfo? target = info.ResolveLinkTarget(returnFinalTarget: true);
+                if (target is not null)
+                {
+                    canonicalPath = Path.GetFullPath(target.FullName);
+                }
+            }
+
+            return isDirectory ? Path.TrimEndingDirectorySeparator(canonicalPath) : canonicalPath;
+        }
+
+    private static bool IsBeneathRoot(string root, string path)
+        {
+            string relative = Path.GetRelativePath(root, path);
+            return relative.Length != 0 &&
+                !Path.IsPathFullyQualified(relative) &&
+                relative != ".." &&
+                !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal);
     }
 
     private static bool IsAsciiLetter(char value)

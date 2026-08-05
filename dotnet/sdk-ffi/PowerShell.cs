@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -33,6 +34,7 @@ public sealed unsafe class PowerShell : IDisposable
     private const ulong BrokerTerminalObservationFeature = 1UL << 27;
     private const ulong ReliableBridgeEventsFeature = 1UL << 28;
     private const ulong ObservedPresentationFeature = 1UL << 29;
+    private const ulong SecretAdaptersFeature = 1UL << 30;
     private const ulong LiveObjectProbeFeature = 1UL << 17;
     private const ulong LiveSessionObjectProbeFeature = 1UL << 18;
     private const ulong LiveObjectContractsFeature = 1UL << 19;
@@ -456,6 +458,30 @@ public sealed unsafe class PowerShell : IDisposable
         return this;
     }
 
+    /// <summary>
+    /// Binds a payload-side <see cref="System.Security.SecureString"/> through
+    /// the explicit secret lease boundary.
+    /// </summary>
+    public PowerShell AddParameter(string name, PowerShellSecret value)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(value);
+        AddSecretParameter(name, SecretSecureStringKind, value, userName: null);
+        return this;
+    }
+
+    /// <summary>
+    /// Binds a payload-side <c>PSCredential</c> through the explicit secret
+    /// lease boundary.
+    /// </summary>
+    public PowerShell AddParameter(string name, PowerShellCredential value)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(value);
+        AddSecretParameter(name, SecretCredentialKind, value.Password, value.UserName);
+        return this;
+    }
+
     public PowerShell AddParameters(IEnumerable<KeyValuePair<string, PowerShellValue>> parameters)
     {
         ArgumentNullException.ThrowIfNull(parameters);
@@ -596,6 +622,110 @@ public sealed unsafe class PowerShell : IDisposable
     public PowerShellInvocationResult Invoke()
     {
         return InvokeWithDiagnostics();
+    }
+
+    /// <summary>
+    /// Invokes a secret-bound pipeline without returning normal output,
+    /// snapshots, or diagnostics.
+    /// </summary>
+    public PowerShellSecretResult InvokeWithSecretBindings()
+    {
+        return InvokeSecretResult(PowerShellSecretResultKind.None);
+    }
+
+    /// <summary>
+    /// Invokes a secret-bound pipeline and returns only one explicitly approved
+    /// <see cref="System.Security.SecureString"/> or <c>PSCredential</c> shape.
+    /// </summary>
+    public PowerShellSecretResult InvokeSecretResult(PowerShellSecretResultKind expectedKind)
+    {
+        if (!Enum.IsDefined(expectedKind))
+        {
+            throw new ArgumentOutOfRangeException(nameof(expectedKind));
+        }
+
+        EnsureSecretAdaptersSupported();
+        byte[] userName = new byte[1_024];
+        char[] secret = new char[PowerShellSecret.MaximumLength];
+        try
+        {
+            using PowerShellHandle.HandleLease lease = handle.Borrow();
+            byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+            NativeCallResult result = NativeCall.CreateResult(diagnostic);
+            nuint userNameLength = 0;
+            nuint secretLength = 0;
+            fixed (byte* userNamePointer = userName)
+            fixed (char* secretPointer = secret)
+            {
+                int status = NativeMethods.InvokeSecretResult(
+                    lease.Value,
+                    checked((uint)expectedKind),
+                    userNamePointer,
+                    (nuint)userName.Length,
+                    &userNameLength,
+                    secretPointer,
+                    (nuint)secret.Length,
+                    &secretLength,
+                    &result);
+                NativeCall.ThrowIfFailed(status, result, diagnostic);
+            }
+
+            if (expectedKind == PowerShellSecretResultKind.None)
+            {
+                if (userNameLength != 0 || secretLength != 0)
+                {
+                    throw new PowerShellFfiException(
+                        PowerShellFfiStatus.ManagedFailure,
+                        "Native PowerShell FFI returned an invalid empty secret result.");
+                }
+
+                return new PowerShellSecretResult(expectedKind, null, null);
+            }
+
+            if (secretLength is 0 or > PowerShellSecret.MaximumLength ||
+                userNameLength > (nuint)userName.Length)
+            {
+                throw new PowerShellFfiException(
+                    PowerShellFfiStatus.ManagedFailure,
+                    "Native PowerShell FFI returned an invalid secret result length.");
+            }
+
+            char[] ownedSecret = secret[..checked((int)secretLength)];
+            CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(secret.AsSpan()));
+            secret = Array.Empty<char>();
+            PowerShellSecret secretLease = PowerShellSecret.TakeOwnership(ownedSecret);
+            if (expectedKind == PowerShellSecretResultKind.SecureString)
+            {
+                if (userNameLength != 0)
+                {
+                    secretLease.Dispose();
+                    throw new PowerShellFfiException(
+                        PowerShellFfiStatus.ManagedFailure,
+                        "Native PowerShell FFI returned a credential user name for a SecureString result.");
+                }
+
+                return new PowerShellSecretResult(expectedKind, secretLease, null);
+            }
+
+            string userNameText = Encoding.UTF8.GetString(userName, 0, checked((int)userNameLength));
+            if (string.IsNullOrWhiteSpace(userNameText) || userNameText.IndexOf('\0') >= 0)
+            {
+                secretLease.Dispose();
+                throw new PowerShellFfiException(
+                    PowerShellFfiStatus.ManagedFailure,
+                    "Native PowerShell FFI returned an invalid credential user name.");
+            }
+
+            return new PowerShellSecretResult(
+                expectedKind,
+                null,
+                new PowerShellCredential(userNameText, secretLease));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(userName);
+            CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(secret.AsSpan()));
+        }
     }
 
     public PowerShellInvocationResult InvokeWithDiagnostics()
@@ -839,6 +969,17 @@ public sealed unsafe class PowerShell : IDisposable
     internal static void EnsureTypedResultPagingSupported()
     {
         EnsureTypedResultPagingSupported(GetAbiInfo());
+    }
+
+    internal static void EnsureSecretAdaptersSupported()
+    {
+        EnsureSupportedAbi();
+        if ((FeatureFlags & SecretAdaptersFeature) == 0)
+        {
+            throw new PowerShellFfiException(
+                PowerShellFfiStatus.UnsupportedCapability,
+                "The selected PowerShell payload does not support explicit secret adapters.");
+        }
     }
 
     internal static void EnsureTypedResultPagingSupported(NativeAbiInfo info)
@@ -1366,6 +1507,54 @@ public sealed unsafe class PowerShell : IDisposable
         }
     }
 
+    private void AddSecretParameter(string name, uint kind, PowerShellSecret secret, string? userName)
+    {
+        EnsureSecretAdaptersSupported();
+        byte[] nameBytes = EncodeUtf8(name);
+        byte[]? userNameBytes = userName is null ? null : EncodeUtf8(userName);
+        int userNameLength = userNameBytes?.Length ?? 0;
+        int secretLength = secret.Length;
+        byte[] payload = new byte[checked((userName is null ? 0 : sizeof(int) + userNameLength) + secretLength * sizeof(char))];
+        try
+        {
+            if (userNameBytes is not null)
+            {
+                BitConverter.TryWriteBytes(payload, userNameLength);
+                userNameBytes.CopyTo(payload, sizeof(int));
+            }
+
+            secret.CopyTo(MemoryMarshal.Cast<byte, char>(payload.AsSpan(userName is null ? 0 : sizeof(int) + userNameLength)));
+            using PowerShellHandle.HandleLease lease = handle.Borrow();
+            fixed (byte* namePointer = nameBytes)
+            fixed (byte* payloadPointer = payload)
+            {
+                NativeDataValue nativeValue = new()
+                {
+                    Size = checked((uint)sizeof(NativeDataValue)),
+                    Kind = kind,
+                    Data = payloadPointer,
+                    DataLength = (nuint)payload.Length,
+                };
+                byte* diagnostic = stackalloc byte[NativeCall.DiagnosticCapacity];
+                NativeCallResult result = NativeCall.CreateResult(diagnostic);
+                int status = NativeMethods.AddParameterValue(
+                    lease.Value,
+                    new NativeUtf8Span { Data = namePointer, Length = (nuint)nameBytes.Length },
+                    &nativeValue,
+                    &result);
+                NativeCall.ThrowIfFailed(status, result, diagnostic);
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(payload);
+            if (userNameBytes is not null)
+            {
+                CryptographicOperations.ZeroMemory(userNameBytes);
+            }
+        }
+    }
+
     internal void AddLiveObjectProbe(nint comObject)
     {
         if (comObject == 0)
@@ -1476,4 +1665,7 @@ public sealed unsafe class PowerShell : IDisposable
         ulong nativeHandle,
         NativeDataValue* value,
         NativeCallResult* result);
+
+    private const uint SecretSecureStringKind = 15;
+    private const uint SecretCredentialKind = 16;
 }
