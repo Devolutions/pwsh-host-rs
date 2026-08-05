@@ -1175,8 +1175,11 @@ facade:method:Devolutions.PowerShell.Ffi.PowerShellRemoteSession::Devolutions.Po
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRemoteSession::Devolutions.PowerShell.Ffi.PowerShellRemoteSessionMetadata GetMetadata()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellRemoteSession::Void Dispose()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellSecret::Devolutions.PowerShell.Ffi.PowerShellSecret Create(System.ReadOnlySpan`1[System.Char])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSecret::System.Security.SecureString ToSecureString()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellSecret::System.String ToString()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSecret::Void CopyTo(System.Span`1[System.Char])
 facade:method:Devolutions.PowerShell.Ffi.PowerShellSecret::Void Dispose()
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSecret::Int32 Length
 facade:method:Devolutions.PowerShell.Ffi.PowerShellSecretResult::System.String ToString()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellSecretResult::Void Dispose()
 facade:method:Devolutions.PowerShell.Ffi.PowerShellSession::Void ImportModule(Devolutions.PowerShell.Ffi.PowerShellModuleImport)

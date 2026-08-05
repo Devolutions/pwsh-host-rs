@@ -3487,6 +3487,21 @@ static void VerifySecretBindings(PowerShellRuntime runtime)
             "`$Result.SecurePassword = `$securePassword")
         .InvokeCredentialResult())
     {
+        char[] transferredPassword = new char[result.Password!.Length];
+        try
+        {
+            result.Password.CopyTo(transferredPassword);
+            using var securePassword = result.Password.ToSecureString();
+            Require(
+                transferredPassword.AsSpan().SequenceEqual("secure-fixture".AsSpan()) &&
+                securePassword.Length == result.Password.Length,
+                "The credential result password did not support explicit secure transfer.");
+        }
+        finally
+        {
+            Array.Clear(transferredPassword);
+        }
+
         Require(
             result.Username == "secure-user" &&
             result.Domain == "secure-domain" &&
