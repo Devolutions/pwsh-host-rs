@@ -356,10 +356,13 @@ $expectedBrokerTableSlots = @(
 $expectedObservedPresentationTableSlots = @(
     @{ Field = 'ObservedDiagnosticPage_CopyRecordValue'; Rust = 'observed_diagnostic_page_copy_record_value_fn'; Alias = 'FnFfiObservedDiagnosticPageCopyRecordValue'; Method = 'FfiObservedDiagnosticPage_CopyRecordValue'; Signature = 'IntPtr,int,uint*,byte*,int,int*,FfiCallResult*,int' }
 )
+$expectedSecretAdapterTableSlots = @(
+    @{ Field = 'PowerShell_InvokeSecretResult'; Rust = 'power_shell_invoke_secret_result_fn'; Alias = 'FnFfiPowerShellInvokeSecretResult'; Method = 'FfiPowerShell_InvokeSecretResult'; Signature = 'IntPtr,uint,byte*,int,int*,char*,int,int*,FfiCallResult*,int' }
+)
 $compactFfiBindingsSource = $ffiBindingsSource -replace '\s+', ''
-$allTableSlots = @($expectedTableSlots) + @($expectedLiveTableSlots) + @($expectedTypedResultTableSlots) + @($expectedObservedInvocationTableSlots) + @($expectedSessionPreflightTableSlots) + @($expectedRuntimeDiagnosticsTableSlots) + @($expectedBrokerTableSlots) + @($expectedObservedPresentationTableSlots)
+$allTableSlots = @($expectedTableSlots) + @($expectedLiveTableSlots) + @($expectedTypedResultTableSlots) + @($expectedObservedInvocationTableSlots) + @($expectedSessionPreflightTableSlots) + @($expectedRuntimeDiagnosticsTableSlots) + @($expectedBrokerTableSlots) + @($expectedObservedPresentationTableSlots) + @($expectedSecretAdapterTableSlots)
 $ffiApiType = $bindingsAssemblyObject.GetType('NativeHost.Bindings+FfiApiV1', $true)
-Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::SizeOf([Type]$ffiApiType)) -Expected 712 -Description 'Managed FfiApiV1 size'
+Assert-Equal -Actual ([System.Runtime.InteropServices.Marshal]::SizeOf([Type]$ffiApiType)) -Expected 720 -Description 'Managed FfiApiV1 size'
 $ffiApiFields = @($ffiApiType.GetFields($instanceFields) | Sort-Object MetadataToken)
 $expectedFfiApiFieldNames = @('Size', 'AbiVersion', 'FeatureFlags') + @($allTableSlots | ForEach-Object { $_.Field })
 Assert-Sequence -Actual @($ffiApiFields | ForEach-Object Name) -Expected $expectedFfiApiFieldNames -Description 'Managed FfiApiV1 slot order'
@@ -371,7 +374,7 @@ for ($index = 0; $index -lt $ffiApiFields.Count; $index++) {
     Assert-Equal -Actual (Get-ManagedTypeName $field.FieldType) -Expected $expectedType -Description "Managed FfiApiV1 '$($field.Name)' type"
 }
 
-$expectedBridgeFeatures = 'FeatureFlags=(1UL<<4)|(1UL<<5)|(1UL<<6)|FfiFeatureAsyncOperationPrimitives|FfiFeatureSessionPrimitives|FfiFeatureSessionPolling|FfiFeatureSnapshotProjections|FfiFeatureSessionConfiguration|FfiFeatureSessionVariables|FfiFeatureCapabilityRpc|FfiFeatureLiveObjectProbe|FfiFeatureLiveSessionObjectProbe|FfiFeatureLiveObjectContracts|FfiFeatureLiveStreamPolling|FfiFeatureTypedResultPaging|FfiFeatureObservedInvocation|FfiFeatureSessionPreflight|FfiFeatureRuntimeDiagnostics|FfiFeatureDuplexBrokerChannel|FfiFeatureGeneratedBridgeAttachment|FfiFeatureReliableBridgeEvents|FfiFeatureObservedPresentation'
+$expectedBridgeFeatures = 'FeatureFlags=(1UL<<4)|(1UL<<5)|(1UL<<6)|FfiFeatureAsyncOperationPrimitives|FfiFeatureSessionPrimitives|FfiFeatureSessionPolling|FfiFeatureSnapshotProjections|FfiFeatureSessionConfiguration|FfiFeatureSessionVariables|FfiFeatureCapabilityRpc|FfiFeatureLiveObjectProbe|FfiFeatureLiveSessionObjectProbe|FfiFeatureLiveObjectContracts|FfiFeatureLiveStreamPolling|FfiFeatureTypedResultPaging|FfiFeatureObservedInvocation|FfiFeatureSessionPreflight|FfiFeatureRuntimeDiagnostics|FfiFeatureDuplexBrokerChannel|FfiFeatureGeneratedBridgeAttachment|FfiFeatureReliableBridgeEvents|FfiFeatureObservedPresentation|FfiFeatureSecretAdapters'
 if (-not $compactFfiBindingsSource.Contains($expectedBridgeFeatures)) {
     throw 'Managed FfiApiV1 feature flags no longer advertise the checked bridge capabilities.'
 }
@@ -409,7 +412,8 @@ $expectedRustApiTableFields = @('size', 'abi_version', 'feature_flags') +
     @($expectedSessionPreflightTableSlots | ForEach-Object Rust) +
     @($expectedRuntimeDiagnosticsTableSlots | ForEach-Object Rust) +
     @($expectedBrokerTableSlots | ForEach-Object Rust) +
-    @($expectedObservedPresentationTableSlots | ForEach-Object Rust)
+    @($expectedObservedPresentationTableSlots | ForEach-Object Rust) +
+    @($expectedSecretAdapterTableSlots | ForEach-Object Rust)
 Assert-Sequence -Actual $rustApiTableFields -Expected $expectedRustApiTableFields -Description 'Rust FfiApiV1 slot order'
 
 $rustBindingsTableMatch = [regex]::Match($rustBindingsSource, '(?s)pub\(crate\)\s+struct\s+FfiBindings\s*\{(?<body>.*?)\n\s*\}')
@@ -433,7 +437,8 @@ Assert-Sequence -Actual $rustBindingsFields -Expected (
         'session_preflight_configured_fn|FnFfiPowerShellSessionPreflightConfigured',
         'runtime_diagnostics_copy_power_shell_file_version_utf8_fn|FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8',
         'power_shell_set_broker_context_fn|FnFfiPowerShellSetBrokerContext',
-        'power_shell_set_bridge_context_fn|FnFfiPowerShellSetBridgeContext'
+        'power_shell_set_bridge_context_fn|FnFfiPowerShellSetBridgeContext',
+        'power_shell_invoke_secret_result_fn|FnFfiPowerShellInvokeSecretResult'
     )
 ) -Description 'Rust FfiBindings slot order and aliases'
 if (-not $rustFfiSource.Contains('const FEATURE_TYPED_RESULT_PAGING: u64 = 1 << 21;')) {
@@ -457,6 +462,9 @@ if (-not $rustFfiSource.Contains('const FEATURE_BROKER_TERMINAL_OBSERVATION: u64
 if (-not $rustFfiSource.Contains('const FEATURE_OBSERVED_PRESENTATION: u64 = 1 << 29;')) {
     throw 'Rust native ABI must advertise observed presentation feature bit 29.'
 }
+if (-not $rustFfiSource.Contains('const FEATURE_SECRET_ADAPTERS: u64 = 1 << 30;')) {
+    throw 'Rust native ABI must advertise secret adapter feature bit 30.'
+}
 
 $expectedRustFunctionAliases = @'
 FnBindingsGetFfiApiV1|unsafeextern"system"fn()->*constFfiApiV1
@@ -472,6 +480,7 @@ FnFfiPowerShellCopyInvocationErrorFieldToUtf8|unsafeextern"system"fn(PowerShellH
 FnFfiPowerShellClear|unsafeextern"system"fn(PowerShellHandle,*mutFfiCallResult)->i32
 FnFfiPowerShellStop|unsafeextern"system"fn(PowerShellHandle,*mutFfiCallResult)->i32
 FnFfiPowerShellInvokeToResult|unsafeextern"system"fn(PowerShellHandle,*mutPowerShellHandle,*mutFfiCallResult)->i32
+FnFfiPowerShellInvokeSecretResult|unsafeextern"system"fn(PowerShellHandle,u32,*mutu8,i32,*muti32,*mutu16,i32,*muti32,*mutFfiCallResult)->i32
 FnFfiInvocationResultRelease|unsafeextern"system"fn(PowerShellHandle,*mutFfiCallResult)->i32
 FnFfiInvocationResultGetInfo|unsafeextern"system"fn(PowerShellHandle,*mutu32,*muti32,*mutFfiCallResult)->i32
 FnFfiInvocationResultGetStreamInfo|unsafeextern"system"fn(PowerShellHandle,i32,*muti32,*mutu32,*mutFfiCallResult)->i32

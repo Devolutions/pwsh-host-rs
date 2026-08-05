@@ -54,6 +54,11 @@ const FEATURE_GENERATED_BRIDGE_ATTACHMENT: u64 = 1 << 26;
 const FEATURE_BROKER_TERMINAL_OBSERVATION: u64 = 1 << 27;
 const FEATURE_RELIABLE_BRIDGE_EVENTS: u64 = 1 << 28;
 const FEATURE_OBSERVED_PRESENTATION: u64 = 1 << 29;
+const FEATURE_SECRET_ADAPTERS: u64 = 1 << 30;
+const SECRET_VALUE_KIND_UTF16: u32 = 15;
+const SECRET_VALUE_KIND_CREDENTIAL: u32 = 16;
+const MAX_SECRET_UTF16_CODE_UNITS: usize = 4_096;
+const MAX_SECRET_USER_NAME_UTF8_BYTES: usize = 1_024;
 const CALL_RESULT_DIAGNOSTIC_TRUNCATED: u32 = 1;
 #[cfg(test)]
 const RESULT_RECORD_SCALAR_VALUE_PRESENT: u32 = 1 << 1;
@@ -1550,6 +1555,12 @@ unsafe fn utf8_span<'a>(value: Utf8Span) -> Result<&'a str, Status> {
 }
 
 unsafe fn data_value_input<'a>(value: *const DataValue) -> Result<(u32, &'a [u8]), (Status, String)> {
+    let (kind, payload) = data_value_input_unvalidated(value)?;
+    validate_value_payload(kind, payload, 0)?;
+    Ok((kind, payload))
+}
+
+unsafe fn data_value_input_unvalidated<'a>(value: *const DataValue) -> Result<(u32, &'a [u8]), (Status, String)> {
     if value.is_null() {
         return Err((Status::InvalidArgument, "tagged value pointer is null".to_owned()));
     }
@@ -1570,8 +1581,44 @@ unsafe fn data_value_input<'a>(value: *const DataValue) -> Result<(u32, &'a [u8]
     } else {
         slice::from_raw_parts(value.data, value.data_len)
     };
-    validate_value_payload(value.kind, payload, 0)?;
     Ok((value.kind, payload))
+}
+
+fn validate_secret_parameter_value(kind: u32, payload: &[u8]) -> Result<(), (Status, String)> {
+    fn validate_secret_utf16(payload: &[u8]) -> Result<(), (Status, String)> {
+        if payload.is_empty()
+            || payload.len() > MAX_SECRET_UTF16_CODE_UNITS * std::mem::size_of::<u16>()
+            || !payload.len().is_multiple_of(std::mem::size_of::<u16>())
+            || payload
+                .chunks_exact(std::mem::size_of::<u16>())
+                .any(|unit| u16::from_ne_bytes([unit[0], unit[1]]) == 0)
+        {
+            return Err((Status::InvalidArgument, "secret adapter payload is invalid".to_owned()));
+        }
+        Ok(())
+    }
+
+    match kind {
+        SECRET_VALUE_KIND_UTF16 => validate_secret_utf16(payload),
+        SECRET_VALUE_KIND_CREDENTIAL => {
+            if payload.len() < std::mem::size_of::<u32>() {
+                return Err((Status::InvalidArgument, "secret adapter payload is invalid".to_owned()));
+            }
+            let user_name_length = u32::from_ne_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+            if user_name_length == 0
+                || user_name_length > MAX_SECRET_USER_NAME_UTF8_BYTES
+                || payload.len() <= std::mem::size_of::<u32>() + user_name_length
+            {
+                return Err((Status::InvalidArgument, "secret adapter payload is invalid".to_owned()));
+            }
+            let user_name = &payload[std::mem::size_of::<u32>()..std::mem::size_of::<u32>() + user_name_length];
+            if user_name.contains(&0) || std::str::from_utf8(user_name).is_err() {
+                return Err((Status::InvalidArgument, "secret adapter payload is invalid".to_owned()));
+            }
+            validate_secret_utf16(&payload[std::mem::size_of::<u32>() + user_name_length..])
+        }
+        _ => validate_value_payload(kind, payload, 0),
+    }
 }
 
 unsafe fn live_object_contract_input<'a>(
@@ -6252,6 +6299,7 @@ fn feature_flags() -> u64 {
         | FEATURE_BROKER_TERMINAL_OBSERVATION
         | FEATURE_RELIABLE_BRIDGE_EVENTS
         | FEATURE_OBSERVED_PRESENTATION
+        | FEATURE_SECRET_ADAPTERS
 }
 
 fn create_live_object_probe(initial_count: i64) -> Result<*mut std::ffi::c_void, (Status, String)> {
@@ -6721,7 +6769,8 @@ pub unsafe extern "C" fn multi_pwsh_add_parameter_value(
                 "parameter name must be UTF-8 without NUL".to_owned(),
             )
         })?;
-        let (kind, payload) = data_value_input(value)?;
+        let (kind, payload) = data_value_input_unvalidated(value)?;
+        validate_secret_parameter_value(kind, payload)?;
         with_session_result(handle, true, |session| {
             session
                 .add_parameter_value(name, kind, payload)
@@ -6804,6 +6853,57 @@ pub unsafe extern "C" fn multi_pwsh_clear(handle: u64, result: *mut CallResult) 
     v2_call(result, || {
         with_session_result(handle, true, |session| {
             session.clear().map(|_| Status::Success).map_err(managed_failure)
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn multi_pwsh_invoke_secret_result(
+    handle: u64,
+    expected_kind: u32,
+    user_name_buffer: *mut u8,
+    user_name_capacity: usize,
+    user_name_length: *mut usize,
+    secret_buffer: *mut u16,
+    secret_capacity: usize,
+    secret_length: *mut usize,
+    result: *mut CallResult,
+) -> i32 {
+    v2_call(result, || {
+        if expected_kind > 2
+            || user_name_length.is_null()
+            || secret_length.is_null()
+            || (user_name_capacity != 0 && user_name_buffer.is_null())
+            || (secret_capacity != 0 && secret_buffer.is_null())
+        {
+            return Err((
+                Status::InvalidArgument,
+                "secret result arguments are invalid".to_owned(),
+            ));
+        }
+
+        let user_name = if user_name_capacity == 0 {
+            &mut []
+        } else {
+            slice::from_raw_parts_mut(user_name_buffer, user_name_capacity)
+        };
+        let secret = if secret_capacity == 0 {
+            &mut []
+        } else {
+            slice::from_raw_parts_mut(secret_buffer, secret_capacity)
+        };
+        with_session_result(handle, true, |session| {
+            let (returned_user_name_length, returned_secret_length) = session
+                .invoke_secret_result(expected_kind, user_name, secret)
+                .map_err(|_| {
+                    (
+                        Status::ManagedFailure,
+                        "secret-bound PowerShell operation failed".to_owned(),
+                    )
+                })?;
+            *user_name_length = returned_user_name_length;
+            *secret_length = returned_secret_length;
+            Ok(Status::Success)
         })
     })
 }
@@ -10211,7 +10311,8 @@ mod tests {
             | FEATURE_GENERATED_BRIDGE_ATTACHMENT
             | FEATURE_BROKER_TERMINAL_OBSERVATION
             | FEATURE_RELIABLE_BRIDGE_EVENTS
-            | FEATURE_OBSERVED_PRESENTATION;
+            | FEATURE_OBSERVED_PRESENTATION
+            | FEATURE_SECRET_ADAPTERS;
 
         assert_eq!(ABI_VERSION, 2);
         assert_eq!(MINIMUM_COMPATIBLE_ABI_VERSION, 2);
@@ -12536,6 +12637,31 @@ mod tests {
             values.push(String::from_utf8(value).unwrap());
         }
         values
+    }
+
+    #[test]
+    fn secret_parameter_values_are_private_to_parameter_binding() {
+        let secret_utf16 = [0x41_u8, 0, 0x42, 0];
+        assert!(validate_secret_parameter_value(SECRET_VALUE_KIND_UTF16, &secret_utf16).is_ok());
+        assert_eq!(
+            validate_value_payload(SECRET_VALUE_KIND_UTF16, &secret_utf16, 0)
+                .expect_err("ordinary tagged values must reject secret kinds")
+                .0,
+            Status::UnsupportedValue
+        );
+
+        let mut credential = Vec::new();
+        credential.extend_from_slice(&4_u32.to_ne_bytes());
+        credential.extend_from_slice(b"user");
+        credential.extend_from_slice(&secret_utf16);
+        assert!(validate_secret_parameter_value(SECRET_VALUE_KIND_CREDENTIAL, &credential).is_ok());
+    }
+
+    #[test]
+    fn secret_parameter_values_reject_malformed_payloads() {
+        assert!(validate_secret_parameter_value(SECRET_VALUE_KIND_UTF16, &[0x41]).is_err());
+        assert!(validate_secret_parameter_value(SECRET_VALUE_KIND_UTF16, &[0, 0]).is_err());
+        assert!(validate_secret_parameter_value(SECRET_VALUE_KIND_CREDENTIAL, &[0, 0, 0, 0]).is_err());
     }
 
     fn property_bag_payload(entries: &[(&str, u32, &[u8])]) -> Vec<u8> {

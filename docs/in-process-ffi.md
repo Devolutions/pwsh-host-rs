@@ -575,14 +575,14 @@ below defines the generic managed facade boundary.
 | Application need | Status | FFI replacement and boundary |
 | --- | --- | --- |
 | Explicit payload activation, hostfxr startup, one runtime per process | Implemented | Direct payload or `PATH` activation and an opaque `PowerShellRuntime`; only `win-x64` has NativeAOT smoke evidence. |
-| Script or named-command execution with scalar parameters | Implemented | `AddScript`, `AddCommand`, `AddParameter`, and bounded `PowerShellValue` inputs. No raw `object`, `PSObject`, or `SecureString` overload exists. |
+| Script or named-command execution with scalar parameters | Implemented | `AddScript`, `AddCommand`, `AddParameter`, and bounded `PowerShellValue` inputs. No raw `object` or `PSObject` crosses the boundary. |
 | Script parameter declarations and syntax errors | Implemented, copied-only | `PowerShellRuntime.ParseScriptParameters` passes the input to payload-local `Parser.ParseInput` as data, never executable pipeline text. It returns bounded parameter/parse-error DTOs, not SMA AST or token objects. |
 | Output, errors, diagnostics, warning/progress streams | Implemented | Immutable bounded snapshots, typed result pages, and observed result/diagnostic cursors. `ReadPresentation` adds fixed copied progress fields for pull-based text/progress rendering; it never returns SMA records or objects. |
 | Timeout, cancellation, async completion, deterministic disposal | Implemented | `InvokeAsync(CancellationToken)`, `BeginInvoke`, `Wait`, `Stop`, and `SafeHandle` ownership. Cancellation wins and never returns a partial success result. |
-| Long-lived local state | Implemented, local-only | Opaque local `PowerShellSession` plus serialized builders. Snapshots are telemetry only; generic durable restore, module provenance sealing, pools, and remoting are excluded. |
+| Long-lived local state | Implemented, local-only | Opaque local `PowerShellSession` plus serialized builders. `PowerShellRemoteSession` retains one payload-local PSSession and returns fixed copied metadata only; generic durable restore and pools are excluded. |
 | `SessionStateProxy.SetVariable` for value data | Implemented, copied-only | `SetVariable`, `TryGetVariable`, and `RemoveVariable` transfer bounded tagged values only. No methods, proxies, handles, or CLR identity survive the boundary. |
-| Application-selected local modules | Implemented, local-only | Each requested import is resolved by name beneath a caller-supplied module root. This does not validate PowerCLI or remoting dependencies. |
-| `PSCredential` parameter | Intentionally unsupported | Arbitrary scripts can emit or transform a supplied credential. The DTO result model cannot guarantee redaction or a zeroable managed lifetime. |
+| Application-selected local modules | Implemented, local-only | `PowerShellModuleImport` declares a bounded name/path, required version, and finite import options. Paths remain subject to caller-supplied roots; this does not validate PowerCLI or remoting dependencies. |
+| `SecureString` / `PSCredential` parameter | Implemented, explicit lease only | `PowerShellSecret` and `PowerShellCredential` create payload-local SMA values. Secret-bound pipelines reject ordinary output, diagnostics, paging, and async paths; the explicit invocation API returns only no result, one leased secure string, or one leased credential. |
 | Enumerated application capability calls and bounded host interaction | Implemented, opt-in | A registered `PowerShellCapabilitySet` makes only declared typed calls available through the temporary payload-local `$DpsCapabilities` object. `PowerShellHostInteraction` supplies schemas for text, progress, line, and choice interactions; it is not a `PSHost` proxy. |
 | Asynchronous application requests from a pipeline without a callback on the pipeline thread | Implemented, opt-in | The Duplex Broker Channel. Strictly dispatch-only: a pump copies a bounded opaque frame, releases it, and replies later by correlation ID. It carries no CLR object, delegate, secret, or self-describing wire format. |
 | PowerCLI typed return objects, PSRP/WinRM/SSH, pools, and transports | Unsupported | Retain the existing SMA/process paths. No CLR type, transport, or live session crosses the facade. |
@@ -756,26 +756,38 @@ remoting/PSRP, credentials, live application objects, arbitrary callbacks, or an
 ambient `PSModulePath`. Any such behavior requires a separately designed
 boundary rather than an exception to this contract.
 
-### Credentials remain a hard rejection boundary
+### Explicit secret lease boundary
 
-There is no `PowerShellSecret`, `PowerShellCredential`, `SecureString`,
-password-specific parameter, or serialized credential path in this API.
-General string values remain ordinary DTO data and must never be used as a
-secret transport. Passing a credential to an arbitrary script would let that
-script write, encode, or throw it into ordinary result/error streams. A
-one-time ABI buffer does not solve that exfiltration problem, and accepting one
-would make the facade's redaction and zeroization guarantees false. Applications
-that require `PSCredential` must use a separately designed boundary.
+`PowerShellSecret` is a bounded, disposable UTF-16 lease. It can only be bound
+as a payload-local `SecureString`; `PowerShellCredential` pairs that lease with
+a copied user name to create a payload-local `PSCredential`. These are private
+parameter encodings, not `PowerShellValue` kinds: ordinary arguments, input,
+session variables, property bags, snapshots, pagers, serializers, bridge
+contracts, and broker frames continue to reject secret material.
 
-The threat model assumes the invoked payload script, a module it loads, and
-PowerShell formatting/error behavior are all capable of observing a bound
-credential. They can return it through output, an error, a progress message, a
-serialization transform, or process memory that cannot be synchronously
-zeroized from the parent. The native boundary therefore makes no promise that
-could be defeated by script behavior: it transfers no credential material,
-does not retain secret handles, and rejects the dedicated API before payload
-binding. This protects the DTO/snapshot contract, not a caller that manually
-places a password in a general string or script.
+A secret-bound builder rejects normal invoke, async/live invocation, typed
+pages, result snapshots, and copied diagnostics. It must call
+`InvokeWithSecretBindings()` or `InvokeSecretResult(...)`. The latter accepts
+only an explicit result kind: no output, one `SecureString`, or one
+`PSCredential`; it returns a redacted disposable lease and generic failure text.
+The payload clears its secure-string copies when the builder is cleared,
+released, or finishes the dedicated invocation. The public lease zeroes its
+managed character buffer on disposal.
+
+This limits accidental FFI, logging, and DTO disclosure. It does **not** make
+an arbitrary script, module, or remoting endpoint trustworthy: any code that
+receives a credential can deliberately emit or retain it. General strings are
+never a supported secret path, and consumers must not place secrets in script
+text, `PowerShellValue`, or any copied result path.
+
+For persistent local sessions, use
+`PowerShellSessionConfiguration.CreateWithModuleImports(...)` with
+`PowerShellModuleImport` declarations. Name and path declarations are bounded;
+explicit paths must resolve below an approved root, while named imports are
+resolved from the payload's approved `PSModulePath`. The package smoke verifies
+the local secret and module cases. Set `PWSH_FFI_REMOTE_COMPUTER` in a controlled
+environment to opt into its PSSession adapter proof; remoting is otherwise not
+an installation or test prerequisite.
 
 ### Bounded capability RPC and host interaction
 
@@ -2769,24 +2781,23 @@ member, so the closed `Enum32` allow-list cannot validate it.
 
 This is not binary or source compatible with the full PowerShell SDK. The
 facade cannot transfer live `PSObject`, runspace, delegate, custom `PSHost`, or
-arbitrary CLR object values. It exposes no SMA types. Secret and credential
-transfer is an explicit rejection boundary:
-`PowerShellSecretTransfer.Policy` is `Rejected` and
-`PowerShellSecretTransfer.ThrowNotSupported()` throws a typed exception.
-`SecureString`, `PSCredential`, raw serialized credentials, and secret DTOs
-are deliberately not accepted. Because arbitrary PowerShell can expose any
-input it receives, this facade cannot truthfully guarantee secret redaction,
-serializer safety, or zeroable managed credential lifetime. Do not put secrets
-in tagged values or session variables; snapshots are copied general output, not
-a secret store. Snapshot values are
+arbitrary CLR object values. It exposes no SMA types. Secret transfer is limited
+to `PowerShellSecret` and `PowerShellCredential` parameter leases and the
+dedicated, explicitly shaped secret-result API. It does not make arbitrary
+PowerShell safe or provide a universal zeroization guarantee. Do not put
+secrets in tagged values or session variables; snapshots are copied general
+output, not a secret store. Snapshot values are
 intentionally copied data rather than live objects: they do not provide
-arbitrary property access, opaque object handles, callbacks, secret transfer,
-pools, remoting, or generic CLR object serialization.
+arbitrary property access, opaque object handles, callbacks, pools, or generic
+CLR object serialization.
 
-Sessions do not accept live `PSHost` values, arbitrary callbacks/delegates, credentials,
+Sessions do not accept live `PSHost` values, arbitrary callbacks/delegates,
 runspace connection information, remoting transports/providers, nested live
 PowerShell, steppable pipelines, generic CLR values, or arbitrary initial
-session-state objects. Capability callbacks are registered immutable DTO
+session-state objects. `PowerShellRemoteSession` is a finite exception: it can
+create and remove a payload-owned PSSession with fixed endpoint options and an
+optional credential lease, but exposes no transport abstraction, remote object,
+or bridge-object injection. Capability callbacks are registered immutable DTO
 handlers only; there is no host callback vtable, callback rooting,
 prompt/credential callback, or arbitrary delegate/object bridge. The Duplex
 Broker Channel does not change this: it is a pull pump over bounded opaque byte

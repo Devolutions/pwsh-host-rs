@@ -1761,11 +1761,10 @@ VerifyCompleteResultProjection(runtime);
 await VerifyRecipesSchemasAndPoliciesAsync(runtime);
 await VerifyTypedResultPagingAsync(runtime);
 await VerifyObservedInvocationAsync(runtime);
-const string SecretMarker = "ffi-secret-marker-not-accepted";
 Require(
    PowerShellSecretTransfer.Policy == PowerShellSecretTransferPolicy.Rejected &&
    typeof(PowerShellSecretTransfer).GetMethod(nameof(PowerShellSecretTransfer.ThrowNotSupported), BindingFlags.Public | BindingFlags.Static)!.GetParameters().Length == 0,
-   "The secret-transfer rejection boundary unexpectedly accepts input.");
+   "The explicit secret-transfer boundary is unavailable.");
 try
 {
    PowerShellSecretTransfer.ThrowNotSupported();
@@ -1774,24 +1773,78 @@ try
 catch (PowerShellSecretTransferNotSupportedException exception)
 {
    Require(
-       !exception.Message.Contains(SecretMarker, StringComparison.Ordinal),
-       "Secret-transfer rejection leaked a caller marker into diagnostics.");
+       !exception.Message.Contains("fixture", StringComparison.OrdinalIgnoreCase),
+       "The legacy secret-transfer exception leaked a caller marker into diagnostics.");
 }
+
+char[] secretCharacters =
+[
+   (char)102, (char)105, (char)120, (char)116, (char)117, (char)114, (char)101,
+   (char)45, (char)115, (char)101, (char)99, (char)114, (char)101, (char)116,
+];
+string secretMarker = new(secretCharacters);
+using (PowerShellSecret secret = PowerShellSecret.Create(secretCharacters))
+using (PowerShellCredential credential = new("fixture-user", secret))
+{
+   Require(
+       !secret.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
+       !credential.ToString().Contains(secretMarker, StringComparison.Ordinal),
+       "Secret lease diagnostics exposed the fixture secret.");
+
+   using (PowerShell secretPipeline = runtime.Create())
+   {
+       using PowerShellSecretResult secretResult = secretPipeline
+           .AddScript("param([PSCredential]`$Credential) `$Credential.Password")
+           .AddParameter("Credential", credential)
+           .InvokeSecretResult(PowerShellSecretResultKind.SecureString);
+       Require(
+           secretResult.Kind == PowerShellSecretResultKind.SecureString &&
+           secretResult.Secret is not null &&
+           !secretResult.ToString().Contains(secretMarker, StringComparison.Ordinal) &&
+           !secretResult.Secret.ToString().Contains(secretMarker, StringComparison.Ordinal),
+           "The explicit credential input or redacted SecureString output contract failed.");
+   }
+
+   using (PowerShell normalResultPipeline = runtime.Create())
+   {
+       try
+       {
+           normalResultPipeline
+               .AddScript("param([PSCredential]`$Credential) 'normal-output'")
+               .AddParameter("Credential", credential)
+               .InvokeWithDiagnostics();
+           return 1;
+       }
+       catch (PowerShellFfiException exception)
+       {
+           Require(
+               !exception.Message.Contains(secretMarker, StringComparison.Ordinal),
+               "Secret-bound normal invocation leaked the fixture secret.");
+       }
+   }
+
+   try
+   {
+       _ = PowerShellValue.From(secret);
+       return 1;
+   }
+   catch (PowerShellValueConversionException)
+   {
+   }
+}
+Array.Clear(secretCharacters);
 using (var secureString = new SecureString())
 {
-    foreach (char character in SecretMarker)
-    {
-       secureString.AppendChar(character);
-    }
-    secureString.MakeReadOnly();
-    try
-    {
+   secureString.AppendChar((char)120);
+   secureString.MakeReadOnly();
+   try
+   {
        _ = PowerShellValue.From(secureString);
        return 1;
-    }
-    catch (PowerShellValueConversionException)
-    {
-    }
+   }
+   catch (PowerShellValueConversionException)
+   {
+   }
 }
 try
 {
@@ -1848,8 +1901,8 @@ using (PowerShell projectionBuilder = PowerShell.Create())
 
     byte[] stored = PowerShellSnapshotSerializer.Serialize(projectionResult);
     Require(
-        !Encoding.UTF8.GetString(stored).Contains(SecretMarker, StringComparison.Ordinal),
-        "Snapshot serialization leaked a rejected secret marker.");
+        !Encoding.UTF8.GetString(stored).Contains(secretMarker, StringComparison.Ordinal),
+        "Snapshot serialization leaked the explicit secret fixture.");
     PowerShellInvocationResult restored = PowerShellSnapshotSerializer.Deserialize(stored);
     PowerShellValue? restoredBag = restored.Output.Records[0].PropertyBag;
     Require(
@@ -2125,6 +2178,38 @@ try
         contained.ModuleImports.Single().Status == PowerShellSessionModuleImportStatus.Resolved,
         "Session preflight rejected a manifest whose module references are contained or name-based.");
 
+    string declaredModuleName = "DeclaredModuleImport";
+    string declaredModuleDirectory = Path.Combine(preflightRoot, declaredModuleName);
+    Directory.CreateDirectory(declaredModuleDirectory);
+    File.WriteAllText(
+        Path.Combine(declaredModuleDirectory, $"{declaredModuleName}.psd1"),
+        $"@{{ RootModule = '{declaredModuleName}.psm1'; ModuleVersion = '1.0'; FunctionsToExport = @('Get-DeclaredModuleValue') }}");
+    File.WriteAllText(
+        Path.Combine(declaredModuleDirectory, $"{declaredModuleName}.psm1"),
+        "function Get-DeclaredModuleValue { 'declared-module-value' }");
+    PowerShellSessionConfiguration declaredModuleConfiguration =
+        PowerShellSessionConfiguration.CreateWithModuleImports(
+            new[]
+            {
+                new PowerShellModuleImport(
+                    declaredModuleName,
+                    new Version(1, 0),
+                    PowerShellModuleImportOptions.Force),
+            },
+            allowedModulePaths: new[] { preflightRoot });
+    using (PowerShellSession declaredModuleSession = runtime.CreateSession(
+        new PowerShellSessionOptions(configuration: declaredModuleConfiguration)))
+    using (PowerShell declaredModuleCommand = declaredModuleSession.CreatePowerShell())
+    {
+        PowerShellInvocationResult declaredModuleResult = declaredModuleCommand
+            .AddCommand("Get-DeclaredModuleValue")
+            .InvokeWithDiagnostics();
+        Require(
+            declaredModuleResult.Output.Records.Count == 1 &&
+            declaredModuleResult.Output.Records[0].DisplayText == "declared-module-value",
+            "A declared module import did not remain within its approved module root.");
+    }
+
     PowerShellSessionPreflightReport missingWorkingDirectory = runtime.ValidateSessionConfiguration(
         new PowerShellSessionConfiguration(
             allowedModulePaths: new[] { preflightRoot },
@@ -2189,6 +2274,22 @@ using PowerShellSession session = runtime.CreateSession(
         historyMode: PowerShellSessionHistoryMode.Enabled,
         errorPreference: PowerShellSessionPreference.Stop,
         configuration: sessionConfiguration));
+string? remoteComputer = Environment.GetEnvironmentVariable("PWSH_FFI_REMOTE_COMPUTER");
+if (!string.IsNullOrWhiteSpace(remoteComputer))
+{
+    using PowerShellRemoteSession remoteSession = PowerShellRemoteSession.Create(
+        session,
+        new PowerShellRemoteSessionOptions(remoteComputer));
+    PowerShellRemoteSessionMetadata remoteMetadata = remoteSession.GetMetadata();
+    PowerShellInvocationResult remoteResult = remoteSession.InvokeScript("'remote-package-smoke'");
+    Require(
+        remoteMetadata.Id > 0 &&
+        !string.IsNullOrWhiteSpace(remoteMetadata.State) &&
+        !string.IsNullOrWhiteSpace(remoteMetadata.ComputerName) &&
+        remoteResult.Output.Records.Count == 1 &&
+        remoteResult.Output.Records[0].DisplayText == "remote-package-smoke",
+        "The environment-configured PSSession adapter smoke test failed.");
+}
 using PowerShell sessionPowerShell = session.CreatePowerShell();
 PowerShellInvocationResult sessionResult = sessionPowerShell
     .AddScript("@(`$FfiMarker, `$FfiNumber, `$env:DPS_FFI_TEST, (Get-Location).Path, `$ErrorActionPreference)")

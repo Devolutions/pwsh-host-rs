@@ -452,18 +452,42 @@ Raw ABI releases consume their handles, so a repeated raw release or later use
 returns `InvalidHandle`. Public `Dispose` methods are idempotent; their
 `SafeHandle` leases defer native release until any in-flight facade call exits.
 
-The facade never accepts `PSHost`, delegates/callbacks, connection info,
-remoting providers, credentials, `SecureString`, serialized credentials,
-nested or steppable pipelines, generic CLR values, or live
-runspace/PowerShell objects. `PowerShellSecretTransfer.Policy` is explicitly
-`Rejected`; `ThrowNotSupported()` produces a typed exception rather than
-accepting secret material. An arbitrary script can deliberately emit any value
-it receives, so this boundary cannot promise secret redaction or a zeroable
-managed credential lifetime. Do not place secrets in `PowerShellValue` or
-session variables: snapshots and their serializer are general copied output,
-not a secret store. There is no prompt or callback channel. Opaque object
-handles, secret transfer, pools, remoting, and arbitrary CLR-object transfer
-remain non-goals.
+The facade never accepts `PSHost`, delegates/callbacks, generic CLR values, or
+live runspace/PowerShell objects. `PowerShellSecretTransfer.Policy` remains
+`Rejected` for legacy implicit-transfer callers. Separately, a
+`PowerShellSecret` lease may be bound as a payload-local
+`SecureString`, and `PowerShellCredential` constructs a payload-local
+`PSCredential`. A secret-bound pipeline must use `InvokeWithSecretBindings()`
+or `InvokeSecretResult(...)`; normal snapshots, paging, async/live operations,
+and diagnostics reject it. The only return shapes are no result, one
+`SecureString`, or one `PSCredential`, exposed through a disposable redacted
+lease. The payload disposes its copied secure strings when the builder clears,
+releases, or completes a secret invocation; the public lease zeroes its managed
+character buffer on disposal.
+
+This is an accidental-disclosure boundary, not a sandbox for malicious scripts:
+a script that receives a credential can deliberately disclose it. Do not place
+secrets in `PowerShellValue`, session variables, bridge/DBC frames, result
+snapshots, or serializers. There is no prompt or callback channel. The generic
+`PowerShellRemoteSession` keeps an optional `PSSession` only inside a supplied
+persistent local session, exposes fixed copied metadata and copied invocation
+results, and removes it deterministically. It does not transfer remote object
+identity, arbitrary `PSObject` graphs, transports, or local bridge objects.
+Actual remoting and module availability remain the installed payload's
+responsibility.
+
+`PowerShellModuleImport` provides bounded name-or-path, required-version, and
+finite import-option declarations for persistent sessions. It does not install
+or resolve modules outside the configured approved roots. Use
+`PowerShellSessionConfiguration.CreateWithModuleImports(...)` to construct a
+configuration that includes these declarations without changing the established
+constructor contract.
+
+The package smoke exercises the local secret and declared-module paths. Set
+`PWSH_FFI_REMOTE_COMPUTER` only in a controlled test environment to additionally
+exercise `PowerShellRemoteSession`; it uses the installed payload's remoting
+configuration and default authentication, and is not required for ordinary
+local package validation.
 
 For an additive one-shot administrative pilot, build a command with
 `AddCommand("Restart-Computer")`, use `AddParameter("WhatIf")` for tests, and

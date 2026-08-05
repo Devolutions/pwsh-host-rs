@@ -32,6 +32,7 @@ const FFI_FEATURE_DUPLEX_BROKER_CHANNEL: u64 = 1 << 25;
 const FFI_FEATURE_GENERATED_BRIDGE_ATTACHMENT: u64 = 1 << 26;
 const FFI_FEATURE_RELIABLE_BRIDGE_EVENTS: u64 = 1 << 28;
 const FFI_FEATURE_OBSERVED_PRESENTATION: u64 = 1 << 29;
+const FFI_FEATURE_SECRET_ADAPTERS: u64 = 1 << 30;
 const FFI_REQUIRED_FEATURES: u64 = FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
     | FFI_FEATURE_SESSION_PRIMITIVES
     | FFI_FEATURE_SESSION_POLLING
@@ -50,7 +51,8 @@ const FFI_REQUIRED_FEATURES: u64 = FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
     | FFI_FEATURE_DUPLEX_BROKER_CHANNEL
     | FFI_FEATURE_GENERATED_BRIDGE_ATTACHMENT
     | FFI_FEATURE_RELIABLE_BRIDGE_EVENTS
-    | FFI_FEATURE_OBSERVED_PRESENTATION;
+    | FFI_FEATURE_OBSERVED_PRESENTATION
+    | FFI_FEATURE_SECRET_ADAPTERS;
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_BUFFER_TOO_SMALL: i32 = 1;
 const VALUE_KIND_PROPERTY_BAG: u32 = 14;
@@ -178,6 +180,7 @@ struct FfiApiV1 {
     power_shell_set_broker_context_fn: *const libc::c_void,
     power_shell_set_bridge_context_fn: *const libc::c_void,
     observed_diagnostic_page_copy_record_value_fn: *const libc::c_void,
+    power_shell_invoke_secret_result_fn: *const libc::c_void,
 }
 
 type FnBindingsGetFfiApiV1 = unsafe extern "system" fn() -> *const FfiApiV1;
@@ -199,6 +202,17 @@ type FnFfiPowerShellClear = unsafe extern "system" fn(PowerShellHandle, *mut Ffi
 type FnFfiPowerShellStop = unsafe extern "system" fn(PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiPowerShellInvokeToResult =
     unsafe extern "system" fn(PowerShellHandle, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
+type FnFfiPowerShellInvokeSecretResult = unsafe extern "system" fn(
+    PowerShellHandle,
+    u32,
+    *mut u8,
+    i32,
+    *mut i32,
+    *mut u16,
+    i32,
+    *mut i32,
+    *mut FfiCallResult,
+) -> i32;
 type FnFfiPowerShellBeginLiveInvocation =
     unsafe extern "system" fn(PowerShellHandle, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiLiveInvocationPoll = unsafe extern "system" fn(PowerShellHandle, *mut i32, *mut FfiCallResult) -> i32;
@@ -501,6 +515,7 @@ pub(crate) struct FfiBindings {
     runtime_diagnostics_copy_power_shell_file_version_utf8_fn: FnFfiRuntimeDiagnosticsCopyPowerShellFileVersionUtf8,
     power_shell_set_broker_context_fn: FnFfiPowerShellSetBrokerContext,
     power_shell_set_bridge_context_fn: FnFfiPowerShellSetBridgeContext,
+    power_shell_invoke_secret_result_fn: FnFfiPowerShellInvokeSecretResult,
 }
 
 pub struct FfiPayloadRuntimeDiagnostics {
@@ -722,6 +737,7 @@ impl FfiBindings {
             api.power_shell_set_broker_context_fn,
             api.power_shell_set_bridge_context_fn,
             api.observed_diagnostic_page_copy_record_value_fn,
+            api.power_shell_invoke_secret_result_fn,
         ];
         if fields.iter().any(|field| field.is_null()) {
             return Err(Error::IO(std::io::Error::new(
@@ -1045,6 +1061,11 @@ impl FfiBindings {
             power_shell_set_bridge_context_fn: unsafe {
                 mem::transmute::<*const libc::c_void, FnFfiPowerShellSetBridgeContext>(
                     api.power_shell_set_bridge_context_fn,
+                )
+            },
+            power_shell_invoke_secret_result_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellInvokeSecretResult>(
+                    api.power_shell_invoke_secret_result_fn,
                 )
             },
             power_shell_set_capability_context_fn: unsafe {
@@ -1464,6 +1485,40 @@ impl FfiPowerShell {
 
         String::from_utf8(output)
             .map_err(|_| FfiBindingError::from_status(-6, "managed PowerShell output is not UTF-8".to_owned()))
+    }
+
+    pub fn invoke_secret_result(
+        &self,
+        expected_kind: u32,
+        user_name: &mut [u8],
+        secret: &mut [u16],
+    ) -> Result<(usize, usize), FfiBindingError> {
+        let mut user_name_length = 0_i32;
+        let mut secret_length = 0_i32;
+        self.call(|handle, result| unsafe {
+            (self.bindings.power_shell_invoke_secret_result_fn)(
+                handle,
+                expected_kind,
+                user_name.as_mut_ptr(),
+                i32::try_from(user_name.len()).unwrap_or(i32::MAX),
+                &mut user_name_length,
+                secret.as_mut_ptr(),
+                i32::try_from(secret.len()).unwrap_or(i32::MAX),
+                &mut secret_length,
+                result,
+            )
+        })?;
+        let user_name_length = usize::try_from(user_name_length)
+            .ok()
+            .filter(|length| *length <= user_name.len())
+            .ok_or_else(|| {
+                FfiBindingError::from_status(-6, "managed credential user name length is invalid".to_owned())
+            })?;
+        let secret_length = usize::try_from(secret_length)
+            .ok()
+            .filter(|length| *length <= secret.len())
+            .ok_or_else(|| FfiBindingError::from_status(-6, "managed secret length is invalid".to_owned()))?;
+        Ok((user_name_length, secret_length))
     }
 
     pub fn invoke_to_result(&self) -> Result<FfiInvocationResult, FfiBindingError> {

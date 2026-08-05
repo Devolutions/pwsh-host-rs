@@ -1136,3 +1136,60 @@ facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStream
 facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamIdentity
 facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventStreamInfo
 facade:type:Devolutions.PowerShell.Ffi.PowerShellBridgeReliableEventTerminalState
+bindings:FfiPowerShell_InvokeSecretResult
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellCredential::Void .ctor(System.String, Devolutions.PowerShell.Ffi.PowerShellSecret)
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellModuleImport::Void .ctor(System.String, System.Version, Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions)
+facade:ctor:Devolutions.PowerShell.Ffi.PowerShellRemoteSessionOptions::Void .ctor(System.String, Devolutions.PowerShell.Ffi.PowerShellCredential, Boolean, Int32)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSessionConfiguration::Devolutions.PowerShell.Ffi.PowerShellSessionConfiguration CreateWithModuleImports(System.Collections.Generic.IEnumerable`1[Devolutions.PowerShell.Ffi.PowerShellModuleImport], System.Collections.Generic.IEnumerable`1[System.Collections.Generic.KeyValuePair`2[System.String,Devolutions.PowerShell.Ffi.PowerShellValue]], System.Collections.Generic.IEnumerable`1[System.String], System.Collections.Generic.IEnumerable`1[System.String], System.String, System.Collections.Generic.IEnumerable`1[System.Collections.Generic.KeyValuePair`2[System.String,System.String]], Devolutions.PowerShell.Ffi.PowerShellSessionExecutionPolicy)
+facade:field:Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions::Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions All
+facade:field:Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions::Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions DisableNameChecking
+facade:field:Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions::Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions Force
+facade:field:Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions::Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions None
+facade:field:Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions::Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions SkipEditionCheck
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSecretResultKind::Devolutions.PowerShell.Ffi.PowerShellSecretResultKind Credential
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSecretResultKind::Devolutions.PowerShell.Ffi.PowerShellSecretResultKind None
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSecretResultKind::Devolutions.PowerShell.Ffi.PowerShellSecretResultKind SecureString
+facade:field:Devolutions.PowerShell.Ffi.PowerShellSecretTransferPolicy::Devolutions.PowerShell.Ffi.PowerShellSecretTransferPolicy ExplicitLeaseOnly
+facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShell AddParameter(System.String, Devolutions.PowerShell.Ffi.PowerShellCredential)
+facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShell AddParameter(System.String, Devolutions.PowerShell.Ffi.PowerShellSecret)
+facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShellSecretResult InvokeSecretResult(Devolutions.PowerShell.Ffi.PowerShellSecretResultKind)
+facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShellSecretResult InvokeWithSecretBindings()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellCredential::System.String ToString()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellCredential::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRemoteSession::Devolutions.PowerShell.Ffi.PowerShellInvocationResult InvokeCommand(System.String, System.Collections.Generic.IEnumerable`1[Devolutions.PowerShell.Ffi.PowerShellValue])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRemoteSession::Devolutions.PowerShell.Ffi.PowerShellInvocationResult InvokeScript(System.String, System.Collections.Generic.IEnumerable`1[Devolutions.PowerShell.Ffi.PowerShellValue])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRemoteSession::Devolutions.PowerShell.Ffi.PowerShellRemoteSession Create(Devolutions.PowerShell.Ffi.PowerShellSession, Devolutions.PowerShell.Ffi.PowerShellRemoteSessionOptions)
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRemoteSession::Devolutions.PowerShell.Ffi.PowerShellRemoteSessionMetadata GetMetadata()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellRemoteSession::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSecret::Devolutions.PowerShell.Ffi.PowerShellSecret Create(System.ReadOnlySpan`1[System.Char])
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSecret::System.String ToString()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSecret::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSecretResult::System.String ToString()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSecretResult::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSession::Void ImportModule(Devolutions.PowerShell.Ffi.PowerShellModuleImport)
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredential::System.String UserName
+facade:property:Devolutions.PowerShell.Ffi.PowerShellModuleImport::Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions Options
+facade:property:Devolutions.PowerShell.Ffi.PowerShellModuleImport::System.String NameOrPath
+facade:property:Devolutions.PowerShell.Ffi.PowerShellModuleImport::System.Version RequiredVersion
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRemoteSessionMetadata::Int64 Id
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRemoteSessionMetadata::System.String Availability
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRemoteSessionMetadata::System.String ComputerName
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRemoteSessionMetadata::System.String State
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRemoteSessionOptions::Boolean UseSsl
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRemoteSessionOptions::Devolutions.PowerShell.Ffi.PowerShellCredential Credential
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRemoteSessionOptions::Int32 Port
+facade:property:Devolutions.PowerShell.Ffi.PowerShellRemoteSessionOptions::System.String ComputerName
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSecretResult::Devolutions.PowerShell.Ffi.PowerShellCredential Credential
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSecretResult::Devolutions.PowerShell.Ffi.PowerShellSecret Secret
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSecretResult::Devolutions.PowerShell.Ffi.PowerShellSecretResultKind Kind
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSessionConfiguration::System.Collections.Generic.IReadOnlyList`1[Devolutions.PowerShell.Ffi.PowerShellModuleImport] ModuleImportSpecifications
+facade:type:Devolutions.PowerShell.Ffi.PowerShellCredential
+facade:type:Devolutions.PowerShell.Ffi.PowerShellModuleImport
+facade:type:Devolutions.PowerShell.Ffi.PowerShellModuleImportOptions
+facade:type:Devolutions.PowerShell.Ffi.PowerShellRemoteSession
+facade:type:Devolutions.PowerShell.Ffi.PowerShellRemoteSessionMetadata
+facade:type:Devolutions.PowerShell.Ffi.PowerShellRemoteSessionOptions
+facade:type:Devolutions.PowerShell.Ffi.PowerShellSecret
+facade:type:Devolutions.PowerShell.Ffi.PowerShellSecretResult
+facade:type:Devolutions.PowerShell.Ffi.PowerShellSecretResultKind
+native:multi_pwsh_invoke_secret_result

@@ -340,6 +340,19 @@ internal static unsafe partial class NativeMethods
         NativeDataValue* value,
         NativeCallResult* result);
 
+    [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_invoke_secret_result")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial int InvokeSecretResult(
+        ulong handle,
+        uint expectedKind,
+        byte* userNameBuffer,
+        nuint userNameCapacity,
+        nuint* userNameLength,
+        char* secretBuffer,
+        nuint secretCapacity,
+        nuint* secretLength,
+        NativeCallResult* result);
+
     [LibraryImport(LibraryName, EntryPoint = "multi_pwsh_add_parameter_switch")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial int AddParameterSwitch(
