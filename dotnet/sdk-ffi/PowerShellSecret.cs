@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Security;
 using System.Security.Cryptography;
 
 namespace Devolutions.PowerShell.Ffi;
@@ -43,7 +44,16 @@ public sealed class PowerShellSecret : IDisposable
         return new PowerShellSecret(value);
     }
 
-    internal void CopyTo(Span<char> destination)
+    /// <summary>
+    /// Gets the number of UTF-16 code units in this secret.
+    /// </summary>
+    public int Length => (value ?? throw new ObjectDisposedException(nameof(PowerShellSecret))).Length;
+
+    /// <summary>
+    /// Copies the secret to a caller-owned buffer. The caller must clear the
+    /// buffer after use.
+    /// </summary>
+    public void CopyTo(Span<char> destination)
     {
         char[] source = value ?? throw new ObjectDisposedException(nameof(PowerShellSecret));
         if (destination.Length != source.Length)
@@ -54,7 +64,22 @@ public sealed class PowerShellSecret : IDisposable
         source.AsSpan().CopyTo(destination);
     }
 
-    internal int Length => (value ?? throw new ObjectDisposedException(nameof(PowerShellSecret))).Length;
+    /// <summary>
+    /// Creates an independently owned, read-only <see cref="SecureString"/>.
+    /// The caller must dispose the returned value.
+    /// </summary>
+    public SecureString ToSecureString()
+    {
+        char[] source = value ?? throw new ObjectDisposedException(nameof(PowerShellSecret));
+        var secureString = new SecureString();
+        foreach (char character in source)
+        {
+            secureString.AppendChar(character);
+        }
+
+        secureString.MakeReadOnly();
+        return secureString;
+    }
 
     public override string ToString() => "<redacted PowerShell secret>";
 

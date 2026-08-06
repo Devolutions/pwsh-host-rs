@@ -33,6 +33,7 @@ const FFI_FEATURE_GENERATED_BRIDGE_ATTACHMENT: u64 = 1 << 26;
 const FFI_FEATURE_RELIABLE_BRIDGE_EVENTS: u64 = 1 << 28;
 const FFI_FEATURE_OBSERVED_PRESENTATION: u64 = 1 << 29;
 const FFI_FEATURE_SECRET_ADAPTERS: u64 = 1 << 30;
+const FFI_FEATURE_CREDENTIAL_RESULT: u64 = 1 << 31;
 const FFI_REQUIRED_FEATURES: u64 = FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
     | FFI_FEATURE_SESSION_PRIMITIVES
     | FFI_FEATURE_SESSION_POLLING
@@ -52,7 +53,8 @@ const FFI_REQUIRED_FEATURES: u64 = FFI_FEATURE_ASYNC_OPERATION_PRIMITIVES
     | FFI_FEATURE_GENERATED_BRIDGE_ATTACHMENT
     | FFI_FEATURE_RELIABLE_BRIDGE_EVENTS
     | FFI_FEATURE_OBSERVED_PRESENTATION
-    | FFI_FEATURE_SECRET_ADAPTERS;
+    | FFI_FEATURE_SECRET_ADAPTERS
+    | FFI_FEATURE_CREDENTIAL_RESULT;
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_BUFFER_TOO_SMALL: i32 = 1;
 const VALUE_KIND_PROPERTY_BAG: u32 = 14;
@@ -66,6 +68,30 @@ struct FfiCallResult {
     diagnostic_capacity: i32,
     diagnostic_required_length: i32,
     diagnostic_written_length: i32,
+}
+
+#[repr(C)]
+pub struct FfiCredentialResult {
+    pub size: u32,
+    pub is_cancelled: u32,
+    pub username: *mut u8,
+    pub username_capacity: i32,
+    pub username_length: i32,
+    pub domain: *mut u8,
+    pub domain_capacity: i32,
+    pub domain_length: i32,
+    pub password: *mut u16,
+    pub password_capacity: i32,
+    pub password_length: i32,
+    pub output_messages: *mut u8,
+    pub output_messages_capacity: i32,
+    pub output_messages_length: i32,
+    pub error_messages: *mut u8,
+    pub error_messages_capacity: i32,
+    pub error_messages_length: i32,
+    pub log_message: *mut u8,
+    pub log_message_capacity: i32,
+    pub log_message_length: i32,
 }
 
 #[repr(C)]
@@ -181,6 +207,7 @@ struct FfiApiV1 {
     power_shell_set_bridge_context_fn: *const libc::c_void,
     observed_diagnostic_page_copy_record_value_fn: *const libc::c_void,
     power_shell_invoke_secret_result_fn: *const libc::c_void,
+    power_shell_invoke_credential_result_fn: *const libc::c_void,
 }
 
 type FnBindingsGetFfiApiV1 = unsafe extern "system" fn() -> *const FfiApiV1;
@@ -213,6 +240,8 @@ type FnFfiPowerShellInvokeSecretResult = unsafe extern "system" fn(
     *mut i32,
     *mut FfiCallResult,
 ) -> i32;
+type FnFfiPowerShellInvokeCredentialResult =
+    unsafe extern "system" fn(PowerShellHandle, *mut FfiCredentialResult, *mut FfiCallResult) -> i32;
 type FnFfiPowerShellBeginLiveInvocation =
     unsafe extern "system" fn(PowerShellHandle, *mut PowerShellHandle, *mut FfiCallResult) -> i32;
 type FnFfiLiveInvocationPoll = unsafe extern "system" fn(PowerShellHandle, *mut i32, *mut FfiCallResult) -> i32;
@@ -516,6 +545,7 @@ pub(crate) struct FfiBindings {
     power_shell_set_broker_context_fn: FnFfiPowerShellSetBrokerContext,
     power_shell_set_bridge_context_fn: FnFfiPowerShellSetBridgeContext,
     power_shell_invoke_secret_result_fn: FnFfiPowerShellInvokeSecretResult,
+    power_shell_invoke_credential_result_fn: FnFfiPowerShellInvokeCredentialResult,
 }
 
 pub struct FfiPayloadRuntimeDiagnostics {
@@ -649,7 +679,6 @@ impl FfiBindings {
         };
 
         let api = unsafe { load_ffi_api_v1(get_api_fn)? };
-
         let fields = [
             api.create_fn,
             api.release_fn,
@@ -738,6 +767,7 @@ impl FfiBindings {
             api.power_shell_set_bridge_context_fn,
             api.observed_diagnostic_page_copy_record_value_fn,
             api.power_shell_invoke_secret_result_fn,
+            api.power_shell_invoke_credential_result_fn,
         ];
         if fields.iter().any(|field| field.is_null()) {
             return Err(Error::IO(std::io::Error::new(
@@ -1066,6 +1096,11 @@ impl FfiBindings {
             power_shell_invoke_secret_result_fn: unsafe {
                 mem::transmute::<*const libc::c_void, FnFfiPowerShellInvokeSecretResult>(
                     api.power_shell_invoke_secret_result_fn,
+                )
+            },
+            power_shell_invoke_credential_result_fn: unsafe {
+                mem::transmute::<*const libc::c_void, FnFfiPowerShellInvokeCredentialResult>(
+                    api.power_shell_invoke_credential_result_fn,
                 )
             },
             power_shell_set_capability_context_fn: unsafe {
@@ -1519,6 +1554,20 @@ impl FfiPowerShell {
             .filter(|length| *length <= secret.len())
             .ok_or_else(|| FfiBindingError::from_status(-6, "managed secret length is invalid".to_owned()))?;
         Ok((user_name_length, secret_length))
+    }
+
+    /// # Safety
+    ///
+    /// Every non-null buffer in `credential_result` must be writable for its
+    /// declared capacity and remain valid for the duration of the call.
+    pub unsafe fn invoke_credential_result(
+        &self,
+        credential_result: &mut FfiCredentialResult,
+    ) -> Result<(), FfiBindingError> {
+        self.call(|handle, result| unsafe {
+            (self.bindings.power_shell_invoke_credential_result_fn)(handle, credential_result, result)
+        })?;
+        Ok(())
     }
 
     pub fn invoke_to_result(&self) -> Result<FfiInvocationResult, FfiBindingError> {

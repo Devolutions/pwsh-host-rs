@@ -774,6 +774,31 @@ The payload clears its secure-string copies when the builder is cleared,
 released, or finishes the dedicated invocation. The public lease zeroes its
 managed character buffer on disposal.
 
+`PowerShellSecret.Length`, `CopyTo(Span<char>)`, and `ToSecureString()` are
+the only public transfer operations. `CopyTo` requires an exactly sized,
+caller-owned buffer which the caller must clear. `ToSecureString()` returns a
+separately owned, read-only `SecureString` which the caller must dispose.
+Neither operation creates a plaintext string getter, and `ToString()` is
+always redacted.
+
+`InvokeCredentialResult()` is the separate credential-resolver sink. For one
+invocation only, the payload injects `$Result` with setter-only `Username`,
+`Domain`, `Password`, `SecurePassword`, `OutputMessages`, `ErrorMessages`,
+`LogMessage`, and `Cancel` properties. `Password` accepts a string only long
+enough to copy it into an internal `SecureString`; `SecurePassword` accepts a
+`SecureString` only. Text and messages have fixed bounds, and the returned
+`PowerShellCredentialResult` contains only copied username/domain/log text,
+bounded output/error messages, cancellation state, and an optional disposable
+redacted `PowerShellSecret` password. Normal pipeline output, error records,
+or unsupported setter shapes reject the invocation rather than becoming a
+generic result.
+
+Sessions created from `InitialSessionState.CreateDefault2()` explicitly add
+only `Microsoft.PowerShell.Commands.ConvertToSecureStringCommand` for this
+sink, so `$Result.SecurePassword = ConvertTo-SecureString ... -AsPlainText
+-Force` is supported without importing a module. No other module or
+application-specific command surface is added.
+
 This limits accidental FFI, logging, and DTO disclosure. It does **not** make
 an arbitrary script, module, or remoting endpoint trustworthy: any code that
 receives a credential can deliberately emit or retain it. General strings are

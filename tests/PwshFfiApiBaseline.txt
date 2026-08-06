@@ -1193,3 +1193,19 @@ facade:type:Devolutions.PowerShell.Ffi.PowerShellSecret
 facade:type:Devolutions.PowerShell.Ffi.PowerShellSecretResult
 facade:type:Devolutions.PowerShell.Ffi.PowerShellSecretResultKind
 native:multi_pwsh_invoke_secret_result
+bindings:FfiPowerShell_InvokeCredentialResult
+facade:method:Devolutions.PowerShell.Ffi.PowerShell::Devolutions.PowerShell.Ffi.PowerShellCredentialResult InvokeCredentialResult()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::System.String ToString()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::Void Dispose()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSecret::System.Security.SecureString ToSecureString()
+facade:method:Devolutions.PowerShell.Ffi.PowerShellSecret::Void CopyTo(System.Span`1[System.Char])
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::Boolean IsCancelled
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::Devolutions.PowerShell.Ffi.PowerShellSecret Password
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::System.Collections.Generic.IReadOnlyList`1[System.String] ErrorMessages
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::System.Collections.Generic.IReadOnlyList`1[System.String] OutputMessages
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::System.String Domain
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::System.String LogMessage
+facade:property:Devolutions.PowerShell.Ffi.PowerShellCredentialResult::System.String Username
+facade:property:Devolutions.PowerShell.Ffi.PowerShellSecret::Int32 Length
+facade:type:Devolutions.PowerShell.Ffi.PowerShellCredentialResult
+native:multi_pwsh_invoke_credential_result
